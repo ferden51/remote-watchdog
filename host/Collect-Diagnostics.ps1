@@ -168,13 +168,25 @@ $vpns = @(Get-VpnConnection -AllUserConnection -ErrorAction SilentlyContinue) + 
 if ($vpns.Count -gt 0) { $vpns | ForEach-Object { Add-Line ('- VPN: ' + $_.Name + ' | sunucu=' + $_.ServerAddress + ' | tur=' + $_.TunnelType) }; Add-Suspect 'VPN yapilandirmasi var; VPN up/down olaylari CRD baglantisini dusurebilir' 'dusuk' }
 $tap = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -match '(?i)tap|tunnel|vpn|virtual' }
 if ($tap) { Add-Suspect ('Sanal/VPN adaptoru var: ' + (($tap | ForEach-Object { $_.Name }) -join ', ')) 'dusuk' }
-$wlan = Get-Events -Log 'Microsoft-Windows-WLAN-AutoConfig/Operational' -Max 400
-$disconnects = @($wlan | Where-Object { $_.Id -in 8001, 8003, 11004, 11005, 10049 })
-Add-Line ('- WLAN olaylari (son ' + $Days + ' gun): ' + @($wlan).Count + ' | disconnect/resort sayisi ~ ' + $disconnects.Count)
-if ($disconnects.Count -gt 3) { Add-Suspect ('Wi-Fi ' + $disconnects.Count + ' kez baglantiyi koptu/degistirdi -> CRD oturumu duser') 'yuksek' }
+$wlan = Get-Events -Log 'Microsoft-Windows-WLAN-AutoConfig/Operational' -Max 800
+$wlanDisc = @($wlan | Where-Object { $_.Id -eq 8003 } | Sort-Object TimeCreated)
+$wlanConn = @($wlan | Where-Object { $_.Id -eq 8001 } | Sort-Object TimeCreated)
+$gaps = @()
+foreach ($d in $wlanDisc) {
+    $c = $wlanConn | Where-Object { $_.TimeCreated -gt $d.TimeCreated } | Select-Object -First 1
+    if ($c) { $gaps += ($c.TimeCreated - $d.TimeCreated).TotalMinutes }
+}
+Add-Line ('- WLAN kopma (ID 8003): ' + $wlanDisc.Count + ' kez | baglanma (ID 8001): ' + $wlanConn.Count + ' kez')
+if ($gaps.Count -gt 0) {
+    $maxGap = [math]::Round((($gaps | Measure-Object -Maximum).Maximum), 1)
+    $avgGap = [math]::Round((($gaps | Measure-Object -Average).Average), 1)
+    Add-Line ('- Kopma sonrasi yeniden baglanma suresi: en uzun ' + $maxGap + ' dk, ortalama ' + $avgGap + ' dk')
+    if ($maxGap -gt 30) { Add-Suspect ('Wi-Fi en uzun ' + $maxGap + ' dk kapali kalmis -> yonlendirici bos istemcileri dusuruyor olabilir (DHCP lease) veya adaptor uykuya giriyor') 'yuksek' }
+    if ($wlanDisc.Count -gt 20) { Add-Suspect ('Wi-Fi 14 günde ' + $wlanDisc.Count + ' kez koptu; CRD her kopmada oturumu dusurur, adaptor guc modu ve yonlendirici DHCP suresi gozden gecirilmeli') 'orta' }
+}
 $ndr = Get-Events -Log 'System' -Ids @(27, 32, 10400, 10401, 4201, 4202) -Max 40
 if ($ndr.Count -gt 0) { Add-Suspect ('Ag adaptoru/link olayi: ' + $ndr.Count + ' adet') 'orta' }
-Event-Lines ($wlan | Where-Object { $_.Id -in 8001, 8003 } | Select-Object -First 15)
+Event-Lines ($wlanDisc | Select-Object -Last 12 | Sort-Object TimeCreated -Descending)
 
 Add-Section '5. Guc, uyku ve beklenmeyen kapanmalar'
 $standby = Get-AcIndexSeconds -AliasPath @('SUB_SLEEP', 'STANDBYIDLE')
@@ -205,16 +217,25 @@ Add-Line ('- Son uyandirma: ' + ((($lastWake -split "`r?`n") | Where-Object { $_
 $sleep7 = @(Get-Events -Log 'System' -Ids @(42) -Max 500 | Where-Object { $_.TimeCreated -gt (Get-Date).AddDays(-7) })
 $wake7 = @(Get-Events -Log 'System' -Ids @(107) -Max 500 | Where-Object { $_.TimeCreated -gt (Get-Date).AddDays(-7) })
 $sleep24 = @($sleep7 | Where-Object { $_.TimeCreated -gt (Get-Date).AddDays(-1) })
-Add-Line ('- Uykuya giriş (ID 42): son 7 gun ' + $sleep7.Count + ' kez, son 24 saat ' + $sleep24.Count + ' kez | uyanma (ID 107): ' + $wake7.Count + ' kez')
+Add-Line ('- S0/uyku girisi (ID 42): son 7 gun ' + $sleep7.Count + ' kez, son 24 saat ' + $sleep24.Count + ' kez | uyanma (ID 107): ' + $wake7.Count + ' kez')
+$modernStandby = ([string]$sleepStates -match 'S0 Low Power Idle')
 $longSleep = 0
+$unpaired = 0
 $wakeTimes = @($wake7 | Sort-Object TimeCreated)
 $sleepTimes = @($sleep7 | Sort-Object TimeCreated)
 foreach ($s in $sleepTimes) {
     $w = $wakeTimes | Where-Object { $_.TimeCreated -gt $s.TimeCreated } | Select-Object -First 1
-    if ($w) { $h = ($w.TimeCreated - $s.TimeCreated).TotalHours; if ($h -gt $longSleep) { $longSleep = $h } }
+    if ($w) { $h = ($w.TimeCreated - $s.TimeCreated).TotalHours; if ($h -gt $longSleep) { $longSleep = $h } } else { $unpaired++ }
 }
-if ($longSleep -gt 0) { Add-Line ('- En uzun tespit edilen uyku suresi: ~' + [math]::Round($longSleep, 1) + ' saat'); Add-Suspect ('Makine ' + [math]::Round($longSleep, 1) + ' saat uyuyor -> uzak masaustu oturumlari ve CRD baglantisi o sure boyunca oluyor') 'kritik' }
-if ($sleep7.Count -ge 2) { Add-Suspect ('7 günde ' + $sleep7.Count + ' kez uykuya giris -> "bir sure sonra baglanti koptu" sikayetinin birincil nedeni olabilir') 'kritik' }
+if ($modernStandby) { Add-Line ('- Modern Standby (S0 Low Power Idle) destekleniyor: "ID 42" olaylari cogunlukla saniyeler icinde geri donuslu gecislerdir, gercek uyku degildir.') }
+if ($unpaired -gt 0) { Add-Suspect ($unpaired + ' uyku girisi uyanma olayi olmadan sonlanmis -> makine hala uyuyor ya da uyanmadan kapandi') 'kritik' }
+if ($longSleep -gt 1) {
+    Add-Line ('- En uzun gercek uyku suresi: ~' + [math]::Round($longSleep, 1) + ' saat')
+    Add-Suspect ('Makine ' + [math]::Round($longSleep, 1) + ' saat uyuyor -> uzak masaustu oturumlari ve CRD baglantisi o sure boyunca oluyor') 'kritik'
+} else {
+    Add-Line ('- En uzun olcumlenen uyku suresi: ' + [math]::Round($longSleep * 60, 0) + ' saniye (uzun sureli uyku YOK)')
+}
+if ($sleep7.Count -ge 2) { Add-Line ('- Not: ' + $sleep7.Count + ' S0 gecisi 7 gunde; bunlar baglantiyi kesmiyorsa sorun degildir. Kesiyorsa yonlendirici/Wi-Fi tarafina bak.') }
 $wifiPower = Get-AcIndexSeconds -AliasPath @('19cbb8fa-5279-450e-9fac-8a3d5fedd0c1', '12bbebe6-58d6-4636-95bb-3217ef867c1a')
 Add-Line ('- Kablosuz adaptor guc modu: ' + $(if ($null -eq $wifiPower) { 'okunamadi' } elseif ($wifiPower -eq 0) { '0 = en yuksek performans' } else { [string]$wifiPower + ' (dusuk guc modu aktif olabilir)' }))
 if ($null -ne $wifiPower -and $wifiPower -ne 0) { Add-Suspect 'Wi-Fi dusuk guc modunda -> adaptor uykuya girer, baglanti duser' 'orta' }
