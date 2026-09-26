@@ -94,6 +94,8 @@ function Get-Config {
         CrdRestartAfterHours = 0
         CrdSignalPorts = @(443, 5222, 5223, 19302, 19303, 8443, 4433)
         CrdNoConnRestartCycles = 3
+        PanelRepair = $true
+        PanelScriptName = 'RemoteWatchdogPanel.ps1'
         TunnelRepair = $false
         TunnelName = 'uzak-pc'
         HeartbeatUrl = ''
@@ -332,6 +334,44 @@ function Test-NetworkLayer {
     }
     Save-State $state
     Add-Result 'Ag katmani' $ok $detail ($repair -join '; ') $false $metrics
+}
+
+function Get-PanelProcesses {
+    $name = [string]$global:cfg.PanelScriptName
+    if (-not $name) { $name = 'RemoteWatchdogPanel.ps1' }
+    return @(Get-CimInstance -ClassName Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.CommandLine -like ('*' + $name + '*') })
+}
+
+function Test-Panel {
+    $cfg = $global:cfg
+    $procs = Get-PanelProcesses
+    $task = Get-ScheduledTask -TaskName 'RemoteHostPanel' -ErrorAction SilentlyContinue
+    $ok = ($procs.Count -gt 0)
+    $repair = @()
+    $m = [ordered]@{ procCount = $procs.Count; taskInstalled = [bool]$task; taskState = $(if ($task) { [string]$task.State } else { 'yok' }) }
+    if (-not $ok) {
+        if ($cfg.PanelRepair -and -not $Check) {
+            if ($task) {
+                try { Start-ScheduledTask -TaskName 'RemoteHostPanel' -ErrorAction Stop; $repair += 'panel gorevi tetiklendi (yeniden baslayacak)' } catch { $repair += 'panel gorevi calistirilamadi: ' + $_.Exception.Message }
+            } else {
+                $panelScript = $null
+                try { $panelScript = Join-Path (Split-Path -Parent $ScriptPath) '..\ui\RemoteWatchdogPanel.ps1' } catch { }
+                if ($panelScript -and (Test-Path -LiteralPath $panelScript)) {
+                    $u = $env:USERNAME
+                    try {
+                        $pa = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Resolve-Path $panelScript).Path + '"')
+                        $pp = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited
+                        $ps = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
+                        Register-ScheduledTask -TaskName 'RemoteHostPanel' -Action $pa -Principal $pp -Settings $ps -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 3)) -Force | Out-Null
+                        Start-ScheduledTask -TaskName 'RemoteHostPanel'
+                        $repair += 'panel gorevi olusturuldu ve calistirildi'
+                    } catch { $repair += 'panel baslatilamadi (kullanici oturumu gerekli): ' + $_.Exception.Message }
+                } else { $repair += 'panel betigi bulunamadi' }
+            }
+        } else { $repair += 'panel calismiyor' }
+    }
+    Add-Result 'Kontrol paneli' $ok ('surec=' + $procs.Count + ', gorev=' + $m.taskState) ($repair -join '; ') $true $m
 }
 
 function Test-CrdService {
@@ -886,6 +926,7 @@ function Invoke-Watchdog {
     Test-NetworkLayer
     Test-CrdService
     Test-Rdp
+    Test-Panel
     Test-ServerPower
     Test-Tunnel
     Test-ServiceRecovery

@@ -91,10 +91,17 @@ function Get-Json {
 function Get-HostConfig {
     $cfg = [ordered]@{
         IntervalMinutes = 5; RestartPolicy = 'blackout'; BlackoutEnabled = $true; BlackoutStart = 18; BlackoutEnd = 8
-        BlackoutFullDays = @('Cmt', 'Paz'); HolidayMode = 'full'; RebootAfterFailedCycles = 3; RebootDelaySeconds = 60
-        MinUptimeMinutes = 30; ServerMode = $true; DisableFastStartup = $true; OfficeSaveBeforeReboot = $true
-        OfficeAbortRebootIfUnsaved = $true; ForceRestartAlways = $false; ForceRestartUntil = ''
-        TelegramToken = ''; TelegramChatId = ''; HeartbeatUrl = ''; AlertRepeatHours = 12; NetMaxRepairRung = 4
+        BlackoutFullDays = @('Cmt', 'Paz'); BlackoutNights = @('Pzt', 'Sal', 'Car', 'Per', 'Cum', 'Cmt', 'Paz')
+        HolidayMode = 'full'; Holidays = @(); HolidaysFile = ''
+        RebootAfterFailedCycles = 3; RebootDelaySeconds = 60; MinUptimeMinutes = 30; RebootSkipIfUnregistered = $true
+        ForceRestartAlways = $false; ForceRestartUntil = ''
+        FixNetwork = $true; NetMaxRepairRung = 4; FixRdp = $true; FixCrd = $true; FixClock = $true
+        CrdNoConnRestartCycles = 3; CrdRestartAfterHours = 0; CrdSignalPorts = @(443, 5222, 5223, 19302, 19303, 8443, 4433)
+        ServiceAutoStart = $true; ServiceCrashRecovery = $true
+        TunnelRepair = $false; TunnelName = 'uzak-pc'
+        ServerMode = $true; DisableFastStartup = $true; OfficeSaveBeforeReboot = $true
+        OfficeSaveTimeoutSeconds = 120; OfficeAbortRebootIfStillOpen = $true; OfficeAbortRebootIfUnsaved = $true
+        TelegramToken = ''; TelegramChatId = ''; HeartbeatUrl = ''; AlertRepeatHours = 12; NotifyRepeatHours = 4
     }
     if (Test-Path -LiteralPath $HostConfig) {
         try {
@@ -120,11 +127,16 @@ function Save-HostConfig {
 }
 
 function Invoke-Script {
-    param([string]$Path, [string[]]$ScriptArgs = @(), [switch]$Wait)
+    param([string]$Path, [string[]]$ScriptArgs = @(), [switch]$Wait, [switch]$WindowStyle)
     if (-not (Test-Path -LiteralPath $Path)) { [System.Windows.MessageBox]::Show('Dosya bulunamadi: ' + $Path) | Out-Null; return }
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $Path + '"')) + $ScriptArgs
     if ($Wait) { return (Start-Process -FilePath 'powershell.exe' -ArgumentList $a -Wait -PassThru -WindowStyle Hidden).ExitCode }
-    Start-Process -FilePath 'powershell.exe' -ArgumentList $a -WindowStyle Hidden | Out-Null
+    if ($WindowStyle) {
+        $a = @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $Path + '"')) + $ScriptArgs
+        Start-Process -FilePath 'powershell.exe' -ArgumentList $a -WindowStyle Normal | Out-Null
+    } else {
+        Start-Process -FilePath 'powershell.exe' -ArgumentList $a -WindowStyle Hidden | Out-Null
+    }
 }
 
 function Get-StatusInfo {
@@ -515,7 +527,7 @@ $Xaml = @'
           <StackPanel>
             <TextBlock Text="Ayarlar" Style="{StaticResource H1}" Margin="0,0,0,4"/>
             <TextBlock Text="Kaydettiginizde config.json guncellenir; bir sonraki denetimde gecerli olur." Style="{StaticResource Small}" Margin="0,0,0,16"/>
-            <ItemsControl x:Name="SettingsHost"/>
+            <StackPanel x:Name="SettingsPanel"/>
             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
               <Button x:Name="BtnSave" Content="Ayarlari kaydet" Style="{StaticResource BtnAccent}" Margin="0,0,10,0"/>
               <Button x:Name="BtnReload" Content="Formu yenile" Style="{StaticResource Btn}"/>
@@ -680,6 +692,12 @@ function Get-Connections {
         Add-Conn 'Disi heartbeat' 'healthchecks.io ping' 'ok' 'TANIMLI' ([string]$cfg.HeartbeatUrl) 'log' 'Loglari ac'
     } else {
         Add-Conn 'Disi heartbeat' 'healthchecks.io ping' 'none' 'KAPALI' 'alarm kurulmamis' 'settings' 'Ayarlar'
+    }
+
+    $cfg = Get-HostConfig
+    $panelChk = $byName['Kontrol paneli']
+    if ($panelChk) {
+        Add-Conn 'Kontrol paneli' 'panel sureci (restart sonrasi oturumda)' $(if ($panelChk.ok) { 'ok' } else { 'warn' }) $(if ($panelChk.ok) { 'CALISIYOR' } else { 'KAPALI' }) ([string]$panelChk.detail) 'panelstart' 'Paneli baslat'
     }
 
     if ($cj) {
@@ -884,6 +902,10 @@ $script:Defs = @(
     @{ Sec = 'Istemci'; Key = 'TelegramChatId'; Title = 'Telegram chat id (istemci)'; Type = 'text'; Target = 'client' }
     @{ Sec = 'Istemci'; Key = 'HeartbeatUrl'; Title = 'Healthchecks ping adresi (istemci)'; Type = 'text'; Target = 'client' }
 
+    @{ Sec = 'PANEL'; Type = 'section' }
+    @{ Sec = 'Panel'; Key = 'PanelRepair'; Title = 'Panel kapanirsa watchdog yeniden baslatsin'; Type = 'bool' }
+    @{ Sec = 'Panel'; Key = 'PanelScriptName'; Title = 'Panel betigi dosya adi'; Type = 'text' }
+
     @{ Sec = 'ISLEMLER'; Type = 'section' }
     @{ Sec = 'Islem'; Type = 'actions' }
 )
@@ -908,45 +930,143 @@ function Write-ConfigFile {
     $obj | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
+function Get-ClientDefaults {
+    return [ordered]@{
+        Targets = @(); RdpFile = ''; BrowserUrl = 'https://remotedesktop.google.com'
+        LaunchOnRecover = $true; KeepAliveMinutes = 0
+        TelegramToken = ''; TelegramChatId = ''; HeartbeatUrl = ''; AlertRepeatHours = 3
+    }
+}
+
 function Get-CurrentValues {
     $host_ = Read-ConfigFile $HostConfig
     $client_ = Read-ConfigFile $ClientConfig
+    $hDefaults = Get-HostConfig
+    $cDefaults = Get-ClientDefaults
     $out = [ordered]@{}
     foreach ($d in $script:Defs) {
         if (-not $d.Key) { continue }
-        $src = $(if ($d.Target -eq 'client') { $client_ } else { $host_ })
-        $def = $script:Defs | Where-Object { $_.Key -eq $d.Key -and $_.Type -ne 'section' } | Select-Object -First 1
+        $isClient = ($d.Target -eq 'client')
+        $src = $(if ($isClient) { $client_ } else { $host_ })
         $v = $null
-        if ($src.Contains($d.Key)) { $v = $src[$d.Key] } else { $v = (Get-HostConfigDefaults) }
-        if ($def -and $def.Type -eq 'bool' -and $null -eq $v) { $v = $false }
-        $out[$d.Key + $(if ($d.Target -eq 'client') { '|client' } else { '' })] = $v
+        if ($src.Contains($d.Key)) { $v = $src[$d.Key] }
+        elseif ($isClient) { $v = $cDefaults[$d.Key] }
+        else { $v = $hDefaults[$d.Key] }
+        if ($null -eq $v) { $v = '' }
+        $out[$d.Key + $(if ($isClient) { '|client' } else { '' })] = $v
     }
     return $out
 }
 
-function Get-HostConfigDefaults {
-    $c = Get-HostConfig
-    return $c
+function ConvertTo-DayNames {
+    param($Val)
+    $map = @{ 0 = 'Paz'; 1 = 'Pzt'; 2 = 'Sal'; 3 = 'Car'; 4 = 'Per'; 5 = 'Cum'; 6 = 'Cmt' }
+    $out = @()
+    foreach ($v in @($Val)) {
+        if ($null -eq $v) { continue }
+        $t = ([string]$v).Trim()
+        if ($t -eq '') { continue }
+        if ($t -match '^\d+$') { $out += $map[[int]$t] } else { $out += $t }
+    }
+    return @($out)
+}
+
+function New-Segmented {
+    param([string[]]$Options, [string]$Selected, [string]$Key)
+    if (-not $script:EnumSelect) { $script:EnumSelect = @{} }
+    $script:EnumSelect[$Key] = $Selected
+    $p = New-Object System.Windows.Controls.StackPanel
+    $p.Orientation = 'Horizontal'
+    $buttons = New-Object System.Collections.ArrayList
+    foreach ($o in $Options) {
+        $b = New-Object System.Windows.Controls.Button
+        $b.Content = [string]$o
+        $b.Margin = New-Object System.Windows.Thickness(0, 0, 6, 0)
+        $b.Padding = New-Object System.Windows.Thickness(14, 6, 14, 6)
+        $b.Cursor = [System.Windows.Input.Cursors]::Hand
+        $b.FontSize = 12
+        $style = $script:Win.TryFindResource('Btn')
+        if ($style) { $b.Style = $style }
+        $opt = [string]$o
+        $kk = [string]$Key
+        $b.add_MouseLeftButtonDown({
+                param($s, $e)
+                $script:EnumSelect[$kk] = $opt
+                $grp = $s.Source.Parent
+                foreach ($x in @($grp.Children)) {
+                    if (-not ($x -is [System.Windows.Controls.Button])) { continue }
+                    if ([string]$x.Content -eq $opt) {
+                        $x.Background = Bx 'Accent'
+                        $x.Foreground = Bx '#0B1220'
+                        $x.BorderBrush = Bx 'Accent'
+                    } else {
+                        $x.Background = Bx 'Card2'
+                        $x.Foreground = Bx 'Muted'
+                        $x.BorderBrush = Bx 'Line'
+                    }
+                }
+            }.GetNewClosure())
+        [void]$buttons.Add($b)
+        [void]$p.Children.Add($b)
+    }
+    foreach ($b in $buttons) {
+        if ([string]$b.Content -eq [string]$Selected) {
+            $b.Background = Bx 'Accent'
+            $b.Foreground = Bx '#0B1220'
+            $b.BorderBrush = Bx 'Accent'
+        } else {
+            $b.Background = Bx 'Card2'
+            $b.Foreground = Bx 'Muted'
+            $b.BorderBrush = Bx 'Line'
+        }
+    }
+    $p.ToolTip = 'enum|' + $Key
+    return $p
+}
+
+function New-SettingRow {
+    param([string]$Title, $Control)
+    $dp = New-Object System.Windows.Controls.DockPanel
+    $dp.Margin = New-Object System.Windows.Thickness(0, 0, 0, 11)
+    $dp.LastChildFill = $true
+    $lbl = New-Object System.Windows.Controls.TextBlock
+    $lbl.Text = $Title
+    $lbl.Foreground = Bx 'Text'
+    $lbl.FontSize = 12.5
+    $lbl.VerticalAlignment = 'Center'
+    $lbl.TextWrapping = 'Wrap'
+    $lbl.Width = 250
+    $lbl.Margin = New-Object System.Windows.Thickness(0, 0, 14, 0)
+    [void]$dp.Children.Add($lbl)
+    $Control.VerticalAlignment = 'Center'
+    [void]$dp.Children.Add($Control)
+    return $dp
 }
 
 function Build-Settings {
     $cur = Get-CurrentValues
-    $rows = New-Object System.Collections.ArrayList
-    $lastSec = ''
+    $panel = El $script:Win 'SettingsPanel'
+    $panel.Children.Clear()
+    $first = $true
     foreach ($d in $script:Defs) {
         if ($d.Type -eq 'section') {
             $hdr = New-Object System.Windows.Controls.TextBlock
             $hdr.Text = [string]$d.Sec
-            $hdr.Foreground = Bx 'Acc'
+            $hdr.Foreground = Bx 'Accent'
             $hdr.FontSize = 11
             $hdr.FontWeight = 'SemiBold'
-            $hdr.Margin = New-Object System.Windows.Thickness(0, $(if ($lastSec) { 18 } else { 0 }), 0, 10)
-            [void]$rows.Add([pscustomobject]@{ Title = ''; Control = $hdr })
-            $lastSec = [string]$d.Sec
+            $hdr.Margin = New-Object System.Windows.Thickness(0, $(if ($first) { 0 } else { 20 }), 0, 10)
+            [void]$panel.Children.Add($hdr)
+            $first = $false
             continue
         }
         if ($d.Type -eq 'actions') {
-            [void]$rows.Add([pscustomobject]@{ Title = ''; Control = (New-ActionBar) })
+            $wrap = New-Object System.Windows.Controls.Border
+            $style = $script:Win.TryFindResource('CardStyle')
+            if ($style) { $wrap.Style = $style }
+            Add-ActionBar -Container $wrap
+            $wrap.Margin = New-Object System.Windows.Thickness(0, 8, 0, 0)
+            [void]$panel.Children.Add($wrap)
             continue
         }
         $ck = [string]$d.Key + $(if ($d.Target -eq 'client') { '|client' } else { '' })
@@ -954,7 +1074,7 @@ function Build-Settings {
         $ctrl = $null
         switch ($d.Type) {
             'bool' { $ctrl = New-Toggle -On ([bool]$val); $ctrl.ToolTip = $ck }
-            'enum' { $ctrl = New-Combo -Items $d.Options -Selected ([string]$val); $ctrl.ToolTip = $ck }
+            'enum' { $ctrl = New-Segmented -Options $d.Options -Selected ([string]$val) -Key $ck }
             'int' { $ctrl = New-TextBox -Width 130; $ctrl.Text = [string]$val; $ctrl.ToolTip = $ck }
             'text' { $ctrl = New-TextBox -Width 300; $ctrl.Text = [string]$val; $ctrl.ToolTip = $ck }
             'datetime' {
@@ -969,8 +1089,9 @@ function Build-Settings {
             'days' {
                 $p = New-Object System.Windows.Controls.StackPanel
                 $p.Orientation = 'Horizontal'
+                $names = ConvertTo-DayNames $val
                 foreach ($day in @('Pzt', 'Sal', 'Car', 'Per', 'Cum', 'Cmt', 'Paz')) {
-                    $on = @($val) -contains $day
+                    $on = $names -contains $day
                     $t = New-Toggle -Label $day -On $on
                     $t.Width = 50
                     $t.Margin = New-Object System.Windows.Thickness(0, 0, 6, 0)
@@ -980,14 +1101,12 @@ function Build-Settings {
                 $ctrl = $p
             }
         }
-        [void]$rows.Add([pscustomobject]@{ Title = [string]$d.Title; Control = $ctrl })
+        [void]$panel.Children.Add((New-SettingRow -Title ([string]$d.Title) -Control $ctrl))
     }
-    $settingsHost = El $script:Win 'SettingsHost'
-    $settingsHost.ItemsSource = $rows
-    $settingsHost.ItemTemplate = $script:Win.Resources['SettingRow']
 }
 
-function New-ActionBar {
+function Add-ActionBar {
+    param($Container)
     $p = New-Object System.Windows.Controls.StackPanel
     $p.Orientation = 'Vertical'
     $r1 = New-Object System.Windows.Controls.StackPanel
@@ -1029,7 +1148,7 @@ function New-ActionBar {
             if (-not $btn) { return }
             Invoke-SettingsAction ([string]$btn.Tag)
         })
-    return $p
+    $Container.Child = $p
 }
 
 function Invoke-SettingsAction {
@@ -1078,6 +1197,14 @@ function Save-Settings {
     foreach ($ctrl in (Find-AllControls $script:Win)) {
         $key = $ctrl.ToolTip
         if ($key -isnot [string] -or $key -eq '') { continue }
+        if ($key.StartsWith('enum|')) {
+            $ek = $key.Substring(5)
+            if ($script:EnumSelect -and $script:EnumSelect.ContainsKey($ek)) {
+                if ($ek.EndsWith('|client')) { $clientVals[$ek.Substring(0, $ek.Length - 7)] = [string]$script:EnumSelect[$ek] }
+                else { $hostVals[$ek] = [string]$script:EnumSelect[$ek] }
+            }
+            continue
+        }
         if ($key.StartsWith('days|')) {
             $parts = $key.Split('|')
             if ($parts.Count -ge 3) {
@@ -1158,35 +1285,95 @@ function Refresh-Icon {
 }
 
 function Show-Balloon {
-    param([string]$Title, [string]$Text, [System.Windows.Forms.ToolTipIcon]$Icon = 'Info')
+    param([string]$Title, [string]$Text, [System.Windows.Forms.ToolTipIcon]$Icon = 'Info', [switch]$Force)
+    if (($script:Silent -and -not $Force) -or $NoBalloon) { return }
     try {
         $script:Icon.BalloonTipTitle = $Title
         $script:Icon.BalloonTipText = $Text
         $script:Icon.BalloonTipIcon = $Icon
         $script:Icon.ShowBalloonTip(7000)
-    } catch { }
+    } catch { Write-Trace ('balloon gosterilemedi: ' + $_.Exception.Message) }
+}
+
+function Set-SilentMode {
+    param([switch]$Toggle, [switch]$On, [switch]$Off, [switch]$NoPersist)
+    if ($Toggle) { $script:Silent = -not $script:Silent }
+    elseif ($On) { $script:Silent = $true }
+    elseif ($Off) { $script:Silent = $false }
+    $flag = $(if ($script:Silent) { '1' } else { '0' })
+    if (-not $NoPersist) {
+        try {
+            New-ItemProperty -Path $RunKey -Name ($RunName + 'Silent') -Value $flag -PropertyType String -Force -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Trace ('sessiz mod yazilamadi: ' + $_.Exception.Message)
+            [System.Windows.MessageBox]::Show('Sessiz mod ayari kaydedilemedi: ' + $_.Exception.Message, 'RemoteWatchdog') | Out-Null
+        }
+    }
+    if ($script:TrayItems) {
+        $found = $false
+        foreach ($it in $script:TrayItems) { if ($it.Text -eq 'Sessiz mod') { $it.Checked = $script:Silent; $found = $true } }
+        if (-not $found) { Write-Trace 'sessiz mod menusu bulunamadi' }
+    }
+    Show-Balloon -Title 'Sessiz mod' -Text ('Bildirimler ' + $(if ($script:Silent) { 'KAPATILDI' } else { 'ACILDI' })) -Icon 'Info' -Force
+    return $script:Silent
+}
+
+function Invoke-TrayAction {
+    param([string]$Key)
+    switch ($Key) {
+        'panel' { $script:Win.Show(); $script:Win.Activate(); Show-Page 'conn'; Update-Connections }
+        'panelstart' {
+            Invoke-Script -Path $ScriptPath -WindowStyle Normal
+            Start-Sleep 3
+            Update-Connections
+        }
+        'toggle' { if ($script:Win.IsVisible) { $script:Win.Hide() } else { $script:Win.Show(); $script:Win.Activate() } }
+        'check' { Invoke-Script -Path $HostScript; Invoke-Script -Path $ClientScript; Start-Sleep 4; Update-Connections; Update-Overview; Show-Page 'conn' }
+        'silent' { Set-SilentMode -Toggle | Out-Null }
+        'log' {
+            $d = Split-Path -Parent $HostLog
+            if (Test-Path $d) { Start-Process explorer.exe ('"' + $d + '"') } else { [System.Windows.MessageBox]::Show('Log klasoru yok: ' + $d, 'RemoteWatchdog') | Out-Null }
+        }
+        'web' { Start-Process 'https://remotedesktop.google.com' }
+        'install' { Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null }
+        'diag' { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaustune yazildi.', 'RemoteWatchdog') | Out-Null }
+        'quit' {
+            $r = [System.Windows.MessageBox]::Show('Panel kapatilsin mi? Zamanlanmis watchdog gorevi calismaya devam eder.', 'RemoteWatchdog', 'YesNo', 'Question')
+            if ($r -eq 'Yes') { $script:ExitRequested = $true; $script:Win.Close(); $script:Icon.Visible = $false; $script:Icon.Dispose() }
+        }
+        default { Write-Trace ('bilinmeyen tepsi islemi: ' + $Key) }
+    }
 }
 
 function New-TrayIcon {
     $ctx = New-Object System.Windows.Forms.ContextMenuStrip
-    $i1 = $ctx.Items.Add('Kontrol panelini ac'); $i1.Add_Click({ $script:Win.Show(); $script:Win.Activate() })
-    $i2 = $ctx.Items.Add('Simdi denetle'); $i2.Add_Click({ Invoke-Script -Path $HostScript; Invoke-Script -Path $ClientScript })
-    [void]$ctx.Items.Add('-')
-    $i3 = $ctx.Items.Add('Sessiz mod'); $i3.Add_Click({
-            $script:Silent = -not $script:Silent
-            New-ItemProperty -Path $RunKey -Name ($RunName + 'Silent') -Value ([int]$script:Silent) -PropertyType String -Force | Out-Null
-            $i3.Checked = $script:Silent
-        })
-    $i3.Checked = $script:Silent
-    $i4 = $ctx.Items.Add('Log klasorunu ac'); $i4.Add_Click({ $d = Split-Path -Parent $HostLog; if (Test-Path $d) { Start-Process explorer.exe ('"' + $d + '"') } })
-    $i5 = $ctx.Items.Add('Google Remote Desktop'); $i5.Add_Click({ Start-Process 'https://remotedesktop.google.com' })
-    [void]$ctx.Items.Add('-')
-    $i6 = $ctx.Items.Add('Cikis'); $i6.Add_Click({ $script:ExitRequested = $true; $script:Win.Close(); $script:Icon.Visible = $false; $script:Icon.Dispose() })
+    $items = @(
+        @{ t = 'Kontrol panelini ac'; k = 'panel' }
+        @{ t = 'Simdi denetle'; k = 'check' }
+        @{ t = '-'; k = '' }
+        @{ t = 'Sessiz mod'; k = 'silent' }
+        @{ t = 'Paneli ac / gizle'; k = 'toggle' }
+        @{ t = 'Log klasorunu ac'; k = 'log' }
+        @{ t = 'Google Remote Desktop'; k = 'web' }
+        @{ t = '-'; k = '' }
+        @{ t = 'Watchdog kur'; k = 'install' }
+        @{ t = 'Tehis raporu uret'; k = 'diag' }
+        @{ t = '-'; k = '' }
+        @{ t = 'Cikis'; k = 'quit' }
+    )
+    foreach ($spec in $items) {
+        $mi = $ctx.Items.Add([string]$spec.t)
+        if ($spec.k) {
+            $key = [string]$spec.k
+            $mi.add_Click({ Invoke-TrayAction $key }.GetNewClosure())
+        }
+    }
     $script:Icon = New-Object System.Windows.Forms.NotifyIcon
     $script:Icon.ContextMenuStrip = $ctx
     $script:Icon.Visible = $true
     Refresh-Icon
-    $script:Icon.add_MouseDoubleClick({ $script:Win.Show(); $script:Win.Activate() })
+    $script:Icon.add_MouseDoubleClick({ Invoke-TrayAction 'panel' })
+    $script:TrayItems = $ctx.Items
 }
 
 function Wire-UI {
@@ -1282,7 +1469,21 @@ if ($SelfTest) {
     $enc.Save($fs)
     $fs.Close()
     Write-Host ('Onizleme yazildi: ' + $PreviewPath)
-    Write-Host ('Baglanti satiri: ' + (El $w 'ConnList').Items.Count + ' | kart: ' + (El $w 'Cards').Items.Count + ' | bekleyen is: ' + (El $w 'ActionList').Items.Count + ' | ayar satiri: ' + (El $w 'SettingsHost').Items.Count)
+    Write-Host ('Baglanti satiri: ' + (El $w 'ConnList').Items.Count + ' | kart: ' + (El $w 'Cards').Items.Count + ' | bekleyen is: ' + (El $w 'ActionList').Items.Count + ' | ayar satiri: ' + (El $w 'SettingsPanel').Children.Count)
+    $menuCount = 0
+    if ($script:TrayItems) { $menuCount = $script:TrayItems.Count }
+    Write-Host ('Tepsi menusu ogeleri: ' + $menuCount)
+    $before = $script:Silent
+    $silentItem = $null
+    if ($script:TrayItems) { $silentItem = @($script:TrayItems | Where-Object { $_.Text -eq 'Sessiz mod' })[0] }
+    if ($silentItem) {
+        try {
+            $silentItem.PerformClick()
+            $after = $script:Silent
+            Write-Host ('Sessiz mod testi: ' + $before + ' -> ' + $after + ' | isaretli=' + $silentItem.Checked + ' | registry=' + ((Get-ItemProperty -Path $RunKey -Name ($RunName + 'Silent') -ErrorAction SilentlyContinue).($RunName + 'Silent')))
+            if ($after -eq $before) { Write-Host 'SELFTEST UYARI: sessiz mod degismedi!' -ForegroundColor Red } else { Write-Host 'Sessiz mod calisiyor' -ForegroundColor Green }
+        } catch { Write-Host ('Sessiz mod testi hata: ' + $_.Exception.Message) -ForegroundColor Red }
+    } else { Write-Host 'Sessiz mod menusu bulunamadi!' -ForegroundColor Red }
     $script:ExitRequested = $true
     $script:Icon.Visible = $false
     $script:Icon.Dispose()
