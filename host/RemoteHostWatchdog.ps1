@@ -69,6 +69,8 @@ function Get-Config {
         RebootSkipIfUnregistered = $true
         MinUptimeMinutes = 30
         CrdRestartAfterHours = 0
+        CrdSignalPorts = @(443, 5222, 5223, 19302, 19303, 8443, 4433)
+        CrdNoConnRestartCycles = 3
         TunnelRepair = $false
         TunnelName = 'uzak-pc'
         HeartbeatUrl = ''
@@ -93,7 +95,7 @@ function Save-Config {
 }
 
 function Get-State {
-    $s = [pscustomobject]@{ ConsecutiveFailures = 0; LastBootUtc = ''; AlertKey = ''; AlertUtc = ''; LastOkUtc = '' }
+    $s = [pscustomobject]@{ ConsecutiveFailures = 0; CrdNoConnCycles = 0; LastBootUtc = ''; AlertKey = ''; AlertUtc = ''; LastOkUtc = '' }
     if (Test-Path -LiteralPath $StateFile) {
         try {
             $raw = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json
@@ -156,6 +158,20 @@ function Get-CrdDaemon {
 
 function Get-CrdActiveSession {
     return @(Get-Process -Name 'remoting_desktop' -ErrorAction SilentlyContinue).Count -gt 0
+}
+
+function Get-CrdSignalConnections {
+    param([int[]]$Ports)
+    $pids = @((Get-Process -Name 'remoting_host', 'remoting_start_host', 'remoting_desktop' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id))
+    if ($pids.Count -eq 0) { return 0 }
+    $count = 0
+    try { $ns = netstat -ano -p tcp 2>&1 } catch { return 0 }
+    foreach ($line in $ns) {
+        if ($line -match '^\s*TCP\s+\S+\s+(\S+):(\d+)\s+(\S+)\s+(\d+)\s*$') {
+            if ($matches[1] -eq 'ESTABLISHED' -and ($Ports -contains [int]$matches[2]) -and ($pids -contains [int]$matches[4])) { $count++ }
+        }
+    }
+    return $count
 }
 
 function Test-Internet {
@@ -225,7 +241,9 @@ function Test-CrdService {
     $daemon = Get-CrdDaemon
     $ageH = 0
     if ($daemon.Count -gt 0) { $ageH = ((Get-Date) - ($daemon | Sort-Object StartTime | Select-Object -First 1).StartTime).TotalHours }
-    $detail += ', daemon=' + $daemon.Count + ', yas=' + [math]::Round($ageH, 1) + 'sa, host_id=' + $(if ($registered) { 'var' } else { 'YOK' })
+    $conns = Get-CrdSignalConnections -Ports $cfg.CrdSignalPorts
+    $detail = 'start=' + $svc.StartType + ', durum=' + $svc.Status + ', daemon=' + $daemon.Count + ', yas=' + [math]::Round($ageH, 1) + 'sa, host_id=' + $(if ($registered) { 'var' } else { 'YOK' }) + ', googleBaglanti=' + $conns
+    $state = Get-State
     if ($daemon.Count -eq 0) {
         $ok = $false
         if ($cfg.FixCrd -and (Test-Admin) -and -not $Check) {
@@ -237,9 +255,27 @@ function Test-CrdService {
                 $repair += 'daemon yeniden baslatildi'
             } catch { $repair += 'yeniden baslatma basarisiz: ' + $_.Exception.Message }
         } else { $repair += 'daemon yok' }
-    } elseif ($cfg.CrdRestartAfterHours -gt 0 -and $ageH -gt [double]$cfg.CrdRestartAfterHours -and -not (Get-CrdActiveSession) -and -not $Check) {
-        try { Stop-Service -Name 'chromoting' -Force -ErrorAction Stop; Start-Sleep 2; Start-Service -Name 'chromoting' -ErrorAction Stop; $repair += 'onleyici yeniden baslatma' } catch { }
+    } elseif ($registered -and $conns -eq 0) {
+        $state.CrdNoConnCycles = [int]$state.CrdNoConnCycles + 1
+        $ok = $false
+        $repair += 'Google baglantisi yok (' + $state.CrdNoConnCycles + '/' + $cfg.CrdNoConnRestartCycles + '. dongu)'
+        if ($state.CrdNoConnCycles -ge [int]$cfg.CrdNoConnRestartCycles -and $cfg.FixCrd -and (Test-Admin) -and -not $Check -and -not (Get-CrdActiveSession)) {
+            try {
+                Stop-Service -Name 'chromoting' -Force -ErrorAction Stop
+                Get-Process -Name 'remoting_host', 'remoting_start_host' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                Start-Sleep 2
+                Start-Service -Name 'chromoting' -ErrorAction Stop
+                $state.CrdNoConnCycles = 0
+                $repair += 'takilmis host yeniden baslatildi'
+            } catch { $repair += 'yeniden baslatma basarisiz: ' + $_.Exception.Message }
+        }
+    } else {
+        $state.CrdNoConnCycles = 0
+        if ($cfg.CrdRestartAfterHours -gt 0 -and $ageH -gt [double]$cfg.CrdRestartAfterHours -and -not (Get-CrdActiveSession) -and -not $Check) {
+            try { Stop-Service -Name 'chromoting' -Force -ErrorAction Stop; Start-Sleep 2; Start-Service -Name 'chromoting' -ErrorAction Stop; $repair += 'onleyici yeniden baslatma' } catch { }
+        }
     }
+    Save-State $state
     if ($cfg.ServiceAutoStart -and (Test-Admin) -and -not $Check -and $svc.StartType -ne 'Automatic') {
         try { Set-Service -Name 'chromoting' -StartupType Automatic; $repair += 'servis Automatic yapildi' } catch { }
     }
