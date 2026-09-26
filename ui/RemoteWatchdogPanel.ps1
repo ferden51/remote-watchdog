@@ -21,7 +21,9 @@ param(
     [switch]$NoBalloon,
     [switch]$Background,
     [string]$PreviewPage = 'conn',
-    [string]$PreviewPath = ''
+    [string]$PreviewPath = '',
+    [switch]$ShowWindow,
+    [switch]$ClickTest
 )
 
 $ErrorActionPreference = 'Continue'
@@ -684,7 +686,7 @@ function New-Toggle {
     param([string]$Label = '', [bool]$On)
     $b = New-Object System.Windows.Controls.Button
     $b.Tag = [bool]$On
-    $b.Content = $(if ($Label) { $Label } elseif ($On) { 'ACIK' } else { 'KAPALI' })
+    $b.Content = $(if ($Label) { $Label } elseif ($On) { 'AÇIK' } else { 'KAPALI' })
     $b.Width = 92
     $b.Margin = New-Object System.Windows.Thickness(0)
     $style = $script:Win.TryFindResource('ToggleBtn')
@@ -692,17 +694,17 @@ function New-Toggle {
     $b.Background = $(if ($On) { Bx 'Ok' } else { Bx 'Card2' })
     $b.Foreground = $(if ($On) { Bx '#0B1220' } else { Bx 'Muted' })
     $b.BorderBrush = Bx 'Line'
-    $b.Add_MouseLeftButtonDown({
-            param($s, $e)
-            $btn = $s.Source
+    $tgl = $b
+    $tgl.add_Click({
+            $btn = $tgl
             $btn.Tag = -not ([bool]$btn.Tag)
             $on = [bool]$btn.Tag
             $tip = [string]$btn.ToolTip
             if ($tip -like 'days|*') { $btn.Content = $tip.Split('|')[2] }
-            else { $btn.Content = $(if ($on) { 'ACIK' } else { 'KAPALI' }) }
+            else { $btn.Content = $(if ($on) { 'AÇIK' } else { 'KAPALI' }) }
             $btn.Background = $(if ($on) { Bx 'Ok' } else { Bx 'Card2' })
             $btn.Foreground = $(if ($on) { Bx '#0B1220' } else { Bx 'Muted' })
-        })
+        }.GetNewClosure())
     return $b
 }
 
@@ -1138,10 +1140,12 @@ function New-Segmented {
         if ($style) { $b.Style = $style }
         $opt = [string]$o
         $kk = [string]$Key
-        $b.add_MouseLeftButtonDown({
+        $b.add_Click({
                 param($s, $e)
                 $script:EnumSelect[$kk] = $opt
-                $grp = $s.Source.Parent
+                $grp = $s.Source
+                if (-not $grp) { $grp = $s.OriginalSource }
+                if ($grp) { $grp = $grp.Parent }
                 foreach ($x in @($grp.Children)) {
                     if (-not ($x -is [System.Windows.Controls.Button])) { continue }
                     if ([string]$x.Content -eq $opt) {
@@ -1290,18 +1294,19 @@ function Add-ActionBar {
     $b10 = & $mk 'Simdi zorla kapat + restart' 'forcereboot' -Danger
     $r2.Children.Add($b6); $r2.Children.Add($b7); $r2.Children.Add($b8); $r2.Children.Add($b9); $r2.Children.Add($b10)
     $p.Children.Add($r2)
-    $p.add_MouseLeftButtonUp({
-            param($s, $e)
-            $btn = $e.OriginalSource
-            while ($btn -and -not ($btn -is [System.Windows.Controls.Button])) { $btn = $btn.Parent }
-            if (-not $btn) { return }
-            Invoke-SettingsAction ([string]$btn.Tag)
-        })
+    $script:ActionButtons = @($b1, $b2, $b3, $b4, $b5, $b6, $b7, $b8, $b9, $b10)
+    foreach ($bb in $script:ActionButtons) {
+        $bkey = [string]$bb.Tag
+        $bb.add_Click({ Invoke-SettingsAction $bkey }.GetNewClosure())
+    }
     $Container.Child = $p
 }
 
 function Invoke-SettingsAction {
     param([string]$Key)
+    if (-not $script:ActionLog) { $script:ActionLog = @() }
+    $script:ActionLog += $Key
+    Write-Trace ('islem calistirildi: ' + $Key)
     switch ($Key) {
         'install' { Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null }
         'uninstall' {
@@ -1321,7 +1326,7 @@ function Invoke-SettingsAction {
         }
         'resetstate' {
             Remove-Item -LiteralPath (Join-Path $HostData 'host-state.json') -Force -ErrorAction SilentlyContinue
-            [System.Windows.MessageBox]::Show('Sayaclar sifirlandi.', 'RemoteWatchdog') | Out-Null
+            (El $script:Win 'TxtSaved').Text = 'Sayaçlar sıfırlandı: ' + (Get-Date).ToString('HH:mm:ss')
         }
         'clearlog' {
             if ([System.Windows.MessageBox]::Show('Log dosyalari silinsin mi?', 'RemoteWatchdog', 'YesNo', 'Question') -eq 'Yes') {
@@ -1339,6 +1344,7 @@ function Invoke-SettingsAction {
 }
 
 function Save-Settings {
+    param([switch]$Quiet)
     $hostVals = [ordered]@{}
     $clientVals = [ordered]@{}
     $daysVals = @{}
@@ -1392,6 +1398,7 @@ function Save-Settings {
     Write-ConfigFile -Path $HostConfig -Values $hostVals
     if ($clientVals.Count -gt 0) { Write-ConfigFile -Path $ClientConfig -Values $clientVals }
     (El $script:Win 'TxtSaved').Text = 'Kaydedildi: ' + (Get-Date).ToString('HH:mm:ss') + '  (' + $hostVals.Count + ' host + ' + $clientVals.Count + ' istemci)'
+    if (-not $Quiet) { [System.Windows.MessageBox]::Show('Ayarlar kaydedildi: ' + $hostVals.Count + ' host + ' + $clientVals.Count + ' istemci ayarı', 'RemoteWatchdog') | Out-Null }
 }
 
 function Find-AllControls {
@@ -1590,14 +1597,14 @@ function Wire-UI {
     foreach ($n in @('NavConn', 'NavOverview', 'NavActions', 'NavSettings', 'NavLog')) {
         (El $w $n).Add_Click({ Show-Page ([string]$this.Tag) }.GetNewClosure())
     }
-    (El $w 'ConnList').Add_MouseLeftButtonUp({
+    (El $w 'ConnList').Add_PreviewMouseLeftButtonUp({
             param($s, $e)
             $btn = $e.OriginalSource
             while ($btn -and -not ($btn -is [System.Windows.Controls.Button])) { $btn = $btn.Parent }
             if (-not $btn) { return }
             Invoke-ConnAction ([string]$btn.Tag)
         })
-    (El $w 'ActionList').Add_MouseLeftButtonUp({
+    (El $w 'ActionList').Add_PreviewMouseLeftButtonUp({
             param($s, $e)
             $btn = $e.OriginalSource
             while ($btn -and -not ($btn -is [System.Windows.Controls.Button])) { $btn = $btn.Parent }
@@ -1706,7 +1713,7 @@ Build-Settings
 if ($SelfTest) {
     if (-not $PreviewPath) { $PreviewPath = Join-Path $UiDir ('preview-' + $PreviewPage + '.png') }
     $w = $script:Win
-    $w.Show()
+    if ($ShowWindow) { $w.Show() } else { $w.Opacity = 0; $w.Show(); $w.Hide(); $w.Opacity = 1 }
     Start-Sleep -Milliseconds 900
     Show-Page $PreviewPage
     Start-Sleep -Milliseconds 400
@@ -1735,10 +1742,85 @@ if ($SelfTest) {
     $menuCount = 0
     if ($script:TrayItems) { $menuCount = $script:TrayItems.Count }
     Write-Host ('Tepsi menusu ogeleri: ' + $menuCount)
+    try {
+        $ctrls = @(Find-AllControls $w)
+        $buttons = @($ctrls | Where-Object { $_ -is [System.Windows.Controls.Button] })
+        $toggles = @($buttons | Where-Object { $_.ToolTip -is [string] -and $_.ToolTip -ne '' -and ($_.ToolTip -notlike 'days|*') -and ($_.ToolTip -notlike 'enum|*') -and ($_.Content -eq 'AÇIK' -or $_.Content -eq 'KAPALI' -or $_.Content -eq 'ACIK' -or $_.Content -eq 'KAPALI') })
+        $dayBtns = @($buttons | Where-Object { $_.ToolTip -is [string] -and $_.ToolTip -like 'days|*' })
+        $enums = @($ctrls | Where-Object { $_.ToolTip -is [string] -and $_.ToolTip -like 'enum|*' })
+        $xamlNamed = @($ctrls | Where-Object { $_.Name -match '^Btn' })
+        $actionBtns = @($script:ActionButtons)
+        Write-Host ('ARAYUZ DENETIMI: dugme=' + $buttons.Count + ' | islem dugmesi=' + $actionBtns.Count + ' | acik/kapali anahtar=' + $toggles.Count + ' | gun dugmesi=' + $dayBtns.Count + ' | secim grubu=' + $enums.Count + ' | adlandirilmis dugme=' + $xamlNamed.Count)
+        $unwired = @()
+        if ($actionBtns.Count -ne 10) { $unwired += 'islem dugmesi sayisi 10 degil (' + $actionBtns.Count + ')' }
+        if ($toggles.Count -lt 10) { $unwired += 'acik/kapali anahtar sayisi dusuk (' + $toggles.Count + ')' }
+        if ($dayBtns.Count -lt 7) { $unwired += 'gun dugmesi eksik (' + $dayBtns.Count + ')' }
+        if ($enums.Count -lt 2) { $unwired += 'secim grubu eksik (' + $enums.Count + ')' }
+        $xamlNamed | ForEach-Object { Write-Host ('   dugme: ' + $_.Name + ' = "' + $_.Content + '"') }
+        if ($unwired.Count -eq 0) { Write-Host 'ARAYUZ: buton/toggle/menu eksigi yok' -ForegroundColor Green }
+        else { $unwired | ForEach-Object { Write-Host ('SELFTEST UYARI: ' + $_) -ForegroundColor Red } }
+        if ($ClickTest) {
+        $probe = @($actionBtns | Where-Object { $_.Tag -eq 'resetstate' })[0]
+        if ($probe) {
+            $script:ActionLog = @()
+            $probe.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            Start-Sleep -Milliseconds 400
+            $hit = (@($script:ActionLog) -contains 'resetstate')
+            Write-Host ('Dugme tiklamasi testi (resetstate calisti mi): ' + $hit)
+            if (-not $hit) { Write-Host 'SELFTEST UYARI: dugme tiklamasi isleyiciye ulasmadi!' -ForegroundColor Red } else { Write-Host 'Dugme baglantisi dogrulandi' -ForegroundColor Green }
+        }
+        $t0 = @($toggles)[0]
+        if ($t0) {
+            $before = [bool]$t0.Tag
+            $t0.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+            Start-Sleep -Milliseconds 300
+            $after = [bool]$t0.Tag
+            Write-Host ('Anahtar (toggle) testi: ' + $before + ' -> ' + $after)
+            if ($before -eq $after) { Write-Host 'SELFTEST UYARI: anahtar degismiyor!' -ForegroundColor Red } else { Write-Host 'Anahtar baglantisi dogrulandi' -ForegroundColor Green }
+        }
+        $nav = El $w 'NavSettings'
+        $nav.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Start-Sleep -Milliseconds 400
+        $vis = (El $w 'PageSettings').Visibility
+        Write-Host ('Menu (nav) testi: Ayarlar sayfasi gorunur=' + $vis)
+        if ($vis -ne 'Visible') { Write-Host 'SELFTEST UYARI: menu sayfayi acmadi!' -ForegroundColor Red } else { Write-Host 'Menu baglantisi dogrulandi' -ForegroundColor Green }
+
+        $reload = El $w 'BtnReload'
+        $settingsPanel = El $w 'SettingsPanel'
+        $before = @($settingsPanel.Children).Count
+        $reload.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+        Start-Sleep -Milliseconds 700
+        $after = @($settingsPanel.Children).Count
+        Write-Host ('Dugme (Formu yenile) testi: ayar satiri ' + $before + ' -> ' + $after)
+        if ($after -lt 10) { Write-Host 'SELFTEST UYARI: Formu yenile butonu calismadi!' -ForegroundColor Red } else { Write-Host 'Formu yenile butonu dogrulandi' -ForegroundColor Green }
+
+        $ctrls = @(Find-AllControls $w)
+        $tbInterval = @($ctrls | Where-Object { $_.ToolTip -is [string] -and $_.ToolTip -eq 'IntervalMinutes' })[0]
+        if ($tbInterval) {
+            $orig = $tbInterval.Text
+            $cfgPath = Join-Path $env:ProgramData 'RemoteWatchdog\config.json'
+            $before2 = (Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json).IntervalMinutes
+            $tbInterval.Text = '7'
+            Save-Settings -Quiet
+            Start-Sleep -Milliseconds 300
+            $after2 = (Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json).IntervalMinutes
+            Write-Host ('Input + kaydetme testi: IntervalMinutes ' + $before2 + ' -> ' + $after2 + ' (formda ' + $tbInterval.Text + ')')
+            if ([string]$after2 -ne '7') {
+                Write-Host 'SELFTEST UYARI: input degeri config.json dosyasina yazilmadi!' -ForegroundColor Red
+            } else {
+                Write-Host 'Input degeri aliniyor ve config.json dosyasina yaziliyor' -ForegroundColor Green
+                $tbInterval.Text = [string]$before2
+                Save-Settings -Quiet
+                $back = (Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json).IntervalMinutes
+                Write-Host ('Eski deger geri yuklendi: ' + $back)
+            }
+        } else { Write-Host 'SELFTEST UYARI: IntervalMinutes input alani bulunamadi' -ForegroundColor Red }
+        } else { Write-Host 'TIKLAMA TESTLERI ATLANDI (-ClickTest verilmedi; panelde hicbir butona basilmadi)' -ForegroundColor DarkGray }
+    } catch { Write-Host ('Arayuz denetimi hata: ' + $_.Exception.Message) -ForegroundColor Red }
     $before = $script:Silent
     $silentItem = $null
     if ($script:TrayItems) { $silentItem = @($script:TrayItems | Where-Object { $_.Text -eq 'Sessiz mod' })[0] }
-    if ($silentItem) {
+    if ($silentItem -and $ClickTest) {
         try {
             $silentItem.PerformClick()
             $after = $script:Silent

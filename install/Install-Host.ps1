@@ -102,9 +102,13 @@ if ($p.ExitCode -eq 0) { Ok 'zamanlanmış görev kuruldu (acilista + oturum aci
 $cfgPath = 'C:\ProgramData\RemoteWatchdog'
 if (Test-Path -LiteralPath $cfgPath) {
     try {
-        icacls $cfgPath /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "BUILTIN\Administrators:(OI)(CI)F" "$env:USERNAME:(OI)(CI)M" /T /C 2>&1 | Out-Null
-        Ok 'config klasoru izinleri kisitlandi (SYSTEM + Administrators + kullanimici)'
-    } catch { Warn ('izin kisitlamasi yapilamadi (Telegram token gibi degerler duz metin kalir): ' + $_.Exception.Message) }
+        $acct = "$env:COMPUTERNAME\$env:USERNAME"
+        icacls $cfgPath /grant "${acct}:(OI)(CI)M" /T /C 2>&1 | Out-Null
+        $probe = Join-Path $cfgPath 'acl-probe.tmp'
+        Set-Content -LiteralPath $probe -Value 'probe' -Encoding UTF8
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+        Ok "config klasoru izinleri duzeltildi (panel ayar kaydedebilsin): $acct"
+    } catch { Warn ('izin duzeltilemedi, panel ayar kaydedemeyebilir: ' + $_.Exception.Message) }
 }
 Start-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 5
