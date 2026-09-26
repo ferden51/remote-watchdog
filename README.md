@@ -19,7 +19,42 @@ Bağlantı sorunlarının çoğu "makine açık ama erişilemiyor" şeklindedir 
 | `client/RemoteClientWatchdog.ps1` | Kendi bilgisayarın | Uzak hedefe TCP erişim testi, kopma uyarısı, RDP/tarayıcı otomatik açma |
 | `ui/RemoteWatchdogTray.ps1` | Her iki makinede (kullanıcı oturumu) | Sistem tepsisi kontrol paneli: durum, bekleyen işler, tüm ayarlar, daima zorla kapatma anahtarı, loglar, teşhis raporu |
 
-## Tray kontrol paneli
+## Kurulum: iki modül
+
+| Modül | Nerede kurulur | Ne yapar | Admin |
+|---|---|---|---|
+| **host** | Uzak bilgisayar (fiziksel erişim gerekir) | CRD/RDP/ağ/uyku testi, kademeli onarım, servis ayarları, alarm, gerekirse restart, belge koruma | Gerekli |
+| **client** | Senin bilgisayarın | Uzak makineye TCP erişim testi, kopma alarmı, RDP/tarayıcı otomatik açma | Gerekmez |
+| **tray** | İkisi de | Yukarıdakilerin durumunu ve ayarlarını gösteren panel | Gerekmez |
+
+Klasörün **tamamını** hedef makineye kopyala (veya `git clone`), sonra:
+
+### Uzak bilgisayar (host)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install\Install-Host.ps1 -TelegramToken '123:ABC' -TelegramChatId '456'
+```
+
+Sırasıyla: teşhis raporu üretir (okuma modunda) → watchdog + belge koruyucu görevlerini kurar → tray'i
+oturum açılışında başlatır → **en sonda CRD'yi `https://remotedesktop.google.com/headless` ile yeniden
+kaydetmeni söyler** (bu adım watchdog ile yapılamaz). Admin değilsen script kendini yönetici olarak
+yeniden başlatır. `-DryRun` ile önce ne yapacağını görebilirsin, `-KeepSleep` dizüstü profili,
+`-SkipTray` tray'i atlar.
+
+### Kendi bilgisayarın (client)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install\Install-Client.ps1 -Target '100.64.1.5:3389' -RdpFile 'C:\rdp\finrex.rdp' -TelegramToken '123:ABC' -TelegramChatId '456'
+```
+
+`-Target` uzak makinenin **o makineden erişilebilir bir adresi** olmalı (Tailscale IP'si gibi; internetteki
+genel IP'ye port yönlendirme yoksa o IP'ye bağlanılamaz). `-Target` verilmezse yalnızca Google/CRD sinyal
+yolu test edilir.
+
+Repo private olduğu için `irm` ile tek satır indirme yetki ister; USB/OneDrive ile kopyalamak veya
+`git clone` en pratik yol.
+
+
 
 `ui/RemoteWatchdogTray.ps1` tek dosyalık bir WinForms uygulamasıdır; klavye/fare gerektirmez.
 

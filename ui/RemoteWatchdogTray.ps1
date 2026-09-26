@@ -21,7 +21,8 @@ param(
     [switch]$Install,
     [switch]$Uninstall,
     [switch]$SelfTest,
-    [switch]$NoBalloon
+    [switch]$NoBalloon,
+    [switch]$ShowPanel
 )
 
 $ErrorActionPreference = 'Continue'
@@ -719,7 +720,10 @@ function New-Tray {
     $script:Icon.DoubleClick.Add({ $script:Panel.Show(); $script:Panel.Activate(); Fill-Panel })
 
     $script:Panel = New-Panel
-    $script:Panel.Hide()
+    if ($ShowPanel) {
+        $script:Panel.Show()
+        $script:Panel.Activate()
+    } else { $script:Panel.Hide() }
 
     $script:Timer = New-Object System.Windows.Forms.Timer
     $script:Timer.Interval = 20000

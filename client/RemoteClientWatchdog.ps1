@@ -248,7 +248,7 @@ function Invoke-Cycle {
     }
     $summary = @($script:Results | ForEach-Object { $_.Name + '=' + $(if ($_.Ok) { 'OK' } else { 'FAIL' }) }) -join '; '
     Write-Log $(if ($allOk) { 'INFO' } else { 'WARN' }) ('SONUC: ' + $(if ($allOk) { 'uzak erisim hat sagligi' } else { 'ERISIM SORUNU' }))
-    Write-JsonStatus -AllOk $allOk -Summary $summary
+    $null = Write-JsonStatus -AllOk $allOk -Summary $summary
     if (-not $Check) {
         Send-Heartbeat -Ok $allOk -Summary $summary
         Invoke-Alerts -AllOk $allOk -Summary $summary
