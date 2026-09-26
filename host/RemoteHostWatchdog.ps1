@@ -361,7 +361,12 @@ function Test-Panel {
                 if ($panelScript -and (Test-Path -LiteralPath $panelScript)) {
                     $u = $env:USERNAME
                     try {
-                        $pa = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Resolve-Path $panelScript).Path + '"')
+                        $vbs = Join-Path (Split-Path -Parent (Resolve-Path $panelScript).Path) 'Start-Panel.vbs'
+                        if (Test-Path -LiteralPath $vbs) {
+                            $pa = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"' + $vbs + '"')
+                        } else {
+                            $pa = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Resolve-Path $panelScript).Path + '" -Background')
+                        }
                         $pp = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited
                         $ps = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
                         Register-ScheduledTask -TaskName 'RemoteHostPanel' -Action $pa -Principal $pp -Settings $ps -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 3)) -Force | Out-Null

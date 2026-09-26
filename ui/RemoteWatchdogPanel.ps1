@@ -19,6 +19,7 @@ param(
     [switch]$SelfTest,
     [switch]$TrayOnly,
     [switch]$NoBalloon,
+    [switch]$Background,
     [string]$PreviewPage = 'conn',
     [string]$PreviewPath = ''
 )
@@ -46,6 +47,8 @@ $ShowRequest = Join-Path $env:TEMP 'RemoteWatchdog-show.flag'
 $script:Win = $null
 $script:Icon = $null
 $script:Silent = [bool]((Get-ItemProperty -Path $RunKey -Name ($RunName + 'Silent') -ErrorAction SilentlyContinue).($RunName + 'Silent'))
+$script:BalloonMode = 'critical'
+$script:Background = [bool]$Background
 $script:LastState = ''
 $script:LastColor = $null
 $script:HIcon = [IntPtr]::Zero
@@ -1337,25 +1340,45 @@ function Refresh-Icon {
     }
     $state = '' + $(if ($st.Host) { $st.Host.ok } else { 'yok' }) + '|' + $(if ($st.Client) { $st.Client.ok } else { 'yok' })
     if ($state -ne $script:LastState) {
+        $wasHealthy = ($script:LastState -eq 'True|True' -or $script:LastState -eq 'True|yok' -or $script:LastState -eq 'yok|True')
         $script:LastState = $state
-        if (-not $script:Silent -and -not $NoBalloon -and $st.Host) {
+        if ($st.Host) {
             if ($st.Bad -gt 0) {
                 $bad = @($st.Host.checks | Where-Object { -not $_.ok } | ForEach-Object { $_.name }) -join ', '
-                Show-Balloon 'Uzak makine sorunlu' $bad 'Warning'
-            } else { Show-Balloon 'Uzak makine ayakta' 'Tum kontroller tamam.' 'Info' }
+                Show-Balloon 'Uzak makine sorunlu' $bad 'Warning' -Critical:(-not $wasHealthy)
+            } else {
+                Show-Balloon 'Uzak makine ayakta' 'Tum kontroller tamam.' 'Info'
+            }
         }
     }
 }
 
 function Show-Balloon {
-    param([string]$Title, [string]$Text, [System.Windows.Forms.ToolTipIcon]$Icon = 'Info', [switch]$Force)
-    if (($script:Silent -and -not $Force) -or $NoBalloon) { return }
+    param([string]$Title, [string]$Text, [System.Windows.Forms.ToolTipIcon]$Icon = 'Info', [switch]$Force, [switch]$Critical)
+    $mode = $script:BalloonMode
+    if ($NoBalloon) { return }
+    if ($mode -eq 'off') { return }
+    if ($mode -eq 'critical' -and -not $Critical) { return }
+    if ($script:Silent -and -not $Force) { return }
     try {
         $script:Icon.BalloonTipTitle = $Title
         $script:Icon.BalloonTipText = $Text
         $script:Icon.BalloonTipIcon = $Icon
         $script:Icon.ShowBalloonTip(7000)
     } catch { Write-Trace ('balloon gosterilemedi: ' + $_.Exception.Message) }
+}
+
+function Get-BalloonMode {
+    $v = (Get-ItemProperty -Path $RunKey -Name ($RunName + 'Balloon') -ErrorAction SilentlyContinue).($RunName + 'Balloon')
+    if ($v -in @('off', 'critical', 'all')) { return [string]$v }
+    return 'critical'
+}
+
+function Set-BalloonMode {
+    param([string]$Mode)
+    $script:BalloonMode = $Mode
+    New-ItemProperty -Path $RunKey -Name ($RunName + 'Balloon') -Value $Mode -PropertyType String -Force -ErrorAction SilentlyContinue | Out-Null
+    Write-Trace ('bildirim modu: ' + $Mode)
 }
 
 function Set-SilentMode {
@@ -1510,13 +1533,14 @@ if ($Install) {
     New-ItemProperty -Path $RunKey -Name $RunName -Value $cmd -PropertyType String -Force | Out-Null
     Write-Host 'Panel oturum acilinda otomatik baslayacak.'
     try {
-        $pa = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '"')
+        $vbs = Join-Path $UiDir 'Start-Panel.vbs'
+        $pa = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"' + $vbs + '"')
         $pp = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-        $ps = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+        $ps = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -Hidden
         $pt1 = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-        $pt2 = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes 3)
+        $pt2 = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes 5)
         Register-ScheduledTask -TaskName 'RemoteHostPanel' -Action $pa -Trigger @($pt1, $pt2) -Principal $pp -Settings $ps -Force -ErrorAction Stop | Out-Null
-        Write-Host 'Gorev kuruldu: RemoteHostPanel (oturum acilinda + her 3 dk, panel cokerse otomatik)'
+        Write-Host 'Gorev kuruldu: RemoteHostPanel (oturum acilinda + her 5 dk, pencere gostermeden)'
     } catch { Write-Host ('Panel gorevi kurulamadi: ' + $_.Exception.Message) -ForegroundColor Yellow }
     Write-Host ('Panelin restart sonrasi da acik gelmesi icin konsolda otomatik giris gerekir: host\Enable-ConsoleAutoLogon.ps1')
     exit 0
@@ -1592,40 +1616,36 @@ if ($SelfTest) {
     exit 0
 }
 
-if ($TrayOnly) { $script:Win.Hide() } else { $script:Win.Show() }
+if ($TrayOnly -or $Background) { $script:Win.Hide() } else { $script:Win.Show() }
 $created = $false
 try { $created = $script:Mutex.WaitOne(0) } catch { $created = $true }
 if (-not $created) {
     $others = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
             Where-Object { $_.CommandLine -and $_.CommandLine -match ('-File\s+"?[^"]*' + [regex]::Escape([string]$ScriptPath)) -and $_.ProcessId -ne $PID })
-    $focused = $false
     if ($others.Count -gt 0) {
-        try { Set-Content -LiteralPath $ShowRequest -Value (Get-Date).ToString('o') -Encoding UTF8 -ErrorAction SilentlyContinue } catch { }
-        foreach ($o in $others) {
-            try {
-                $pr = Get-Process -Id $o.ProcessId -ErrorAction SilentlyContinue
-                if (-not $pr) { continue }
-                $pr.Refresh()
-                if ($pr.MainWindowHandle -ne 0) {
-                    if (-not ('PanelWinFocus' -as [type])) {
-                        Add-Type -Name PanelWinFocus -Namespace Native -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);'
+        if (-not $Background) {
+            try { Set-Content -LiteralPath $ShowRequest -Value (Get-Date).ToString('o') -Encoding UTF8 -ErrorAction SilentlyContinue } catch { }
+            foreach ($o in $others) {
+                try {
+                    $pr = Get-Process -Id $o.ProcessId -ErrorAction SilentlyContinue
+                    if (-not $pr) { continue }
+                    $pr.Refresh()
+                    if ($pr.MainWindowHandle -ne 0) {
+                        if (-not ('PanelWinFocus' -as [type])) {
+                            Add-Type -Name PanelWinFocus -Namespace Native -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);'
+                        }
+                        [void][Native.PanelWinFocus]::ShowWindow($pr.MainWindowHandle, 9)
+                        [void][Native.PanelWinFocus]::SetForegroundWindow($pr.MainWindowHandle)
                     }
-                    [void][Native.PanelWinFocus]::ShowWindow($pr.MainWindowHandle, 9)
-                    [void][Native.PanelWinFocus]::SetForegroundWindow($pr.MainWindowHandle)
-                }
-                $focused = $true
-                break
-            } catch { }
+                } catch { }
+            }
         }
-    }
-    if (-not $focused) {
-        Write-Trace 'mutex tutan canli pencere bulunamadi; birincil instance olarak devam'
-        $created = $true
-    } else {
-        Write-Trace 'mevcut panel penceresi one getirildi'
+        Write-Trace ('calisan panel ornegi bulundu; yeni ornek sonlaniyor (background=' + [bool]$Background + ')')
         $script:Icon.Visible = $false
         $script:Icon.Dispose()
         exit 0
     }
+    Write-Trace 'mutex tutan canli ornek yok; birincil instance olarak devam'
+    $created = $true
 }
 try { [System.Windows.Threading.Dispatcher]::Run() } finally { $script:Mutex.ReleaseMutex() }
