@@ -41,6 +41,7 @@ $ClientConfig = Join-Path $ClientData 'config.json'
 $ClientLog = Join-Path $ClientData 'client-watchdog.log'
 $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $RunName = 'RemoteWatchdogTray'
+$ShowRequest = Join-Path $env:TEMP 'RemoteWatchdog-show.flag'
 
 $script:Win = $null
 $script:Icon = $null
@@ -80,6 +81,30 @@ function Write-Trace {
         if (-not (Test-Path -LiteralPath $HostData)) { New-Item -ItemType Directory -Force -Path $HostData | Out-Null }
         Add-Content -LiteralPath (Join-Path $HostData 'panel.log') -Value ((Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' ' + $Text) -Encoding UTF8
     } catch { }
+}
+
+function Get-RoleInfo {
+    $hostTask = Get-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue
+    $clientTask = Get-ScheduledTask -TaskName 'RemoteClientWatchdog' -ErrorAction SilentlyContinue
+    $clientData = [ordered]@{}
+    if ($ClientConfig -and (Test-Path -LiteralPath $ClientConfig)) { $clientData = Read-ConfigFile $ClientConfig }
+    $targets = @()
+    if ($clientData.Contains('Targets')) { $targets = @($clientData['Targets']) }
+    $remoteName = 'uzak makine'
+    if ($clientData.Contains('RemoteName') -and $clientData['RemoteName']) { $remoteName = [string]$clientData['RemoteName'] }
+    $role = 'none'
+    if ($hostTask -and $clientTask) { $role = 'both' }
+    elseif ($hostTask) { $role = 'host' }
+    elseif ($clientTask) { $role = 'client' }
+    else { $role = 'manual' }
+    $text = switch ($role) { 'host' { 'UZAK HOST' } 'client' { 'ISTEMCI' } 'both' { 'HOST + ISTEMCI' } default { 'KURULU DEGIL' } }
+    $tip = switch ($role) {
+        'host' { 'Bu makine uzaktan erisilen host. CRD, RDP ve ag burada izleniyor; zorla kapatma bu makinede uygulanir.' }
+        'client' { 'Bu makine uzak makineye baglanan istemci. Hedef: ' + $remoteName + ' | ' + (@($targets) -join ', ') + ' | Restart bu makineye uygulanmaz, uzak makine kendi politikasina gore karar verir.' }
+        'both' { 'Bu makine hem host hem istemci olarak calisiyor.' }
+        default { 'Ne host ne istemci gorevi kurulu. Install-Host.ps1 veya Install-Client.ps1 calistirin.' }
+    }
+    return [pscustomobject]@{ Role = $role; RoleText = $text; Tip = $tip; HostTask = [bool]$hostTask; ClientTask = [bool]$clientTask; Targets = $targets; RemoteName = $remoteName }
 }
 
 function Get-Json {
@@ -436,9 +461,14 @@ $Xaml = @'
           </StackPanel>
         </StackPanel>
 
-        <Border Grid.Column="2" x:Name="Pill" Background="#1D2733" CornerRadius="14" Padding="14,6" Margin="0,0,12,0" VerticalAlignment="Center">
-          <TextBlock x:Name="TxtPill" Text="..." Foreground="{StaticResource Mut}" FontWeight="SemiBold" FontSize="12.5"/>
-        </Border>
+        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+          <Border x:Name="RoleBadge" Background="#1D2733" CornerRadius="14" Padding="12,6" Margin="0,0,10,0">
+            <TextBlock x:Name="TxtRole" Text="" Foreground="{StaticResource Ok}" FontWeight="SemiBold" FontSize="11.5"/>
+          </Border>
+          <Border x:Name="Pill" Background="#1D2733" CornerRadius="14" Padding="14,6">
+            <TextBlock x:Name="TxtPill" Text="..." Foreground="{StaticResource Mut}" FontWeight="SemiBold" FontSize="12.5"/>
+          </Border>
+        </StackPanel>
         <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
           <Button x:Name="BtnCheck" Content="Simdi denetle" Style="{StaticResource BtnAccent}" Margin="0,0,8,0"/>
           <Button x:Name="BtnReboot" Content="Yeniden baslat" Style="{StaticResource BtnDanger}"/>
@@ -700,8 +730,25 @@ function Get-Connections {
         Add-Conn 'Kontrol paneli' 'panel sureci (restart sonrasi oturumda)' $(if ($panelChk.ok) { 'ok' } else { 'warn' }) $(if ($panelChk.ok) { 'CALISIYOR' } else { 'KAPALI' }) ([string]$panelChk.detail) 'panelstart' 'Paneli baslat'
     }
 
-    if ($cj) {
-        Add-Conn 'Bu makine (istemci)' 'uzak hedefe TCP erisimi' $(if ($cj.ok) { 'ok' } else { 'bad' }) $(if ($cj.ok) { 'BAGLI' } else { 'YOK' }) ([string]$cj.summary) 'log' 'Loglari ac'
+    $role = Get-RoleInfo
+    if ($role.ClientTask) {
+        foreach ($t in @($role.Targets)) {
+            $tname = [string]$t
+            $found = $false
+            foreach ($cc in @($cj.checks)) {
+                if ([string]$cc.name -ne $tname) { continue }
+                $found = $true
+                $lvl = $(if ($cc.ok) { 'ok' } else { 'bad' })
+                $msTxt = ''
+                if ([string]$cc.detail -match '(\d+) ms') { $msTxt = 'gecikme ' + $matches[1] + ' ms' }
+                Add-Conn $role.RemoteName $tname $lvl $(if ($cc.ok) { 'ULASILABILIR' } else { 'ULASILAMIYOR' }) $(if ($msTxt) { $msTxt } else { [string]$cc.detail }) 'log' 'Loglari ac'
+            }
+            if (-not $found) { Add-Conn $role.RemoteName $tname 'warn' 'BILINMIYOR' 'istemci bir tur calismadi' 'run' 'Simdi denetle' }
+        }
+        $cjLvl = $(if ($cj -and $cj.ok) { 'ok' } else { 'bad' })
+        Add-Conn 'Istemci kontrol hatti' $(if ($role.HostTask) { 'bu makine (istemci + host)' } else { 'bu makine (istemci)' }) $cjLvl $(if ($cj -and $cj.ok) { 'TAMAM' } else { 'SORUN' }) $(if ($cj) { [string]$cj.summary } else { 'istemci calismadi' }) 'log' 'Loglari ac'
+    } elseif ($cj) {
+        Add-Conn 'Istemci kontrol hatti' 'bu makine (host + istemci)' $(if ($cj.ok) { 'ok' } else { 'warn' }) $(if ($cj.ok) { 'TAMAM' } else { 'EK BILGI' }) ([string]$cj.summary) 'log' 'Loglari ac'
     }
     return $rows
 }
@@ -768,8 +815,12 @@ function Update-Overview {
     $pill.Text = $(if ($null -eq $hj -and $null -eq $cj) { 'VERI YOK' } elseif ($st.Bad -gt 0) { ([string]$st.Bad + ' SORUN') } else { 'AYAKTA' })
     $last = 'kontrol yok'
     if ($st.Age) { $last = 'son kontrol ' + [math]::Round($st.Age.TotalMinutes) + ' dk once' }
-    (El $script:Win 'TxtSubtitle').Text = $env:COMPUTERNAME + ' | ' + $last
-    (El $script:Win 'TxtOverviewSub').Text = $(if ($hj) { [string]$hj.summary } else { 'Watchdog hic calismadi. "Watchdog kur" ile baslat.' })
+    $role = Get-RoleInfo
+    (El $script:Win 'TxtSubtitle').Text = $role.RoleText + '  |  ' + $env:COMPUTERNAME + '  |  ' + $last
+    (El $script:Win 'TxtRole').Text = $role.RoleText
+    (El $script:Win 'TxtRole').Foreground = $(switch ($role.Role) { 'host' { Bx 'Ok' } 'client' { Bx 'Info' } 'both' { Bx 'Accent' } default { Bx 'Warn' } })
+    (El $script:Win 'RoleBadge').ToolTip = $role.Tip
+    (El $script:Win 'TxtOverviewSub').Text = $(if ($role.ClientTask -and -not $role.HostTask) { 'Izlenen uzak makine: ' + $role.RemoteName + '  (' + (@($role.Targets) -join ', ') + ')' } elseif ($hj) { [string]$hj.summary } else { 'Watchdog hic calismadi. "Watchdog kur" ile baslat.' })
 
     $cards = New-Object System.Collections.ArrayList
     if ($hj) {
@@ -893,6 +944,7 @@ $script:Defs = @(
     @{ Sec = 'Tatil'; Key = 'HolidaysFile'; Title = 'Tatil dosyasi (bos birakilirsa betik yanindaki holidays.txt)'; Type = 'text' }
 
     @{ Sec = 'ISTEMCI (BU BILGISAYAR)'; Type = 'section' }
+    @{ Sec = 'Istemci'; Key = 'RemoteName'; Title = 'Uzak makine adi (panelde bu ad kullanilir)'; Type = 'text'; Target = 'client' }
     @{ Sec = 'Istemci'; Key = 'Targets'; Title = 'Uzak hedefler (her satir ip:port)'; Type = 'lines'; Target = 'client' }
     @{ Sec = 'Istemci'; Key = 'RdpFile'; Title = 'RDP dosyasi (.rdp)'; Type = 'text'; Target = 'client' }
     @{ Sec = 'Istemci'; Key = 'BrowserUrl'; Title = 'Tarayici adresi (CRD)'; Type = 'text'; Target = 'client' }
@@ -932,7 +984,7 @@ function Write-ConfigFile {
 
 function Get-ClientDefaults {
     return [ordered]@{
-        Targets = @(); RdpFile = ''; BrowserUrl = 'https://remotedesktop.google.com'
+        Targets = @(); RemoteName = ''; RdpFile = ''; BrowserUrl = 'https://remotedesktop.google.com'
         LaunchOnRecover = $true; KeepAliveMinutes = 0
         TelegramToken = ''; TelegramChatId = ''; HeartbeatUrl = ''; AlertRepeatHours = 3
     }
@@ -1416,16 +1468,30 @@ function Wire-UI {
     (El $w 'BtnLogRefresh').Add_Click({ Update-Log })
     (El $w 'BtnLogCopy').Add_Click({ try { [System.Windows.Clipboard]::SetText((El $w 'TxtLog').Text) } catch { } })
     (El $w 'BtnLogOpen').Add_Click({ if (Test-Path $HostLog) { Start-Process notepad.exe $HostLog } })
-    $w.Add_Closing({
+    $w.add_Closing({
             param($s, $e)
             if ($script:ExitRequested) { return }
             $e.Cancel = $true
-            $w.Hide()
+            $script:Win.Hide()
+            Write-Trace 'pencere kapatma istegi yoksayildi (trayde kalindi)'
+            Show-Balloon -Title 'Panel kapatildi' -Text 'Panel tray simgesinde calismaya devam ediyor. Tamamen kapatmak icin tepsi menusunden Cikis.' -Icon 'Info' -Force
         })
     $script:Timer = New-Object System.Windows.Threading.DispatcherTimer
     $script:Timer.Interval = [TimeSpan]::FromSeconds(20)
     $script:Timer.Add_Tick({ Update-Connections; Update-Overview; Update-Actions; Refresh-Icon })
     $script:Timer.Start()
+
+    $script:ShowTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:ShowTimer.Interval = [TimeSpan]::FromSeconds(3)
+    $script:ShowTimer.Add_Tick({
+            if (-not (Test-Path -LiteralPath $ShowRequest)) { return }
+            try { Remove-Item -LiteralPath $ShowRequest -Force -ErrorAction SilentlyContinue } catch { }
+            $script:Win.Show()
+            $script:Win.WindowState = 'Normal'
+            $script:Win.Activate()
+            Write-Trace 'goster istegi islendi (pencere one getirildi)'
+        })
+    $script:ShowTimer.Start()
 }
 
 if ($Install) {
@@ -1497,6 +1563,17 @@ if ($SelfTest) {
             if ($after -eq $before) { Write-Host 'SELFTEST UYARI: sessiz mod degismedi!' -ForegroundColor Red } else { Write-Host 'Sessiz mod calisiyor' -ForegroundColor Green }
         } catch { Write-Host ('Sessiz mod testi hata: ' + $_.Exception.Message) -ForegroundColor Red }
     } else { Write-Host 'Sessiz mod menusu bulunamadi!' -ForegroundColor Red }
+
+    try {
+        $w.Show()
+        Start-Sleep -Milliseconds 400
+        $w.Close()
+        Start-Sleep -Milliseconds 400
+        $stillHere = (-not $w.IsLoaded) -or ($w.IsVisible -eq $false)
+        Write-Host ('X ile kapatma testi: pencere gorunur=' + $w.IsVisible + ' | iptal edildi=' + $stillHere + ' | tray simgesi=' + $(if ($script:Icon.Visible) { 'VAR' } else { 'YOK' }))
+        if ($w.IsVisible) { Write-Host 'SELFTEST UYARI: pencere kapanmadi!' -ForegroundColor Red } else { Write-Host 'X kapatma davranisi dogru ( pencere gizlendi, tray ayakta)' -ForegroundColor Green }
+        $w.Show()
+    } catch { Write-Host ('Kapatma testi hata: ' + $_.Exception.Message) -ForegroundColor Red }
     $script:ExitRequested = $true
     $script:Icon.Visible = $false
     $script:Icon.Dispose()
@@ -1507,5 +1584,37 @@ if ($SelfTest) {
 if ($TrayOnly) { $script:Win.Hide() } else { $script:Win.Show() }
 $created = $false
 try { $created = $script:Mutex.WaitOne(0) } catch { $created = $true }
-if (-not $created) { $script:Icon.Visible = $false; $script:Icon.Dispose(); exit 0 }
+if (-not $created) {
+    $others = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.CommandLine -match ('-File\s+"?[^"]*' + [regex]::Escape([string]$ScriptPath)) -and $_.ProcessId -ne $PID })
+    $focused = $false
+    if ($others.Count -gt 0) {
+        try { Set-Content -LiteralPath $ShowRequest -Value (Get-Date).ToString('o') -Encoding UTF8 -ErrorAction SilentlyContinue } catch { }
+        foreach ($o in $others) {
+            try {
+                $pr = Get-Process -Id $o.ProcessId -ErrorAction SilentlyContinue
+                if (-not $pr) { continue }
+                $pr.Refresh()
+                if ($pr.MainWindowHandle -ne 0) {
+                    if (-not ('PanelWinFocus' -as [type])) {
+                        Add-Type -Name PanelWinFocus -Namespace Native -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);'
+                    }
+                    [void][Native.PanelWinFocus]::ShowWindow($pr.MainWindowHandle, 9)
+                    [void][Native.PanelWinFocus]::SetForegroundWindow($pr.MainWindowHandle)
+                }
+                $focused = $true
+                break
+            } catch { }
+        }
+    }
+    if (-not $focused) {
+        Write-Trace 'mutex tutan canli pencere bulunamadi; birincil instance olarak devam'
+        $created = $true
+    } else {
+        Write-Trace 'mevcut panel penceresi one getirildi'
+        $script:Icon.Visible = $false
+        $script:Icon.Dispose()
+        exit 0
+    }
+}
 try { [System.Windows.Threading.Dispatcher]::Run() } finally { $script:Mutex.ReleaseMutex() }

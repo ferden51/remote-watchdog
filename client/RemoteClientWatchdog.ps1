@@ -41,6 +41,7 @@ $global:cfg = $null
 function Get-Config {
     $cfg = [ordered]@{
         Targets = @()
+        RemoteName = ''
         RdpFile = ''
         BrowserUrl = 'https://remotedesktop.google.com'
         LaunchOnRecover = $true
@@ -123,17 +124,24 @@ function Test-LocalNet {
 function Test-RemoteTargets {
     $cfg = $global:cfg
     $targets = @($cfg.Targets)
-    if ($targets.Count -eq 0) { Add-Result 'Uzak hedefler' $true 'hedef tanimli degil (atlandi)' ''; return $true }
+    $results = New-Object System.Collections.ArrayList
+    if ($targets.Count -eq 0) {
+        Add-Result 'Uzak hedefler' $true 'hedef tanimli degil (atlandi)' ''; return $results
+    }
     $all = $true
     foreach ($t in $targets) {
         $parts = [string]$t -split ':'
         $h = $parts[0]
         $p = if ($parts.Count -gt 1) { [int]$parts[1] } else { 3389 }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
         $up = Test-TcpPort -HostName $h -Port $p -TimeoutMs 4000
+        $sw.Stop()
         if (-not $up) { $all = $false }
-        Add-Result ('Hedef ' + $h + ':' + $p) $up $(if ($up) { 'ACIK' } else { 'KAPALI/timeout' })
+        $tag = if ($up) { 'ULASILABILIR' } else { 'ULASILAMIYOR' }
+        Add-Result ($h + ':' + $p) $up $tag $(if ($up) { [string]$sw.ElapsedMilliseconds + ' ms' } else { '4 sn timeout' })
+        [void]$results.Add([ordered]@{ target = ([string]$h + ':' + $p); ok = [bool]$up; ms = [int]$sw.ElapsedMilliseconds })
     }
-    return $all
+    return $results
 }
 
 function Test-CrdServicePath {
@@ -224,7 +232,8 @@ function Write-JsonStatus {
         lastOkUtc = [string]$state.LastOkUtc
         alertKey = [string]$state.AlertKey
         checks = $checks
-        config = [ordered]@{ targets = @($cfg.Targets); rdpFile = [string]$cfg.RdpFile; browserUrl = [string]$cfg.BrowserUrl; heartbeatUrl = [string]$cfg.HeartbeatUrl }
+        targets = @($script:TargetResults)
+        config = [ordered]@{ targets = @($cfg.Targets); remoteName = [string]$cfg.RemoteName; rdpFile = [string]$cfg.RdpFile; browserUrl = [string]$cfg.BrowserUrl; heartbeatUrl = [string]$cfg.HeartbeatUrl }
     }
     $json = $obj | ConvertTo-Json -Depth 6
     try { Set-Content -LiteralPath (Join-Path $BaseDir 'last-run.json') -Value $json -Encoding UTF8 } catch { }
@@ -241,6 +250,7 @@ function Invoke-Cycle {
     $signal = Test-CrdServicePath
     $targets = Test-RemoteTargets
     $allOk = $signal -and $targets
+    $script:TargetResults = $targetResults
     foreach ($r in $script:Results) { if (-not $r.Ok) { $allOk = $false } }
     foreach ($r in $script:Results) {
         $tag = if ($r.Ok) { 'TAMAM   ' } else { 'SORUN   ' }

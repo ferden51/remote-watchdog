@@ -214,6 +214,16 @@ if ($Section -eq 0 -or $Section -eq 3) {
         Ok 'Get-Actions: her madde bir anahtarla etiketli' (@($act | Where-Object { $null -eq $_.Key }).Count -eq 0)
         $cfg = Get-HostConfig
         Ok 'Get-HostConfig: varsayilanlar' (($cfg.RestartPolicy -eq 'blackout') -and ($cfg.BlackoutStart -eq 18) -and ($cfg.BlackoutEnd -eq 8))
+        $roleCode = ((Get-FnCode $Panel @('Read-ConfigFile', 'Get-RoleInfo')) -join "`n")
+        Invoke-Expression $roleCode
+        Ok 'panel fonksiyonlari yuklendi (Read-ConfigFile, Get-RoleInfo)' ([bool](Get-Command Get-RoleInfo -ErrorAction SilentlyContinue))
+        $role = Get-RoleInfo
+        Ok ('Get-RoleInfo rol tespiti: ' + $role.Role) ($role.Role -in @('host', 'client', 'both', 'manual', 'none'))
+        Ok ('Get-RoleInfo rozet metni: ' + $role.RoleText) ([bool]$role.RoleText)
+        Ok ('Get-RoleInfo ipucu metni dolu (' + ([string]$role.Tip).Length + ' karakter)') (([string]$role.Tip).Length -gt 20)
+        $installed = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -in @('RemoteHostWatchdog', 'RemoteClientWatchdog') })
+        if ($installed.Count -gt 0) { Ok ('rol tespiti kurulu gorevlerle tutarli: ' + (($installed | ForEach-Object { $_.TaskName }) -join ', ')) $true }
+        else { Ok 'rol tespiti: bu makinede host/istemci gorevi kurulu degil (KURULU DEGIL beklenir)' ($role.Role -eq 'manual' -or $role.Role -eq 'none') }
     }
 }
 
