@@ -99,20 +99,37 @@ if (Test-Path $crdDir) {
 $cfgPath = 'C:\ProgramData\Google\Chrome Remote Desktop\host.json'
 $svcPath = $crdSvc.PathName
 if ($svcPath -and $svcPath -match '--host-config="?([^";]+)"?') { $cfgPath = $matches[1].Trim() }
+$cfgDir = Split-Path -Parent $cfgPath
+$cfgUnpriv = ''
+if ($cfgDir) { $cfgUnpriv = Join-Path $cfgDir 'host_unprivileged.json' }
 Add-Line ('- Host config yolu: ' + $cfgPath + ' | var=' + (Test-Path -LiteralPath $cfgPath))
 if (Test-Path -LiteralPath $cfgPath) {
     $fi = Get-Item -LiteralPath $cfgPath
     Add-Line ('  - degisiklik: ' + $fi.LastWriteTime + ' | boyut: ' + $fi.Length)
+}
+$cfgRead = $cfgPath
+$j = $null
+try { if (Test-Path -LiteralPath $cfgRead) { $j = Get-Content -LiteralPath $cfgRead -Raw | ConvertFrom-Json } }
+catch { Add-Line ('  - ' + (Split-Path -Leaf $cfgRead) + ' okunamadi (yetki kisitlamasi olabilir): ' + $_.Exception.Message) }
+if (-not $j -and $cfgUnpriv -and (Test-Path -LiteralPath $cfgUnpriv)) {
     try {
-        $j = Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json
-        foreach ($p in $j.PSObject.Properties) {
-            $v = [string]$p.Value
-            if ($p.Name -match '(?i)token|secret|password|key|credential') { Add-Line ('  - ' + $p.Name + ' = ' + (Mask $v) + ' [gizli: maskelendi]') }
-            else { Add-Line ('  - ' + $p.Name + ' = ' + (Mask $v)) }
-        }
-        if (-not $j.PSObject.Properties['host_id']) { Add-Suspect 'host.json var ama host_id alani yok' 'yuksek' }
-    } catch { Add-Line '  - host.json okunamadi (bozuk JSON?)'; Add-Suspect 'host.json bozuk' 'yuksek' }
-} else { Add-Suspect 'host.json YOK -> cihaz Google hesabinda listelenmiyor, yeniden kayit gerekir' 'kritik' }
+        $j = Get-Content -LiteralPath $cfgUnpriv -Raw | ConvertFrom-Json
+        $cfgRead = $cfgUnpriv
+        Add-Line ('  - host.json okunamadi/yok: host_unprivileged.json kullanildi (normal kullanici icin okunabilir kayit)')
+    } catch { Add-Line ('  - host_unprivileged.json da okunamadi: ' + $_.Exception.Message) }
+}
+if ($j) {
+    foreach ($p in $j.PSObject.Properties) {
+        $v = [string]$p.Value
+        if ($p.Name -match '(?i)token|secret|password|key|credential') { Add-Line ('  - ' + $p.Name + ' = ' + (Mask $v) + ' [gizli: maskelendi]') }
+        else { Add-Line ('  - ' + $p.Name + ' = ' + (Mask $v)) }
+    }
+    if (-not $j.PSObject.Properties['host_id']) { Add-Suspect ((Split-Path -Leaf $cfgRead) + ' var ama host_id alani yok') 'yuksek' }
+} elseif (Test-Path -LiteralPath $cfgPath) {
+    Add-Suspect 'host.json okunamadi (yetki) -> yonetici olarak tekrar calistirin' 'orta'
+} else {
+    Add-Suspect 'host.json YOK -> cihaz Google hesabinda listelenmiyor, yeniden kayit gerekir' 'kritik'
+}
 $pd = Get-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\Google\Chrome Remote Desktop\paired-clients' -ErrorAction SilentlyContinue
 if ($pd) { Add-Line ('- Pairs/linked clients anahtarlari: ' + (@($pd.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' }).Count)) }
 $logKey = Get-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\Google\Chrome Remote Desktop\logging' -ErrorAction SilentlyContinue

@@ -68,6 +68,13 @@ Tepsisindeki simge **duruma göre renklenir**: yeşil (ayakta), kırmızı (soru
 sağ tıkla: *Şimdi denetle*, *Kontrol panelini aç*, *Sessiz mod*, *Log klasörünü aç*, *Google Remote Desktop*,
 *Watchdog kur*, *Teşhis raporu üret*, *Tray'den kapat*. Çift tıklama paneli açar. Tek kopya çalışır (mutex).
 
+Üst çubuktaki **sayaç** sonraki otomatik denetimin kalan süresini **saniye cinsinden** gösterir
+(`Otomatik: 03:24 (204 sn)`). Süre dolunca `bekleniyor`, görev gecikirse `gecikti`, elle denetleme sürerken
+`Denetleniyor: N sn` yazar; fare ile üzerine gelince aralık, kaynak ve son kontrol saati görünür. Kalan süre
+"Bağlantılar" sekmesinin alt satırında ve *Genel durum* ortam bilgisinde de yer alır. *Şimdi denetle* artık
+denetimi arka planda çalıştırır: arayüz donmaz, bitince bağlantı/genel durum/bekleyen işler/günlük kendiliğinden
+yenilenir (buton ve sayaç geçen süreyi gösterir).
+
 Panelde dört sekme:
 
 **1. Durum** — sistem ayakta mı, uzak makinenin her kontrolünün sonucu, bu makinenin (istemci) kontrolü,
@@ -94,7 +101,9 @@ Kaydet dediğinde `config.json` güncellenir, bir sonraki denetimde geçerli olu
   başlatır, servisi `Automatic` yapar ve çökerse Windows'un kendini yeniden başlatmasını sağlar
   (`sc.exe failure ... actions= restart/5000/restart/15000/restart/60000`).
   `host.json`/`host_id` yoksa bunu **otomatik çözemez** (cihaz Google listesinden düşer) — loglar ve uyarı
-  gönderir, cihazın yeniden kaydedilmesi gerektiğini söyler.
+  gönderir, cihazın yeniden kaydedilmesi gerektiğini söyler. Kayıt okunurken önce `host.json`, yetki
+  engellenirse aynı klasördeki **`host_unprivileged.json`** kullanılır; böylece yükseltmesiz elle denetimlerde
+  (`Şimdi denetle`) kayıtlı cihaz yanlışlıkla "KAYITSIZ" görünmez.
 - **Windows RDP**: `fDenyTSConnections`, `RemoteDesktop*` firewall kuralları (dil-bağımsız kural adlarıyla),
   `TermService`/`UmRdpService` durumu ve 3389 dinleme durumu.
 - **Sunucu modu**: AC/DC uyku, hibernasyon ve disk zaman aşımlarını kapatır, **Fast Startup**'ı kapatır

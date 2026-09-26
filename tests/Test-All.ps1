@@ -211,6 +211,13 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'istemci allOk dogrudan targetResults uzerinden hesaplaniyor (B4)' ($clientText2 -notmatch '\$allOk = \$signal -and \$targets')
     Ok 'istemci targetResults script kapsaminda ataniyor (B5)' ($clientText2 -match '\$script:TargetResults = @\(Test-RemoteTargets\)')
     Ok 'host ServerMode=false iken guc kontrolu atlandi olarak isaretleniyor (B6)' ($hostText -match 'ServerMode kapali - kontrol atlandi')
+    Ok 'panel otomatik denetim sayaci fonksiyonlari tanimli (B7)' (($panelText -match 'function Get-NextCheck') -and ($panelText -match 'function Update-Countdown') -and ($panelText -match 'function Resolve-CheckInterval') -and ($panelText -match 'function Format-ShortSpan'))
+    Ok 'panel sayac gostergesi XAML olarak tanimli (B8)' (($panelText -match 'x:Name="TxtNext"') -and ($panelText -match 'x:Name="NextBadge"'))
+    Ok 'panel sayaci 1 saniyelik zamanlayici ile guncelleniyor (B9)' ($panelText -match 'Tick\.Interval = \[TimeSpan\]::FromSeconds\(1\)')
+    Ok 'panel elle denetlemeyi arka planda calistirip sonunda tumunu yeniliyor (B10)' (($panelText -match "BtnCheck'\)\.Add_Click\(\{ Start-ManualCheck \}\)") -and ($panelText -match 'function Start-ManualCheck') -and ($panelText -match 'function Test-ManualCheckRunning') -and ($panelText -match 'function Complete-ManualCheck') -and ($panelText -notmatch "BtnCheck'\)\.Add_Click\(\{ Invoke-Script"))
+    Ok 'panel kalan sureyi saniye cinsinden yaziyor (B11)' (($panelText -match 'function Format-ShortSpan') -and ($panelText -match 'return \(\[string\]\$s \+ '' sn''\)') -and ($panelText -match 'kalan sure sag ustteki sayacta gorunur'))
+    Ok 'host CRD kaydini host_unprivileged.json ile de okuyabiliyor (B12)' (($hostText -match 'host_unprivileged\.json') -and ($hostText -match 'crdCandidates'))
+    Ok 'host rapor modu (-Check) yeniden baslatma degerlendirmesi yapmiyor (B13)' ($hostText -match "rapor modu \(-Check\): yeniden baslatma degerlendirmesi")
     $state = Get-State
     Ok 'Get-State varsayilan sayaclari sifir' (([int]$state.ConsecutiveFailures -eq 0) -and ([int]$state.NetRepairRung -eq 0))
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -289,6 +296,13 @@ if ($Section -eq 0 -or $Section -eq 3) {
         Ok 'devre kesici ayarı yardım konularında anlatılıyor' ($hasBudget.Count -ge 1)
         $crdRow = $rows | Where-Object { $_.Name -eq 'Google Remote Desktop kaydı' } | Select-Object -First 1
         Ok ('Get-Connections: CRD kaydi durumu "' + $crdRow.StateText + '"') ($crdRow.StateText -in @('KAYITLI', 'KAYITSIZ'))
+        $tunRow = $rows | Where-Object { $_.Name -eq 'VS Code Tunnel' } | Select-Object -First 1
+        $tunCheck = @($hj.checks | Where-Object { [string]$_.name -eq 'VS Code Tunnel' } | Select-Object -First 1)
+        if ($tunCheck -and [bool]$tunCheck.skipped) {
+            Ok 'Get-Connections: atlanmis tunnel bilgi satiri (IZLENMIYOR)' ($tunRow -and $tunRow.StateText -eq 'İZLENMİYOR')
+        } else {
+            Ok 'Get-Connections: tunnel satiri durumu gecerli' ($null -eq $tunRow -or $tunRow.StateText -in @('ÇALIŞIYOR', 'KAPALI', 'İZLENMİYOR'))
+        }
         $act = @(Get-Actions)
         Ok ('Get-Actions: ' + $act.Count + ' madde') ($act.Count -ge 1)
         $keys = @($act | ForEach-Object { $_.Key })
@@ -316,6 +330,7 @@ if ($Section -eq 0 -or $Section -eq 3) {
 if ($Section -eq 0 -or $Section -eq 4) {
     Head '4) Istemci fonksiyonlari'
     foreach ($code in (Get-FnCode $Client_ @('Test-TcpPort'))) { Invoke-Expression $code }
+    foreach ($code in (Get-FnCode $Panel @('Get-Json'))) { Invoke-Expression $code }
     $rdpListening = @([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object { $_.Port -eq 3389 }).Count -gt 0
     $closed = Test-TcpPort -HostName '127.0.0.1' -Port 9 -TimeoutMs 1500
     Ok 'Test-TcpPort: kapali port false dondu' ([bool]$closed -eq $false)

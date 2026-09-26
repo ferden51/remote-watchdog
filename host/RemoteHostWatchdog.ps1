@@ -41,7 +41,7 @@ $TaskName = 'RemoteHostWatchdog'
 $script:Results = New-Object System.Collections.ArrayList
 $script:PublicIp = $null
 $global:cfg = $null
-$RebootableProblems = @('Internet', 'Saat senkronu', 'Ag katmani', 'Windows RDP', 'Guc/uyku ayarlari', 'CRD servisi')
+$RebootableProblems = @('Internet', 'Saat senkronu', 'Ag katmani', 'Windows RDP', 'Guc/uyku ayarlari')
 
 function Test-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -395,8 +395,18 @@ function Test-CrdService {
     $cfgPath = Get-CrdHostConfigPath
     $hostId = $null
     $registered = $false
-    if (Test-Path -LiteralPath $cfgPath) {
-        try { $hostId = (Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json).host_id; $registered = [bool]$hostId } catch { }
+    $readError = ''
+    $hostIdFile = ''
+    # host.json SYSTEM/Administrator ile kisitli olabilir: ayni klasordeki host_unprivileged.json normal kullanici icin okunabilir
+    $crdCandidates = @($cfgPath)
+    $crdDir = Split-Path -Parent $cfgPath
+    if ($crdDir) { $crdCandidates += (Join-Path $crdDir 'host_unprivileged.json') }
+    foreach ($cand in @($crdCandidates | Where-Object { $_ } | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $cand)) { continue }
+        try {
+            $hid = (Get-Content -LiteralPath $cand -Raw -ErrorAction Stop | ConvertFrom-Json).host_id
+            if ($hid) { $hostId = $hid; $registered = $true; $hostIdFile = $cand; break }
+        } catch { if (-not $readError) { $readError = ($_.Exception.Message + ' [' + (Split-Path -Leaf $cand) + ']') } }
     }
     $ok = $true
     $repair = @()
@@ -415,7 +425,7 @@ function Test-CrdService {
     $state = Get-State
     if ($daemon.Count -eq 0) {
         $ok = $false
-        if ($cfg.FixCrd -and (Test-Admin) -and -not $Check) {
+        if ($cfg.FixCrd -and (Test-Admin) -and -not $Check -and (Get-CrdActiveSession)) {
             try {
                 Stop-Service -Name 'chromoting' -Force -ErrorAction SilentlyContinue
                 Get-Process -Name 'remoting_host', 'remoting_start_host' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -423,11 +433,13 @@ function Test-CrdService {
                 Start-Service -Name 'chromoting' -ErrorAction Stop
                 $repair += 'daemon yeniden baslatildi'
             } catch { $repair += 'yeniden baslatma basarisiz: ' + $_.Exception.Message }
-        } else { $repair += 'daemon yok' }
+        } else {
+            $repair += 'daemon yok'
+        }
     } elseif ($registered -and $conns -eq 0) {
         $state.CrdNoConnCycles = [int]$state.CrdNoConnCycles + 1
-        $ok = $false
-        $repair += 'Google baglantisi yok (' + $state.CrdNoConnCycles + '/' + $cfg.CrdNoConnRestartCycles + '. dongu)'
+        # CRD baglantisi olmamasi bir hata veya reboot nedeni degildir, sadece bos durum / sinyal bilgisi olarak kaydedilir
+        $detail += ' (bosta veya baglanti yok)'
         if ($state.CrdNoConnCycles -ge [int]$cfg.CrdNoConnRestartCycles -and $cfg.FixCrd -and (Test-Admin) -and -not $Check -and -not (Get-CrdActiveSession)) {
             try {
                 Stop-Service -Name 'chromoting' -Force -ErrorAction Stop
@@ -435,8 +447,8 @@ function Test-CrdService {
                 Start-Sleep 2
                 Start-Service -Name 'chromoting' -ErrorAction Stop
                 $state.CrdNoConnCycles = 0
-                $repair += 'takilmis host yeniden baslatildi'
-            } catch { $repair += 'yeniden baslatma basarisiz: ' + $_.Exception.Message }
+                $repair += 'uzun sure baglanti olmadi, chromoting servisi tazelendi'
+            } catch { $repair += 'servis tazeleme basarisiz: ' + $_.Exception.Message }
         }
     } else {
         $state.CrdNoConnCycles = 0
@@ -449,11 +461,16 @@ function Test-CrdService {
         try { Set-Service -Name 'chromoting' -StartupType Automatic; $repair += 'servis Automatic yapildi' } catch { }
     }
     if (-not $registered) { $ok = $false; $detail += ' -> cihaz Google listesinde gorunmez' }
-    $m = [ordered]@{ servis = [string]$svc.Status; startType = [string]$svc.StartType; hostId = $(if ($registered) { 'var' } else { 'yok' }); googleBaglanti = $conns; daemon = $daemon.Count; yasSaat = [math]::Round($ageH, 1) }
+    $m = [ordered]@{ servis = [string]$svc.Status; startType = [string]$svc.StartType; hostId = $(if ($registered) { 'var' } else { 'yok' }); hostIdFile = $(if ($hostIdFile) { Split-Path -Leaf $hostIdFile } else { '' }); googleBaglanti = $conns; daemon = $daemon.Count; yasSaat = [math]::Round($ageH, 1) }
     if (-not $registered) {
         $chrome = (Test-Path 'C:\Program Files\Google\Chrome\Application\chrome.exe') -or (Test-Path 'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe')
-        $repair = 'Cihaz Google hesabina kayitli degil (host.json yok) ve bu yuzden CRD servisi calisamaz. Tek seferlik kurulum: bu makinede once Google Chrome kurun, sonra https://remotedesktop.google.com/headless adresinde "Set up remote access" deyip alinan PIN ile kendi cihazinizdan "+" ile ekleyin. Tarayicida acik olan Google oturumu bu kaydi olusturmaz.'
-        if (-not $chrome) { $repair = 'Once Google Chrome kurulu degil (CRD host buna bagli), ardindan https://remotedesktop.google.com/headless -> "Set up remote access" ile cihazi kaydedin. Tarayicida acik olan Google oturumu bu kaydi olusturmaz.' }
+        if ($readError) {
+            $repair = 'host.json ve host_unprivileged.json okunamadi (' + $readError + '). Yonetici olarak calistirip tekrar deneyin.'
+            $m['readError'] = $readError
+        } else {
+            $repair = 'Cihaz Google hesabina kayitli degil (host.json ve host_unprivileged.json yok) ve bu yuzden CRD servisi calisamaz. Tek seferlik kurulum: bu makinede once Google Chrome kurun, sonra https://remotedesktop.google.com/headless adresinde "Set up remote access" deyip alinan PIN ile kendi cihazinizdan "+" ile ekleyin. Tarayicida acik olan Google oturumu bu kaydi olusturmaz.'
+            if (-not $chrome) { $repair = 'Once Google Chrome kurulu degil (CRD host buna bagli), ardindan https://remotedesktop.google.com/headless -> "Set up remote access" ile cihazi kaydedin. Tarayicida acik olan Google oturumu bu kaydi olusturmaz.' }
+        }
         $m['chromeInstalled'] = $chrome
         $m['setupRequired'] = $true
     }
@@ -559,17 +576,19 @@ function Test-Tunnel {
     if (-not $codeCmd) { Add-Result 'VS Code Tunnel' $true 'code CLI yok' '' $true; return }
     $procs = @(Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -match 'tunnel' -and $_.CommandLine -match 'code' })
     $running = $procs.Count -gt 0
-    $ok = $true
-    $repair = ''
-    if (-not $running) {
-        $ok = $false
-        if ($cfg.TunnelRepair -and -not $Check) {
-            if ([Environment]::UserInteractive) {
-                Start-Process -FilePath $codeCmd.Source -ArgumentList @('tunnel', '--name', $cfg.TunnelName) -ErrorAction SilentlyContinue
-                $repair = 'code tunnel baslatildi'
-                $ok = $true
-            } else { $repair = 'tunnel yok; SYSTEM altinda baslatilamaz' }
-        } else { $repair = 'calisan tunnel yok' }
+    if ($running) { Add-Result 'VS Code Tunnel' $true ('surec=' + $procs.Count) ''; return }
+    if (-not $cfg.TunnelRepair) {
+        Add-Result 'VS Code Tunnel' $true 'tunnel izlenmiyor (istege bagli, kapali)' 'Ayarlar > VS CODE TUNNEL > "Tunnel yoksa yeniden baslat" kapali oldugu icin atlandi' $true
+        return
+    }
+    $ok = $false
+    $repair = 'calisan tunnel yok'
+    if (-not $Check) {
+        if ([Environment]::UserInteractive) {
+            Start-Process -FilePath $codeCmd.Source -ArgumentList @('tunnel', '--name', $cfg.TunnelName) -ErrorAction SilentlyContinue
+            $repair = 'code tunnel baslatildi'
+            $ok = $true
+        } else { $repair = 'tunnel yok; SYSTEM altinda baslatilamaz' }
     }
     Add-Result 'VS Code Tunnel' $ok ('surec=' + $procs.Count) $repair
 }
@@ -879,6 +898,7 @@ function Get-RebootDecision {
 function Invoke-RebootIfNeeded {
     param([bool]$AllOk)
     $cfg = $global:cfg
+    if ($Check) { Write-Log 'INFO' 'rapor modu (-Check): yeniden baslatma degerlendirmesi ve durum sayaci degistirilmedi'; return }
     $state = Get-State
     if ($AllOk) {
         $state.ConsecutiveFailures = 0
@@ -897,7 +917,8 @@ function Invoke-RebootIfNeeded {
     }
     $bad = @($script:Results | Where-Object { -not $_.Ok -and -not $_.Skipped })
     $unregistered = @($bad | Where-Object { $_.Name -eq 'CRD servisi' -and $_.Detail -match 'host_id=YOK' }).Count -gt 0
-    if ($unregistered -and $cfg.RebootSkipIfUnregistered) {
+    $onlyUnregistered = $unregistered -and ($bad | Where-Object { $_.Name -ne 'CRD servisi' }).Count -eq 0
+    if ($onlyUnregistered -and $cfg.RebootSkipIfUnregistered) {
         Write-Log 'INFO' 'yeniden baslatma atlandi: host.json yok, restart ile duzelmez (host yeniden kaydedilmeli)'
         return
     }

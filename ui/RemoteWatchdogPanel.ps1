@@ -59,6 +59,13 @@ $script:RoleCache = $null
 $script:RoleCacheUntil = [datetime]::MinValue
 $script:Mutex = New-Object System.Threading.Mutex($false, 'Local\RemoteWatchdogPanel')
 $script:Page = 'overview'
+$script:CheckBusy = $false
+$script:CheckBusySince = $null
+$script:CheckProcs = @()
+$script:IntervalCacheMin = 0
+$script:IntervalCacheSrc = ''
+$script:IntervalCacheUntil = [datetime]::MinValue
+$script:ConnSummary = @{ Ok = 0; Bad = 0; Info = 0; LastRun = $null }
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
@@ -111,6 +118,69 @@ $script:C = @{
 
 function Bx { param([string]$Hex) if ($script:C.ContainsKey($Hex)) { $Hex = $script:C[$Hex] } return [System.Windows.Media.BrushConverter]::new().ConvertFromString($Hex) }
 function El { param($Window, [string]$Name) return $Window.FindName($Name) }
+
+# --- Otomatik denetim sayaci yardimcilari (kalan sure, sn) ---
+function Format-ShortSpan {
+    param([double]$Seconds)
+    if ($Seconds -lt 0) { $Seconds = 0 }
+    $s = [int][math]::Ceiling($Seconds)
+    if ($s -ge 3600) { return ([string][int][math]::Floor($s / 3600) + ' sa ' + [string][int](($s % 3600) / 60) + ' dk') }
+    if ($s -ge 60) { return (([int][math]::Floor($s / 60)).ToString('00') + ':' + ($s % 60).ToString('00')) }
+    return ([string]$s + ' sn')
+}
+
+function Resolve-CheckInterval {
+    param([switch]$Force)
+    if (-not $Force -and $script:IntervalCacheMin -ge 1 -and $script:IntervalCacheUntil -gt (Get-Date)) { return $script:IntervalCacheMin }
+    $min = 0
+    $src = ''
+    $hj = Get-Json $HostJson
+    if ($hj -and $hj.config -and $hj.config.intervalMinutes) { $min = [double]$hj.config.intervalMinutes; $src = 'zamanlanmis gorev' }
+    if ($min -lt 1) {
+        $cfg = Get-HostConfig
+        if ([double]$cfg.IntervalMinutes -ge 1) { $min = [double]$cfg.IntervalMinutes; $src = 'panel ayari (config.json)' }
+    }
+    if ($min -lt 1) {
+        $ccfg = Get-Json $ClientConfig
+        if ($ccfg -and $ccfg.IntervalMinutes) { $min = [double]$ccfg.IntervalMinutes; $src = 'istemci gorevi' }
+    }
+    if ($min -lt 1) { $min = 5; $src = 'varsayilan 5 dk' }
+    $script:IntervalCacheMin = $min
+    $script:IntervalCacheSrc = $src
+    $script:IntervalCacheUntil = (Get-Date).AddSeconds(90)
+    return $min
+}
+
+function Get-NextCheck {
+    $st = Get-StatusInfo
+    $mins = Resolve-CheckInterval
+    $last = $null
+    $src = ''
+    foreach ($pair in @(@{ J = $st.Host; N = 'host' }, @{ J = $st.Client; N = 'istemci' })) {
+        if ($last -or -not $pair.J -or -not $pair.J.generated) { continue }
+        try {
+            $last = [datetime]::Parse([string]$pair.J.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+            $src = [string]$pair.N
+        } catch { }
+    }
+    if (-not $last -and (Test-Path -LiteralPath $HostJson)) {
+        try { $last = (Get-Item -LiteralPath $HostJson).LastWriteTime; $src = 'host (dosya)' } catch { }
+    }
+    if (-not $last) {
+        return [pscustomobject]@{
+            Known = $false; Last = $null; Next = $null; Source = ''; IntervalMinutes = $mins; IntervalSource = $script:IntervalCacheSrc
+            RemainingSeconds = 0; OverdueSeconds = 0; AgeSeconds = 0
+        }
+    }
+    $now = Get-Date
+    $next = $last.AddMinutes($mins)
+    return [pscustomobject]@{
+        Known = $true; Last = $last; Next = $next; Source = $src; IntervalMinutes = $mins; IntervalSource = $script:IntervalCacheSrc
+        RemainingSeconds = [double]($next - $now).TotalSeconds
+        OverdueSeconds = [double]($now - $next).TotalSeconds
+        AgeSeconds = [double]($now - $last).TotalSeconds
+    }
+}
 
 function Write-Trace {
     param([string]$Text)
@@ -534,6 +604,9 @@ $Xaml = @'
           <Border x:Name="Pill" Background="#1D2733" CornerRadius="14" Padding="14,6">
             <TextBlock x:Name="TxtPill" Text="..." Foreground="{StaticResource Mut}" FontWeight="SemiBold" FontSize="12.5"/>
           </Border>
+          <Border x:Name="NextBadge" Background="#1D2733" CornerRadius="14" Padding="12,6" Margin="10,0,0,0">
+            <TextBlock x:Name="TxtNext" Text="Otomatik: -" Foreground="{StaticResource Mut}" FontWeight="SemiBold" FontSize="11.5"/>
+          </Border>
         </StackPanel>
         <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
           <Button x:Name="BtnCheck" Content="Şimdi denetle" Style="{StaticResource BtnAccent}" Margin="0,0,8,0"/>
@@ -823,7 +896,9 @@ function Get-Connections {
 
     $tun = $byName['VS Code Tunnel']
     if ($tun) {
-        Add-Conn 'VS Code Tunnel' 'vscode.dev/tunels' $(if ($tun.ok) { 'ok' } else { 'warn' }) $(if ($tun.ok) { 'ÇALIŞIYOR' } else { 'KAPALI' }) ([string]$tun.detail) 'log' 'Logları aç'
+        $tunLvl = if ($tun.skipped -or $tun.ok) { 'ok' } else { 'warn' }
+        $tunState = if ($tun.skipped) { 'İZLENMİYOR' } elseif ($tun.ok) { 'ÇALIŞIYOR' } else { 'KAPALI' }
+        Add-Conn 'VS Code Tunnel' 'vscode.dev/tunels' $tunLvl $tunState ([string]$tun.detail) 'log' 'Logları aç'
     }
 
     $cfg = Get-HostConfig
@@ -863,6 +938,34 @@ function Get-Connections {
     return $rows
 }
 
+function Format-ConnSubLine {
+    param($Next)
+    $s = $script:ConnSummary
+    $line = ([string]$s.Ok + ' saglikli') + $(if ($s.Bad -gt 0) { '  |  ' + $s.Bad + ' sorunlu' } else { '' }) + $(if ($s.Info -gt 0) { '  |  ' + $s.Info + ' bilgi' } else { '' })
+    if ($s.LastRun) { $line += '   -   olcumler ' + ([datetime]$s.LastRun).ToString('HH:mm:ss') + ' (' + (Format-ShortSpan ((Get-Date) - [datetime]$s.LastRun).TotalSeconds) + ' once)' }
+    else { $line += '   -   olcum zamani bilinmiyor' }
+    if ($script:CheckBusy) {
+        $line += '   -   DENETLENIYOR (' + [int]((Get-Date) - $script:CheckBusySince).TotalSeconds + ' sn)'
+    } elseif ($null -ne $Next -and $Next.Known -and $Next.RemainingSeconds -gt 0) {
+        $line += '   -   sonraki otomatik denetim ' + $Next.Next.ToString('HH:mm:ss') + ' (' + [int][math]::Ceiling($Next.RemainingSeconds) + ' sn sonra)'
+    } elseif ($null -ne $Next -and $Next.Known) {
+        $line += '   -   otomatik denetim zamani geldi (' + [int][math]::Ceiling($Next.OverdueSeconds) + ' sn gecikme)'
+    } else {
+        $line += '   -   sonraki otomatik denetim bilinmiyor'
+    }
+    return $line
+}
+
+function Update-ConnSub {
+    param($Next)
+    $w = $script:Win
+    if (-not $w) { return }
+    $el = El $w 'TxtConnSub'
+    if (-not $el) { return }
+    $el.Text = (Format-ConnSubLine $Next)
+    $el.Foreground = $(if ($script:ConnSummary.Bad -gt 0) { Bx 'Warn' } else { Bx 'Muted' })
+}
+
 function Update-Connections {
     $rows = Get-Connections
     $items = @()
@@ -876,16 +979,56 @@ function Update-Connections {
     $cl = El $script:Win 'ConnList'
     $cl.ItemsSource = $items
     $cl.ItemTemplate = $script:Win.Resources['ConnRow']
-    $txt = ([string]$okc + ' saglikli') + $(if ($badc -gt 0) { '  |  ' + $badc + ' sorunlu' } else { '' }) + $(if ($info -gt 0) { '  |  ' + $info + ' bilgi' } else { '' })
-    (El $script:Win 'TxtConnSub').Text = ($txt + '   -   olcumler son denetimden (' + (Get-Date).ToString('HH:mm') + ')')
-    (El $script:Win 'TxtConnSub').Foreground = $(if ($badc -gt 0) { Bx 'Warn' } else { Bx 'Muted' })
+    $nx = Get-NextCheck
+    $script:ConnSummary = @{ Ok = $okc; Bad = $badc; Info = $info; LastRun = $(if ($nx.Known) { $nx.Last } else { $null }) }
+    Update-ConnSub $nx
+}
+
+function Update-Countdown {
+    $w = $script:Win
+    if (-not $w) { return }
+    $txt = El $w 'TxtNext'
+    if (-not $txt) { return }
+    $badge = El $w 'NextBadge'
+    $btn = El $w 'BtnCheck'
+    if ($script:CheckBusy) {
+        $el = [int]((Get-Date) - $script:CheckBusySince).TotalSeconds
+        $txt.Text = 'Denetleniyor: ' + $el + ' sn'
+        $txt.Foreground = Bx 'Accent'
+        if ($badge) { $badge.ToolTip = 'Elle denetleme suruyor (' + $el + ' sn). Bitince baglantilar, genel durum ve bekleyen isler yenilenir.' }
+        if ($btn) { $btn.Content = 'Denetleniyor... ' + $el + ' sn' }
+        Update-ConnSub $null
+        return
+    }
+    if ($btn -and ([string]$btn.Content) -ne 'Şimdi denetle') { $btn.Content = 'Şimdi denetle' }
+    $n = Get-NextCheck
+    $aralik = ([math]::Round([double]$n.IntervalMinutes, 1)).ToString()
+    if (-not $n.Known) {
+        $txt.Text = 'Otomatik: -'
+        $txt.Foreground = Bx 'Muted'
+        if ($badge) { $badge.ToolTip = 'Sonraki otomatik denetim bilinmiyor: last-run.json yok. Ayarlar sayfasindan "Watchdog kur" ile baslatin.' }
+    } elseif ($n.RemainingSeconds -gt 0) {
+        $txt.Text = 'Otomatik: ' + (Format-ShortSpan $n.RemainingSeconds) + ' (' + [int][math]::Ceiling($n.RemainingSeconds) + ' sn)'
+        $txt.Foreground = Bx 'Muted'
+        if ($badge) { $badge.ToolTip = 'Sonraki otomatik denetim: ' + $n.Next.ToString('HH:mm:ss') + '  (' + [int][math]::Ceiling($n.RemainingSeconds) + ' sn sonra)' + "`r`n" + 'Aralik: ' + $aralik + ' dk (' + $n.IntervalSource + ')   |   son kontrol: ' + $n.Last.ToString('HH:mm:ss') + '  (' + (Format-ShortSpan $n.AgeSeconds) + ' once, kaynak: ' + $n.Source + ')' }
+    } elseif ($n.OverdueSeconds -le [math]::Max(90.0, ([double]$n.IntervalMinutes * 30.0))) {
+        $txt.Text = 'Otomatik: bekleniyor (' + [int][math]::Ceiling($n.OverdueSeconds) + ' sn)'
+        $txt.Foreground = Bx 'Info'
+        if ($badge) { $badge.ToolTip = 'Denetim zamani geldi (' + [int][math]::Ceiling($n.OverdueSeconds) + ' sn once): zamanlanmis gorev birazdan calisir. Son kontrol: ' + $n.Last.ToString('HH:mm:ss') + '   |   aralik: ' + $aralik + ' dk (' + $n.IntervalSource + ')' }
+    } else {
+        $txt.Text = 'Otomatik: gecikti (' + (Format-ShortSpan $n.AgeSeconds) + ')'
+        $txt.Foreground = Bx 'Warn'
+        $hj = Get-Json $HostJson
+        if ($badge) { $badge.ToolTip = 'Zamanlanmis gorev calismiyor olabilir: son kontrol ' + $n.Last.ToString('HH:mm:ss') + ' (' + (Format-ShortSpan $n.AgeSeconds) + ' once), beklenen aralik ' + $aralik + ' dk (' + $n.IntervalSource + '). Gorev durumu: ' + $(if ($hj) { [string]$hj.taskState } else { 'bilinmiyor' }) + '. Cozum: "Şimdi denetle" ile elle calistirin.' }
+    }
+    Update-ConnSub $n
 }
 
 function Invoke-ConnAction {
     param([string]$Key)
     switch ($Key) {
         'host' { Invoke-Script -Path $HostScript -Args @('-Install') }
-        'run' { Invoke-Script -Path $HostScript; Invoke-Script -Path $ClientScript; Start-Sleep 4; Update-Connections; Update-Overview }
+        'run' { Start-ManualCheck }
         'crd' { Start-Process 'https://remotedesktop.google.com/headless' }
         'docs' { Invoke-Script -Path $HostDocs -Args @('-Force') -Wait }
         'log' { Show-Page 'log'; Update-Log }
@@ -896,6 +1039,48 @@ function Invoke-ConnAction {
         }
         default { }
     }
+}
+
+function Start-ManualCheck {
+    if ($script:CheckBusy) {
+        [System.Windows.MessageBox]::Show(('Denetleme zaten suruyor (' + [int]((Get-Date) - $script:CheckBusySince).TotalSeconds + ' sn). Bitmesini bekleyin; kalan sure sag ustteki sayacta gorunur.'), 'RemoteWatchdog') | Out-Null
+        return
+    }
+    $procs = New-Object System.Collections.ArrayList
+    foreach ($p in @($HostScript, $ClientScript)) {
+        if (-not (Test-Path -LiteralPath $p)) { continue }
+        $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $p + '"'))
+        try { [void]$procs.Add((Start-Process -FilePath 'powershell.exe' -ArgumentList $a -WindowStyle Hidden -PassThru)) }
+        catch { Write-Trace ('denetleme baslatilamadi (' + $p + '): ' + $_.Exception.Message) }
+    }
+    if ($procs.Count -eq 0) { [System.Windows.MessageBox]::Show('Denetleme baslatilamadi: watchdog betigi bulunamadi.', 'RemoteWatchdog') | Out-Null; return }
+    $script:CheckBusy = $true
+    $script:CheckBusySince = Get-Date
+    $script:CheckProcs = @($procs)
+    Write-Trace ('elle denetleme basladi (' + $script:CheckProcs.Count + ' surec) - arka planda, arayuz donmaz')
+    Update-Countdown
+}
+
+function Test-ManualCheckRunning {
+    if (-not $script:CheckBusy) { return $false }
+    if (@($script:CheckProcs).Count -eq 0) { return $true }
+    return (@($script:CheckProcs | Where-Object { $_.HasExited -eq $false }).Count -gt 0)
+}
+
+function Complete-ManualCheck {
+    $el = [int]((Get-Date) - $script:CheckBusySince).TotalSeconds
+    $script:CheckBusy = $false
+    $script:CheckProcs = @()
+    $btn = El $script:Win 'BtnCheck'
+    if ($btn) { $btn.Content = 'Şimdi denetle' }
+    Resolve-CheckInterval -Force | Out-Null
+    Update-Connections
+    Update-Overview
+    Update-Actions
+    if ($script:Page -eq 'log') { Update-Log }
+    Refresh-Icon
+    Update-Countdown
+    Write-Trace ('elle denetleme bitti (' + $el + ' sn) - baglanti/genel durum/bekleyen is/gunluk yenilendi')
 }
 
 function Show-Page {
@@ -977,6 +1162,9 @@ function Update-Overview {
         [void]$env.Add('daima zorla     : ' + $(if ($hj.config.forceRestartAlways) { 'ACIK' } else { 'kapali' }) + $(if ($hj.config.forceRestartUntil) { '  (' + $hj.config.forceRestartUntil + ')' } else { '' }))
         [void]$env.Add('ardisik hata    : ' + $hj.state.consecutiveFailures + '  |  ag onarim kademesi: ' + $hj.state.netRepairRung)
         [void]$env.Add('tatil listesi   : ' + ((@($hj.config.holidays)) -join ', '))
+        $nx = Get-NextCheck
+        if ($nx.Known) { [void]$env.Add('sonraki kontrol : ' + $nx.Next.ToString('HH:mm:ss') + '  (kalan ' + [int][math]::Ceiling($nx.RemainingSeconds) + ' sn, aralik ' + ([math]::Round([double]$nx.IntervalMinutes, 1)) + ' dk - ' + $nx.IntervalSource + ')') }
+        else { [void]$env.Add('sonraki kontrol : bilinmiyor (last-run.json yok)') }
     } else { [void]$env.Add('last-run.json bulunamadi: ' + $HostJson) }
     (El $script:Win 'TxtEnv').Text = ($env -join "`n")
 
@@ -1564,7 +1752,7 @@ function Invoke-TrayAction {
             Update-Connections
         }
         'toggle' { if ($script:Win.IsVisible) { $script:Win.Hide() } else { $script:Win.Show(); $script:Win.Activate() } }
-        'check' { Invoke-Script -Path $HostScript; Invoke-Script -Path $ClientScript; Start-Sleep 4; Update-Connections; Update-Overview; Show-Page 'conn' }
+        'check' { $script:Win.Show(); $script:Win.Activate(); Show-Page 'conn'; Start-ManualCheck }
         'silent' { Set-SilentMode -Toggle | Out-Null }
         'help' { Start-HelpTour -Restart | Out-Null; Show-Balloon -Title 'Ayar yardımı' -Text 'Ayarlar hakkında bilgiler sırayla gösterilecek (10 konu). Kapatmak için balonu tıklayıp geçebilirsiniz.' -Icon 'Info' -Always }
         'balloon' {
@@ -1642,7 +1830,7 @@ function Wire-UI {
             if (-not $btn) { return }
             Invoke-ConnAction ([string]$btn.Tag)
         })
-    (El $w 'BtnCheck').Add_Click({ Invoke-Script -Path $HostScript; Invoke-Script -Path $ClientScript; Start-Sleep 3; Update-Overview; Update-Actions })
+    (El $w 'BtnCheck').Add_Click({ Start-ManualCheck })
     (El $w 'BtnDiag').Add_Click({
             $r = [System.Windows.MessageBox]::Show('Collect-Diagnostics calisacak (okuma modunda, ~40 sn). Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Question')
             if ($r -eq 'Yes') { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaüstüne yazıldı.', 'RemoteWatchdog') | Out-Null }
@@ -1674,6 +1862,18 @@ function Wire-UI {
     $script:Timer.Interval = [TimeSpan]::FromSeconds(20)
     $script:Timer.Add_Tick({ Update-Connections; Update-Overview; Update-Actions; Refresh-Icon })
     $script:Timer.Start()
+
+    # 1 sn'lik sayac: sonraki otomatik denetimin kalan suresini (sn) gosterir, elle denetleme bitisini yakalar
+    $script:Tick = New-Object System.Windows.Threading.DispatcherTimer
+    $script:Tick.Interval = [TimeSpan]::FromSeconds(1)
+    $script:Tick.Add_Tick({
+            try {
+                if ($script:CheckBusy) {
+                    if (Test-ManualCheckRunning) { Update-Countdown } else { Complete-ManualCheck }
+                } else { Update-Countdown }
+            } catch { Write-Trace ('sayac hatasi: ' + $_.Exception.Message) }
+        })
+    $script:Tick.Start()
 
     $script:ShowTimer = New-Object System.Windows.Threading.DispatcherTimer
     $script:ShowTimer.Interval = [TimeSpan]::FromSeconds(3)
@@ -1739,6 +1939,7 @@ Show-Page 'conn'
 Update-Connections
 Update-Overview
 Update-Actions
+Update-Countdown
 Build-Settings
 
 if ($SelfTest) {
@@ -1761,6 +1962,49 @@ if ($SelfTest) {
     $enc.Save($fs)
     $fs.Close()
     Write-Host ('Onizleme yazildi: ' + $PreviewPath)
+    try {
+        Update-Countdown
+        $nx = Get-NextCheck
+        $ntext = [string](El $w 'TxtNext').Text
+        Write-Host ('Otomatik denetim sayaci: "' + $ntext + '" | aralik=' + ([math]::Round([double]$nx.IntervalMinutes, 1)) + ' dk (' + $nx.IntervalSource + ') | kaynak=' + $(if ($nx.Source) { $nx.Source } else { '-' }) + ' | son=' + $(if ($nx.Last) { $nx.Last.ToString('HH:mm:ss') } else { '-' }) + ' | sonraki=' + $(if ($nx.Next) { $nx.Next.ToString('HH:mm:ss') } else { '-' }) + ' | kalan=' + [int][math]::Ceiling($nx.RemainingSeconds) + ' sn')
+        if (-not $nx.Known) {
+            Write-Host 'Sayac: last-run.json yok - bekleme durumu gosteriliyor (beklenen)' -ForegroundColor DarkGray
+        } elseif ($ntext -notmatch '\d') {
+            Write-Host 'SELFTEST UYARI: sayac metninde saniye/kalan sure yok!' -ForegroundColor Red
+        } else {
+            Write-Host 'Sayac dogrulandi: kalan sure saniye cinsinden gosteriliyor' -ForegroundColor Green
+        }
+        if ([string](El $w 'TxtConnSub').Text -notmatch 'sonraki otomatik denetim|otomatik denetim zamani geldi|DENETLENIYOR') {
+            Write-Host 'SELFTEST UYARI: baglanti sayfasi alt satirinda otomatik denetim bilgisi yok!' -ForegroundColor Red
+        } else {
+            Write-Host ('Baglanti alt satiri: ' + [string](El $w 'TxtConnSub').Text) -ForegroundColor Green
+        }
+        $bx = $script:CheckBusy
+        $bs = $script:CheckBusySince
+        $script:CheckBusy = $true
+        $script:CheckBusySince = (Get-Date).AddSeconds(-7)
+        Update-Countdown
+        $busyText = [string](El $w 'TxtNext').Text
+        $busyBtn = [string](El $w 'BtnCheck').Content
+        $busySub = [string](El $w 'TxtConnSub').Text
+        $script:CheckBusy = $bx
+        $script:CheckBusySince = $bs
+        Update-Countdown
+        Write-Host ('Elle denetleme durumu (kuru test, surec baslatilmadi): sayac="' + $busyText + '" | dugme="' + $busyBtn + '" | alt satir="' + $busySub + '"')
+        if ($busyText -match 'Denetleniyor' -and $busyBtn -match 'Denetleniyor' -and $busySub -match 'DENETLENIYOR') { Write-Host 'Elle denetleme durumu dogrulandi (sayac + dugme + alt satir)' -ForegroundColor Green }
+        else { Write-Host 'SELFTEST UYARI: elle denetleme sirasinda sayac/dugme guncellenmiyor!' -ForegroundColor Red }
+        # surec bitisini yakalama (1 sn'lik sayac): zararsiz kisa omurlu surec ile dogrulanir
+        $noop = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-Command', 'exit 0') -WindowStyle Hidden -PassThru
+        $script:CheckBusy = $true
+        $script:CheckBusySince = Get-Date
+        $script:CheckProcs = @($noop)
+        $waited = 0
+        while ((Test-ManualCheckRunning) -and $waited -lt 20000) { Start-Sleep -Milliseconds 250; $waited += 250 }
+        $detected = -not (Test-ManualCheckRunning)
+        Write-Host ('Denetleme bitis yakalama testi: bitti=' + $detected + ' (' + $waited + ' ms, surec PID ' + $noop.Id + ')')
+        if ($detected) { Complete-ManualCheck; Write-Host ('Elle denetleme bitisi dogrulandi: dugme="' + [string](El $w 'BtnCheck').Content + '" | sayac="' + [string](El $w 'TxtNext').Text + '"') -ForegroundColor Green }
+        else { $script:CheckBusy = $false; $script:CheckProcs = @(); Write-Host 'SELFTEST UYARI: surec bitisi yakalanamadi (sayac islevi calismiyor olabilir)!' -ForegroundColor Red }
+    } catch { Write-Host ('Sayac testi hata: ' + $_.Exception.Message) -ForegroundColor Red }
     Write-Host ('Baglanti satiri: ' + (El $w 'ConnList').Items.Count + ' | kart: ' + (El $w 'Cards').Items.Count + ' | bekleyen is: ' + (El $w 'ActionList').Items.Count + ' | ayar satiri: ' + (El $w 'SettingsPanel').Children.Count)
     try {
         $found = @(Find-AllControls $w)
