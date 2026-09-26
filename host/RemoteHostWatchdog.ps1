@@ -988,8 +988,13 @@ function Install-Watchdog {
     Write-Log 'INFO' ('zamanlanmis gorev kuruldu: ' + $TaskName + ' (acilista + oturum acilista + her ' + $IntervalMinutes + ' dk)')
     $saver = Join-Path (Split-Path -Parent $ScriptPath) 'Protect-OpenDocuments.ps1'
     if (Test-Path -LiteralPath $saver) {
-        $officeTask = 'RemoteHostOfficeSaver'
+    $officeTask = 'RemoteHostOfficeSaver'
+    $officeVbs = Join-Path (Split-Path -Parent $ScriptPath) 'Start-OfficeSaver.vbs'
+    if (Test-Path -LiteralPath $officeVbs) {
+        $act2 = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"' + $officeVbs + '"')
+    } else {
         $act2 = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $saver + '"')
+    }
         $trg2 = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
         $trg2b = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes 2)
         $prn2 = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
@@ -1005,6 +1010,7 @@ function Install-Watchdog {
 
 function Uninstall-Watchdog {
     if (-not (Test-Admin)) { Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ScriptPath + '"'), '-Uninstall'); return }
+    Write-Log 'WARN' ('Uninstall-Watchdog CALISTIRILDI (PID ' + $PID + ') - zamanlanmis gorevler kaldiriliyor')
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false; Write-Host ('Zamanlanmis gorev kaldirildi: ' + $TaskName) }
     if (Get-ScheduledTask -TaskName 'RemoteHostOfficeSaver' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostOfficeSaver' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostOfficeSaver' }
     Write-Host ('Config/loglar korundu: ' + $BaseDir)

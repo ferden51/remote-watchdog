@@ -53,6 +53,8 @@ $script:LastState = ''
 $script:LastColor = $null
 $script:HIcon = [IntPtr]::Zero
 $script:ExitRequested = $false
+$script:RoleCache = $null
+$script:RoleCacheUntil = [datetime]::MinValue
 $script:Mutex = New-Object System.Threading.Mutex($false, 'Local\RemoteWatchdogPanel')
 $script:Page = 'overview'
 
@@ -61,6 +63,34 @@ Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+
+$script:MutexAcquired = $false
+$script:OtherInstance = $null
+try {
+    $script:MutexAcquired = $script:Mutex.WaitOne(0)
+} catch { $script:MutexAcquired = $true }
+if (-not $script:MutexAcquired -and -not $SelfTest) {
+    $script:OtherInstance = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.CommandLine -match ('-File\s+"?[^"]*' + [regex]::Escape([string]$ScriptPath)) -and $_.ProcessId -ne $PID })
+    if (-not $Background -and -not $SelfTest) {
+        try { Set-Content -LiteralPath $ShowRequest -Value (Get-Date).ToString('o') -Encoding UTF8 -ErrorAction SilentlyContinue } catch { }
+        foreach ($o in $script:OtherInstance) {
+            try {
+                $pr = Get-Process -Id $o.ProcessId -ErrorAction SilentlyContinue
+                if (-not $pr) { continue }
+                $pr.Refresh()
+                if ($pr.MainWindowHandle -ne 0) {
+                    if (-not ('PanelWinFocus' -as [type])) {
+                        Add-Type -Name PanelWinFocus -Namespace Native -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);'
+                    }
+                    [void][Native.PanelWinFocus]::ShowWindow($pr.MainWindowHandle, 9)
+                    [void][Native.PanelWinFocus]::SetForegroundWindow($pr.MainWindowHandle)
+                }
+            } catch { }
+        }
+    }
+    exit 0
+}
 
 $script:C = @{
     Bg = '#0F1114'
@@ -89,18 +119,25 @@ function Write-Trace {
 }
 
 function Get-RoleInfo {
-    $hostTask = Get-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue
-    $clientTask = Get-ScheduledTask -TaskName 'RemoteClientWatchdog' -ErrorAction SilentlyContinue
+    if ((Get-Date) -lt $script:RoleCacheUntil) { return $script:RoleCache }
+    $hj = Get-Json $HostJson
+    $cj = Get-Json $ClientJson
     $clientData = [ordered]@{}
     if ($ClientConfig -and (Test-Path -LiteralPath $ClientConfig)) { $clientData = Read-ConfigFile $ClientConfig }
+    $hostInstalled = $false
+    if ($hj -and $null -ne $hj.taskInstalled) { $hostInstalled = [bool]$hj.taskInstalled }
+    elseif ($null -ne $hj -and ((Get-Date) - [datetime]::Parse([string]$hj.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -lt 30) { $hostInstalled = $true }
+    else { $hostInstalled = [bool](Get-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue) }
+    $clientTask = Get-ScheduledTask -TaskName 'RemoteClientWatchdog' -ErrorAction SilentlyContinue
+    $clientInstalled = ([bool]$clientTask) -or ($null -ne $cj) -or $clientData.Contains('Targets')
     $targets = @()
     if ($clientData.Contains('Targets')) { $targets = @($clientData['Targets']) }
     $remoteName = 'uzak makine'
     if ($clientData.Contains('RemoteName') -and $clientData['RemoteName']) { $remoteName = [string]$clientData['RemoteName'] }
     $role = 'none'
-    if ($hostTask -and $clientTask) { $role = 'both' }
-    elseif ($hostTask) { $role = 'host' }
-    elseif ($clientTask) { $role = 'client' }
+    if ($hostInstalled -and $clientInstalled) { $role = 'both' }
+    elseif ($hostInstalled) { $role = 'host' }
+    elseif ($clientInstalled) { $role = 'client' }
     else { $role = 'manual' }
     $text = switch ($role) { 'host' { 'UZAK HOST' } 'client' { 'ISTEMCI' } 'both' { 'HOST + ISTEMCI' } default { 'KURULU DEGIL' } }
     $tip = switch ($role) {
@@ -109,7 +146,9 @@ function Get-RoleInfo {
         'both' { 'Bu makine hem host hem istemci olarak calisiyor.' }
         default { 'Ne host ne istemci gorevi kurulu. Install-Host.ps1 veya Install-Client.ps1 calistirin.' }
     }
-    return [pscustomobject]@{ Role = $role; RoleText = $text; Tip = $tip; HostTask = [bool]$hostTask; ClientTask = [bool]$clientTask; Targets = $targets; RemoteName = $remoteName }
+    $script:RoleCache = [pscustomobject]@{ Role = $role; RoleText = $text; Tip = $tip; HostTask = $hostInstalled; ClientTask = $clientInstalled; Targets = $targets; RemoteName = $remoteName }
+    $script:RoleCacheUntil = (Get-Date).AddMinutes(5)
+    return $script:RoleCache
 }
 
 function Get-Json {
@@ -1657,36 +1696,5 @@ if ($SelfTest) {
     exit 0
 }
 
-$created = $false
-try { $created = $script:Mutex.WaitOne(0) } catch { $created = $true }
-if (-not $created) {
-    $others = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -and $_.CommandLine -match ('-File\s+"?[^"]*' + [regex]::Escape([string]$ScriptPath)) -and $_.ProcessId -ne $PID })
-    if ($others.Count -gt 0) {
-        if (-not $Background) {
-            try { Set-Content -LiteralPath $ShowRequest -Value (Get-Date).ToString('o') -Encoding UTF8 -ErrorAction SilentlyContinue } catch { }
-            foreach ($o in $others) {
-                try {
-                    $pr = Get-Process -Id $o.ProcessId -ErrorAction SilentlyContinue
-                    if (-not $pr) { continue }
-                    $pr.Refresh()
-                    if ($pr.MainWindowHandle -ne 0) {
-                        if (-not ('PanelWinFocus' -as [type])) {
-                            Add-Type -Name PanelWinFocus -Namespace Native -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);'
-                        }
-                        [void][Native.PanelWinFocus]::ShowWindow($pr.MainWindowHandle, 9)
-                        [void][Native.PanelWinFocus]::SetForegroundWindow($pr.MainWindowHandle)
-                    }
-                } catch { }
-            }
-        }
-        Write-Trace ('calisan panel ornegi bulundu; yeni ornek sonlaniyor (background=' + [bool]$Background + ')')
-        $script:Icon.Visible = $false
-        $script:Icon.Dispose()
-        exit 0
-    }
-    Write-Trace 'mutex tutan canli ornek yok; birincil instance olarak devam'
-    $created = $true
-}
 if ($TrayOnly -or $script:Background) { $script:Win.Hide() } else { $script:Win.Show() }
-try { [System.Windows.Threading.Dispatcher]::Run() } finally { $script:Mutex.ReleaseMutex() }
+try { [System.Windows.Threading.Dispatcher]::Run() } finally { try { $script:Mutex.ReleaseMutex() } catch { } }

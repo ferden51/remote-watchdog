@@ -231,7 +231,7 @@ if ($Section -eq 0 -or $Section -eq 3) {
     Add-Type -AssemblyName PresentationCore
     Add-Type -AssemblyName PresentationFramework
     $script:C = @{ Bg = '#0F1114'; Side = '#14161A'; Card = '#1A1D22'; Card2 = '#21252B'; Line = '#2A2F36'; Text = '#E8EAED'; Muted = '#98A0AA'; Accent = '#4C8DFF'; Ok = '#3FB950'; Warn = '#E3B341'; Bad = '#F85149'; Info = '#58A6FF' }
-    foreach ($code in (Get-FnCode $Panel @('Bx', 'Get-Json', 'Get-HostConfig', 'Get-StatusInfo', 'Get-Connections', 'Get-Actions', 'Invoke-Script'))) { Invoke-Expression $code }
+    foreach ($code in (Get-FnCode $Panel @('Bx', 'Get-Json', 'Read-ConfigFile', 'Get-HostConfig', 'Get-RoleInfo', 'Get-StatusInfo', 'Get-Connections', 'Get-Actions', 'Invoke-Script'))) { Invoke-Expression $code }
 
     $hj = Get-Json $HostJson
     Ok 'host last-run.json okundu' ($null -ne $hj)
@@ -267,8 +267,11 @@ if ($Section -eq 0 -or $Section -eq 3) {
         Ok ('Get-RoleInfo rozet metni: ' + $role.RoleText) ([bool]$role.RoleText)
         Ok ('Get-RoleInfo ipucu metni dolu (' + ([string]$role.Tip).Length + ' karakter)') (([string]$role.Tip).Length -gt 20)
         $installed = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -in @('RemoteHostWatchdog', 'RemoteClientWatchdog') })
-        if ($installed.Count -gt 0) { Ok ('rol tespiti kurulu gorevlerle tutarli: ' + (($installed | ForEach-Object { $_.TaskName }) -join ', ')) $true }
-        else { Ok 'rol tespiti: bu makinede host/istemci gorevi kurulu degil (KURULU DEGIL beklenir)' ($role.Role -eq 'manual' -or $role.Role -eq 'none') }
+        $hj3 = Get-Json (Join-Path $env:ProgramData 'RemoteWatchdog\last-run.json')
+        $hostSaysInstalled = ($null -ne $hj3 -and [bool]$hj3.taskInstalled)
+        if ($installed.Count -gt 0 -or $hostSaysInstalled) { Ok ('rol tespiti kurulu host/istemciyi dogru tanidi: ' + $role.RoleText) ($role.Role -in @('host', 'client', 'both')) }
+        else { Ok ('rol tespiti: bu makinede host/istemci kurulu degil (beklenen: ' + $role.RoleText + ')') ($role.Role -eq 'manual' -or $role.Role -eq 'none') }
+        Ok 'rol tespiti SYSTEM gorevini JSON uzerinden goruyor (yukseltilmis olmayan panelde de dogru)' ($role.Role -ne 'manual' -or -not $hostSaysInstalled)
     }
 }
 

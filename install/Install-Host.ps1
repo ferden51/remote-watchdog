@@ -122,8 +122,13 @@ else {
     $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
     & powershell -NoProfile -ExecutionPolicy Bypass -File $TrayScript -Install | Out-Null
     if (Get-ItemProperty -Path $runKey -Name 'RemoteWatchdogTray' -ErrorAction SilentlyContinue) { Ok 'tray oturum acilinda baslayacak' } else { Warn 'tray kaydi olusmadi (farkli yonetici hesabi ile calistirilmis olabilir)' }
-    Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-STA', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $TrayScript + '"')) | Out-Null
-    Ok 'tray baslatildi (simge: sistem tepsisi)'
+    $vbs = Join-Path (Split-Path -Parent $TrayScript) 'Start-Panel.vbs'
+    if (Test-Path -LiteralPath $vbs) {
+        Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $vbs + '"')
+        Ok 'panel etkilesimli oturumda (yoneticisiz) baslatildi'
+    } else {
+        Warn ('panel baslatici bulunamadi: ' + $vbs + ' - elle calistirin: ' + $TrayScript)
+    }
 }
 
 Step '5) Google Remote Desktop kaydi (ZORUNLU)'

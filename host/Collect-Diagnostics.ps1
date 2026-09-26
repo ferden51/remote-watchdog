@@ -192,7 +192,7 @@ Add-Section '4b. Acik kalinca internet gidiyor / restart duzeliyor olcumu'
 $ipconfigAll = (ipconfig /all 2>&1 | Out-String)
 $leaseLines = @($ipconfigAll -split "`r?`n" | Where-Object { $_ -match '(?i)lease|DHCP' })
 Add-Line '- DHCP / lease durumu:'
-foreach ($l in ($leaseLines | Select-Object -First 12)) { Add-Line ('  ' + $l.Trim()) }
+foreach ($ln in ($leaseLines | Select-Object -First 12)) { Add-Line ('  ' + $ln.Trim()) }
 $obt = [regex]::Match($ipconfigAll, '(?i)Lease Obtained[^\r\n]*?:\s*([^\r\n]+)')
 $exp = [regex]::Match($ipconfigAll, '(?i)Lease Expires[^\r\n]*?:\s*([^\r\n]+)')
 if ($obt.Success) { Add-Line ('  - Lease obtained: ' + $obt.Groups[1].Value.Trim()) }

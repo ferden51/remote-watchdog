@@ -56,7 +56,7 @@ Repo private olduğu için `irm` ile tek satır indirme yetki ister; USB/OneDriv
 
 
 
-`ui/RemoteWatchdogPanel.ps1` tek dosyalık bir WinForms uygulamasıdır; klavye/fare gerektirmez.
+`ui/RemoteWatchdogPanel.ps1` tek dosyalık bir WPF / XAML uygulamasıdır (tepsi simgesi WinForms `NotifyIcon` ile sağlanır); klavye/fare gerektirmez.
 
 ```powershell
 .\RemoteWatchdogPanel.ps1                 # tray'de başlar (simgeye çift tıkla = panel)
