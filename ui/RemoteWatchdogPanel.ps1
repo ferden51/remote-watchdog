@@ -1432,10 +1432,23 @@ if ($Install) {
     $cmd = 'powershell.exe -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '"'
     New-ItemProperty -Path $RunKey -Name $RunName -Value $cmd -PropertyType String -Force | Out-Null
     Write-Host 'Panel oturum acilinda otomatik baslayacak.'
+    try {
+        $pa = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '"')
+        $pp = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+        $ps = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+        $pt1 = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+        $pt2 = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes 3)
+        Register-ScheduledTask -TaskName 'RemoteHostPanel' -Action $pa -Trigger @($pt1, $pt2) -Principal $pp -Settings $ps -Force -ErrorAction Stop | Out-Null
+        Write-Host 'Gorev kuruldu: RemoteHostPanel (oturum acilinda + her 3 dk, panel cokerse otomatik)'
+    } catch { Write-Host ('Panel gorevi kurulamadi: ' + $_.Exception.Message) -ForegroundColor Yellow }
+    Write-Host ('Panelin restart sonrasi da acik gelmesi icin konsolda otomatik giris gerekir: host\Enable-ConsoleAutoLogon.ps1')
     exit 0
 }
 if ($Uninstall) {
     Remove-ItemProperty -Path $RunKey -Name $RunName -ErrorAction SilentlyContinue
+    if (Get-ScheduledTask -TaskName 'RemoteHostPanel' -ErrorAction SilentlyContinue) {
+        try { Unregister-ScheduledTask -TaskName 'RemoteHostPanel' -Confirm:$false -ErrorAction Stop; Write-Host 'Gorev kaldirildi: RemoteHostPanel' } catch { }
+    }
     Write-Host 'Oturum acilista baslatma kaldirildi.'
     exit 0
 }

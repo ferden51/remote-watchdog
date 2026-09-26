@@ -339,13 +339,14 @@ function Test-NetworkLayer {
 function Get-PanelProcesses {
     $name = [string]$global:cfg.PanelScriptName
     if (-not $name) { $name = 'RemoteWatchdogPanel.ps1' }
+    $pattern = '-File\s+"?[^"]*' + [regex]::Escape($name)
     return @(Get-CimInstance -ClassName Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -and $_.CommandLine -like ('*' + $name + '*') })
+            Where-Object { $_.CommandLine -and $_.CommandLine -match $pattern })
 }
 
 function Test-Panel {
     $cfg = $global:cfg
-    $procs = Get-PanelProcesses
+    $procs = @(Get-PanelProcesses)
     $task = Get-ScheduledTask -TaskName 'RemoteHostPanel' -ErrorAction SilentlyContinue
     $ok = ($procs.Count -gt 0)
     $repair = @()
@@ -397,7 +398,7 @@ function Test-CrdService {
             catch { $ok = $false; $repair += 'baslatilamadi: ' + $_.Exception.Message }
         } else { $ok = $false; $repair += 'servis durmus' }
     }
-    $daemon = Get-CrdDaemon
+    $daemon = @(Get-CrdDaemon)
     $ageH = 0
     if ($daemon.Count -gt 0) { $ageH = ((Get-Date) - ($daemon | Sort-Object StartTime | Select-Object -First 1).StartTime).TotalHours }
     $conns = Get-CrdSignalConnections -Ports $cfg.CrdSignalPorts

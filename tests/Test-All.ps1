@@ -131,6 +131,14 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok ('powercfg okunabildi (STANDBYIDLE=' + $pwr + ')') ($null -ne $pwr)
     $gc = Get-Config
     Ok 'Get-Config varsayilanlar donduruyor' (($gc.RestartPolicy -eq 'blackout') -and ($gc.RebootAfterFailedCycles -eq 3) -and ($gc.OfficeSaveBeforeReboot -eq $true))
+    foreach ($code in (Get-FnCode $Host_ @('Get-PanelProcesses'))) { Invoke-Expression $code }
+    $global:cfg = [pscustomobject]@{ PanelScriptName = 'RemoteWatchdogPanel.ps1' }
+    $pp = @(Get-PanelProcesses)
+    Ok ('PS 5.1 dizi acma tuzagi: @() ile sarilmis sayim (' + $pp.Count + ') sayi tipinde') ($pp.Count -is [int] -or $pp.Count -is [long])
+    $raw = Get-PanelProcesses
+    if ($null -ne $raw -and @($raw).Count -eq 1) {
+        Ok 'PS 5.1 tuzagi fark edildi: @() kullanilmadan .Count bos donuyor (sarma zorunlu)' (($raw.Count) -eq $null)
+    } else { Ok 'PS 5.1 tuzagi kontrolu: panel birden fazla ornek ya da hic yok' $true }
     $state = Get-State
     Ok 'Get-State varsayilan sayaclari sifir' (([int]$state.ConsecutiveFailures -eq 0) -and ([int]$state.NetRepairRung -eq 0))
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
