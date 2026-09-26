@@ -12,7 +12,9 @@ Bağlantı sorunlarının çoğu "makine açık ama erişilemiyor" şeklindedir 
 
 | Dosya | Nerede çalışır | Görev |
 |---|---|---|
-| `host/RemoteHostWatchdog.ps1` | Uzak bilgisayar (SYSTEM) | CRD/RDP/uyku/saat/DNS testi, otomatik onarım, servis ayarları, heartbeat, Telegram uyarısı, gerekirse reboot |
+| `host/RemoteHostWatchdog.ps1` | Uzak bilgisayar (SYSTEM) | CRD/RDP/uyku/saat/ağ testi, kademeli ağ onarımı, otomatik servis ayarları, heartbeat, Telegram uyarısı, gerekirse reboot |
+| `host/Protect-OpenDocuments.ps1` | Uzak bilgisayar (kullanıcı oturumu) | Kaydedilmemiş Word/Excel belgelerini periyodik kaydeder, AutoRecover'ı kısaltır, reboot öncesi kaydedip kapatır |
+| `host/Collect-Diagnostics.ps1` | Uzak bilgisayar | 14 günlük olay günlüğü + ağ/DHCP/uyku analizi, puanlı şüpheli listesi (hiçbir şeyi değiştirmez) |
 | `host/Enable-ConsoleAutoLogon.ps1` | Uzak bilgisayar (admin) | Reboot sonrası konsola otomatik giriş (opt-in, riskli) |
 | `client/RemoteClientWatchdog.ps1` | Kendi bilgisayarın | Uzak hedefe TCP erişim testi, kopma uyarısı, RDP/tarayıcı otomatik açma |
 
@@ -79,6 +81,28 @@ powershell -ExecutionPolicy Bypass -File "$env:TEMP\RemoteClientWatchdog.ps1" -I
 `-Target` verilmezse yalnızca Google/CRD sinyal yolu kontrol edilir. RDP yerel dosyası verilirse
 bağlantı düzeldiğinde `mstsc` otomatik açılır.
 
+## Veri kaybına karşı koruma
+
+`host/Protect-OpenDocuments.ps1` kullanıcı oturumunda **her 2 dakikada bir** çalışır (kurulumla birlikte
+`RemoteHostOfficeSaver` görevi olarak kaydedilir):
+
+- Word `Options.SaveInterval` ve Excel `AutoRecoverInterval` değerlerini 3 dakikaya çeker → AutoRecover
+  dosyaları sık yazılır, beklenmedik kapanmada geri dönülebilir.
+- **Kaydedilmemiş ve dosya yolu olan** her Word/Excel belgesini diske kaydeder. Yeni/adlı belge
+  (`Save As` gerektiren), salt okunur veya başkasıyla paylaşılan belgeleri kaydetmeye çalışmaz; onları
+  raporlar ve uyarı üretir (botomatik `Save As` penceresi açıp makineyi kilitlemesin diye).
+- Durumu `C:\Windows\Temp\RemoteWatchdog-docs.json` dosyasına yazar; watchdog reboot kararı vermeden önce
+  burayı okur: **kaydedilmemiş belge varsa reboot yapılmaz**, Telegram'dan uyarılır.
+- Reboot zaten kaçınılmazsa önce istek dosyasını yazar, belge koruyucu belgeleri kaydedip Word/Excel'i
+  kapatır; yine de kapanmazsa (`Save As` penceresi açık kalmış olabilir) reboot **iptal edilir** —
+  `OfficeAbortRebootIfStillOpen` ve `OfficeAbortRebootIfUnsaved` ile kapatılabilir.
+
+Elle kontrol: `.\Protect-OpenDocuments.ps1 -Status` → açık olan uygulamalar, kaydedilmemiş belge sayısı ve
+koruyucunun neden kaydedemediği belgeler.
+
+VS Code tarafında ek bir güvence zaten var: **Hot Exit** kirli sekmeleri diske yazdığı için yeniden
+başlatmadan sonra sekmeler geri gelir.
+
 ## Dışarıdan "hâlâ çalışıyor mu" sinyali
 
 - **Telegram**: durum değişince tek mesaj, sorun sürerse `AlertRepeatHours` saatte bir tekrar.
@@ -114,6 +138,22 @@ bağlantı düzeldiğinde `mstsc` otomatik açılır.
 | `CrdRestartAfterHours` | 0 | >0 ise bağlantı yokken bu yaştan sonra CRD'yi önleyici yeniden başlat |
 | `AlertRepeatHours` | 12 | Aynı sorun için tekrar uyarı aralığı |
 | `ServiceCrashRecovery` | true | Servis çökerse Windows kendini yeniden başlatsın |
+| `WorkHoursEnabled` | true | true ise mesai saatlerinde belge koruması, dışında zorla restart |
+| `WorkHoursStart` / `WorkHoursEnd` | 8 / 17 | Mesai saatleri (başlangıç dahil, bitiş hariç) |
+| `WorkDays` | `[1,2,3,4,5]` | 1=Pzt … 7=Paz. Varsayılan: **Cumartesi ve Pazar tam gün zorla restart** |
+| `ForceRestartOutsideWorkHours` | true | false yapılırsa mesai dışında da belge korunur, zorla kapatma olmaz |
+| `OfficeAbortRebootIfUnsaved` | true | Kaydedilmemiş belge varsa reboot yapılmaz |
+| `OfficeSaveTimeoutSeconds` | 120 | Reboot öncesi belge kaydetmeyi bekleme süresi |
+
+### Mesai saatine göre restart politikası
+
+| Zaman | Davranış |
+|---|---|
+| Pzt–Cum 08:00–16:59 | Belge korunur: kaydedilmemiş Word/Excel varsa **restart yapılmaz**, Telegram'dan uyarılır. Kapatılacaksa önce kaydedilip kapatılır. |
+| Pzt–Cum 17:00–07:59 | Word/Excel/PPT **zorla kapatılır**, restart yapılır (kaydedilmemiş belge kaybolabilir, loglanır ve Telegram'dan bildirilir). |
+| Cumartesi–Pazar (tam gün) | Zorla kapatma + restart. |
+| `WorkHoursEnabled: false` | Her zaman korumalı davranış. |
+| `WorkDays: [1..7]` | Hafta sonu da mesai gibi korunur. |
 
 ## Testler
 

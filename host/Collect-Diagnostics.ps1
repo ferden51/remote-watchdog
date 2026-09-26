@@ -188,6 +188,48 @@ $ndr = Get-Events -Log 'System' -Ids @(27, 32, 10400, 10401, 4201, 4202) -Max 40
 if ($ndr.Count -gt 0) { Add-Suspect ('Ag adaptoru/link olayi: ' + $ndr.Count + ' adet') 'orta' }
 Event-Lines ($wlanDisc | Select-Object -Last 12 | Sort-Object TimeCreated -Descending)
 
+Add-Section '4b. Acik kalinca internet gidiyor / restart duzeliyor olcumu'
+$ipconfigAll = (ipconfig /all 2>&1 | Out-String)
+$leaseLines = @($ipconfigAll -split "`r?`n" | Where-Object { $_ -match '(?i)lease|DHCP' })
+Add-Line '- DHCP / lease durumu:'
+foreach ($l in ($leaseLines | Select-Object -First 12)) { Add-Line ('  ' + $l.Trim()) }
+$obt = [regex]::Match($ipconfigAll, '(?i)Lease Obtained[^\r\n]*?:\s*([^\r\n]+)')
+$exp = [regex]::Match($ipconfigAll, '(?i)Lease Expires[^\r\n]*?:\s*([^\r\n]+)')
+if ($obt.Success) { Add-Line ('  - Lease obtained: ' + $obt.Groups[1].Value.Trim()) }
+if ($exp.Success) { Add-Line ('  - Lease expires: ' + $exp.Groups[1].Value.Trim() + ' (Dolduysa ve asili kaldiyasa DHCP sorunu)') }
+Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { Add-Line ('  - Arayuz ' + $_.InterfaceAlias + ': durum=' + $_.ConnectionState + ' | DHCP=' + $_.Dhcp + ' | metrik=' + $_.InterfaceMetric) }
+$nsStat = (netstat -s -p tcp 2>&1 | Out-String)
+$tw = [regex]::Match($nsStat, '(?i)([0-9,]+)\s+TIME_WAIT')
+$est = [regex]::Match($nsStat, '(?i)([0-9,]+)\s+ESTABLISHED')
+$failTw = [regex]::Match($nsStat, '(?i)([0-9,]+)\s+.*?active connections?')
+Add-Line ('- TCP istatistik: TIME_WAIT=' + $(if ($tw.Success) { $tw.Groups[1].Value } else { '?' }) + ' | ESTABLISHED=' + $(if ($est.Success) { $est.Groups[1].Value } else { '?' }))
+if ($tw.Success -and [int](($tw.Groups[1].Value -replace ',', '')) -gt 15000) { Add-Suspect ('TIME_WAIT ' + $tw.Groups[1].Value + ' -> TCP yigini sizmis, yeniden baslatma gerekir') 'yuksek' }
+try { $dnsCache = @(Get-DnsClientCache -ErrorAction Stop); Add-Line ('- DNS onbellegi kayit sayisi: ' + $dnsCache.Count); if ($dnsCache.Count -gt 2000) { Add-Suspect 'DNS onbellegi asiri buyuk -> cozumleme yavaslamasi/kilitlenmesi olabilir' 'orta' } } catch { }
+$arp = (arp -a 2>&1 | Out-String)
+$incomplete = @($arp -split "`r?`n" | Where-Object { $_ -match '(?i)incomplete|gecersiz' })
+Add-Line ('- ARP tablosu: ' + (($arp -split "`r?`n" | Where-Object { $_.Trim() -and $_ -notmatch 'Interface' }).Count) + ' kayit, cozumlenemeyen=' + $incomplete.Count)
+if ($incomplete.Count -gt 20) { Add-Suspect ('ARP cozumlenemeyen kayit ' + $incomplete.Count + ' -> L2/surucu veya DHCP sorunu olabilir') 'orta' }
+$filters = (netcfg -s n 2>&1 | Out-String)
+$filterLines = @($filters -split "`r?`n" | Where-Object { $_ -match '^\s{5,}\S' -and $_ -notmatch 'Client|Protocol|Server' })
+Add-Line ('- Ag filtre suruculeri (netcfg -s n): ' + $filterLines.Count + ' kayit')
+$filterLines | Select-Object -First 20 | ForEach-Object { Add-Line ('  ' + $_.Trim()) }
+if ($filterLines.Count -gt 12) { Add-Suspect ('Cok sayida ag filtre surucusu (' + $filterLines.Count + ') -> VPN/antiviruz/filtre sizintisi "internet donmuyor" yapabilir') 'orta' }
+Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction SilentlyContinue | Where-Object { $_.DeviceClass -eq 'NET' -and $_.DeviceName -match '(?i)wi-?fi|wireless|ethernet|realtek|intel|mediatek|qualcomm' } |
+    Select-Object -First 6 | ForEach-Object { Add-Line ('- Surucu: ' + $_.DeviceName + ' | ' + $_.DriverVersion + ' (' + $_.DriverDate + ') | ' + $_.Manufacturer) }
+$dhcpErr = Get-Events -Log 'Microsoft-Windows-Dhcp-Client/Admin' -Max 40
+$dhcpErrAll = @(Get-Events -Log 'Microsoft-Windows-Dhcp-Client/Admin' -Max 400)
+$dhcpWarn = @($dhcpErrAll | Where-Object { $_.LevelDisplayName -in 'Hata', 'Uyari', 'Error', 'Warning' })
+Add-Line ('- DHCP-Client olaylari (hata/uyari): ' + $dhcpWarn.Count)
+if ($dhcpWarn.Count -gt 0) { Add-Suspect ('DHCP yenileme hatasi ' + $dhcpWarn.Count + ' kez -> lease dusuyor, restart ile duzelir') 'yuksek' }
+Event-Lines ($dhcpWarn | Select-Object -First 8)
+$dnsErr = @(Get-Events -Log 'Microsoft-Windows-DNS-Client Events/Operational' -Max 400 | Where-Object { $_.Id -in 1014, 1016, 3006, 3007 })
+Add-Line ('- DNS cozumleme hatalari (ID 1014/3006): ' + $dnsErr.Count)
+if ($dnsErr.Count -gt 5) { Add-Suspect ('DNS cozumleme hatasi ' + $dnsErr.Count + ' kez -> cozumleyici takiliyor olabilir') 'orta' }
+Event-Lines ($dnsErr | Select-Object -First 6)
+$ndistat = Get-Events -Log 'Microsoft-Windows-NDIS/Operational' -Max 60
+Add-Line ('- NDIS (surucu) olayi: ' + @($ndistat).Count)
+if (@($ndistat).Count -gt 10) { Add-Suspect ('NDIS surucu olayi ' + @($ndistat).Count + ' kez -> surucu/link sorunu olabilir') 'orta' }
+
 Add-Section '5. Guc, uyku ve beklenmeyen kapanmalar'
 $standby = Get-AcIndexSeconds -AliasPath @('SUB_SLEEP', 'STANDBYIDLE')
 $hibIdle = Get-AcIndexSeconds -AliasPath @('SUB_SLEEP', 'HIBERNATEIDLE')

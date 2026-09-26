@@ -35,7 +35,7 @@ $TaskName = 'RemoteHostWatchdog'
 $script:Results = New-Object System.Collections.ArrayList
 $script:PublicIp = $null
 $global:cfg = $null
-$RebootableProblems = @('Internet', 'Saat senkronu', 'Ag yigini', 'Windows RDP', 'Guc/uyku ayarlari', 'CRD servisi')
+$RebootableProblems = @('Internet', 'Saat senkronu', 'Ag katmani', 'Windows RDP', 'Guc/uyku ayarlari', 'CRD servisi')
 
 function Test-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -60,6 +60,7 @@ function Get-Config {
         FixCrd = $true
         FixClock = $true
         FixNetwork = $true
+        NetMaxRepairRung = 4
         ServerMode = $true
         DisableHibernation = $true
         DisableFastStartup = $true
@@ -69,6 +70,15 @@ function Get-Config {
         RebootDelaySeconds = 60
         RebootSkipIfUnregistered = $true
         MinUptimeMinutes = 30
+        OfficeSaveBeforeReboot = $true
+        OfficeSaveTimeoutSeconds = 120
+        OfficeAbortRebootIfStillOpen = $true
+        OfficeAbortRebootIfUnsaved = $true
+        WorkHoursEnabled = $true
+        WorkHoursStart = 8
+        WorkHoursEnd = 17
+        WorkDays = @(1, 2, 3, 4, 5)
+        ForceRestartOutsideWorkHours = $true
         CrdRestartAfterHours = 0
         CrdSignalPorts = @(443, 5222, 5223, 19302, 19303, 8443, 4433)
         CrdNoConnRestartCycles = 3
@@ -96,7 +106,7 @@ function Save-Config {
 }
 
 function Get-State {
-    $s = [pscustomobject]@{ ConsecutiveFailures = 0; CrdNoConnCycles = 0; LastBootUtc = ''; AlertKey = ''; AlertUtc = ''; LastOkUtc = '' }
+    $s = [pscustomobject]@{ ConsecutiveFailures = 0; CrdNoConnCycles = 0; NetRepairRung = 0; NetResetPendingReboot = 0; LastBootUtc = ''; AlertKey = ''; AlertUtc = ''; LastOkUtc = '' }
     if (Test-Path -LiteralPath $StateFile) {
         try {
             $raw = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json
@@ -199,21 +209,93 @@ function Test-Clock {
     Add-Result 'Saat senkronu' $ok ('ofset=' + $offset + 'sn') $repair
 }
 
-function Test-NetworkStack {
-    $repair = @()
-    try { ipconfig /flushdns 2>&1 | Out-Null } catch { }
-    $dns = $null
-    try { $dns = [bool](Resolve-DnsName -Name 'remotedesktop.google.com' -Type A -ErrorAction Stop | Where-Object { $_.IPAddress }) } catch { }
-    $ok = $true
-    if (-not $dns) {
-        $ok = $false
-        if ($global:cfg.FixNetwork -and (Test-Admin) -and -not $Check) {
+function Test-TcpPortFast {
+    param([string]$HostName, [int]$Port = 443, [int]$TimeoutMs = 3000)
+    $c = New-Object System.Net.Sockets.TcpClient
+    try {
+        $iar = $c.BeginConnect($HostName, $Port, $null, $null)
+        if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) { return $false }
+        $c.EndConnect($iar)
+        return $true
+    } catch { return $false } finally { try { $c.Close() } catch { } }
+}
+
+function Get-NetworkHealth {
+    $h = [ordered]@{ Ip = $false; Dns = $false; Https = $false; Signal = $false; Dhcp = $false; TimeWait = 0; Link = '' }
+    $h.Ip = Test-TcpPortFast -HostName '1.1.1.1' -Port 443 -TimeoutMs 3000
+    $h.Signal = Test-TcpPortFast -HostName 'mtalk.google.com' -Port 443 -TimeoutMs 3000
+    try { $h.Dns = [bool](Resolve-DnsName -Name 'remotedesktop.google.com' -Type A -DnsOnly -QuickTimeout -ErrorAction Stop | Where-Object { $_.IPAddress }) } catch { }
+    $r = Invoke-Probe -Url 'https://www.google.com/generate_204' -TimeoutSec 6
+    $h.Https = $r.Ok
+    try { $h.Dhcp = @((Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ConnectionState -eq 'Connected' -and $_.Dhcp -eq 'Enabled' })).Count -gt 0 } catch { }
+    try {
+        $ns = netstat -s -p tcp 2>&1 | Out-String
+        $tw = [regex]::Match($ns, '(?i)([0-9,]+)\s+TIME_WAIT')
+        if ($tw.Success) { $h.TimeWait = [int](($tw.Groups[1].Value -replace ',', '')) }
+    } catch { }
+    try { $h.Link = (@(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { $_.Name }) -join ',') } catch { }
+    return [pscustomobject]$h
+}
+
+function Invoke-NetworkRepair {
+    param([int]$Rung)
+    $cfg = $global:cfg
+    $done = @()
+    switch ($Rung) {
+        1 {
+            try { ipconfig /flushdns 2>&1 | Out-Null; $done += 'DNS onbellegi temizlendi' } catch { }
+            try { Restart-Service -Name 'Dnscache' -Force -ErrorAction Stop; $done += 'Dnscache servisi yeniden baslatildi' } catch { }
+        }
+        2 {
+            try { ipconfig /release 2>&1 | Out-Null; Start-Sleep 2; ipconfig /renew 2>&1 | Out-Null; $done += 'DHCP lease yenilendi' } catch { }
+        }
+        3 {
+            try { netsh wlan reconnect 2>&1 | Out-Null; $done += 'Wi-Fi yeniden baglanma denemesi' } catch { }
             foreach ($a in @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' })) {
-                try { Disable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue; Start-Sleep 2; Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue; $repair += ($a.Name + ' yeniden baslatildi') } catch { }
+                try { Disable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue; Start-Sleep 3; Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue; $done += ($a.Name + ' kapatildi/acildi') } catch { }
             }
-        } else { $repair = 'DNS cozumlenmiyor, adaptor yeniden baslatilamadi (admin)' }
+        }
+        4 {
+            foreach ($s in @('Dhcp', 'NlaSvc')) { try { Restart-Service -Name $s -Force -ErrorAction Stop; $done += ($s + ' yeniden baslatildi') } catch { } }
+            try {
+                $dev = @(Get-CimInstance -ClassName Win32_NetworkAdapter -Filter 'NetEnabled=True' -ErrorAction Stop | Select-Object -ExpandProperty DeviceID -Unique)
+                foreach ($d in $dev) { pnputil /restart-device $d 2>&1 | Out-Null; $done += ('surucu yeniden baslatildi: ' + $d) }
+            } catch { }
+        }
+        5 {
+            netsh winsock reset 2>&1 | Out-Null
+            netsh int ipv4 reset 2>&1 | Out-Null
+            $done += 'winsock/IP reset uygulandi (yENIDEN BASLATMA gerekiyor)'
+        }
     }
-    Add-Result 'Ag yigini (DNS)' $ok ('remotedesktop.google.com=' + $(if ($dns) { 'cozuldu' } else { 'COZULEMEDI' })) ($repair -join '; ')
+    return $done
+}
+
+function Test-NetworkLayer {
+    $cfg = $global:cfg
+    $state = Get-State
+    $h = Get-NetworkHealth
+    $detail = 'ip=' + $h.Ip + ', dns=' + $h.Dns + ', https=' + $h.Https + ', sinyal=' + $h.Signal + ', dhcp=' + $h.Dhcp + ', timewait=' + $h.TimeWait + ', link=' + $h.Link
+    if ($h.TimeWait -gt 15000) { Write-Log 'WARN' ('TCP TIME_WAIT sayisi yuksek: ' + $h.TimeWait + ' -> soket yigini sizmis olabilir') }
+    $ok = ($h.Ip -and $h.Dns -and $h.Https)
+    $repair = @()
+    if ($ok) {
+        if ([int]$state.NetRepairRung -gt 0) { $repair += 'saga likli, onarim merdiveni sifirlandi (son: ' + $state.NetRepairRung + '. kademe)' }
+        $state.NetRepairRung = 0
+    } else {
+        $rung = [int]$state.NetRepairRung + 1
+        if ($rung -gt [int]$cfg.NetMaxRepairRung) { $rung = [int]$cfg.NetMaxRepairRung }
+        $repair += ('bozuk: eksik=' + (@(if (-not $h.Ip) { 'IP' }) + @(if (-not $h.Dns) { 'DNS' }) + @(if (-not $h.Https) { 'HTTPS' }) -join ','))
+        if ($cfg.FixNetwork -and (Test-Admin) -and -not $Check) {
+            $repair += (Invoke-NetworkRepair -Rung $rung) -join '; '
+            if ($rung -ge [int]$cfg.NetMaxRepairRung) { $state.NetResetPendingReboot = 1; $repair += 'onerilen: makineyi yeniden baslat' }
+        } else {
+            $repair += 'kademe ' + $rung + ' uygulanmadi (admin gerekir)'
+        }
+        $state.NetRepairRung = $rung
+    }
+    Save-State $state
+    Add-Result 'Ag katmani' $ok $detail ($repair -join '; ')
 }
 
 function Test-CrdService {
@@ -451,6 +533,82 @@ function Invoke-Alerts {
     }
 }
 
+function Test-InWorkHours {
+    param([datetime]$At = (Get-Date))
+    $cfg = $global:cfg
+    if (-not $cfg.WorkHoursEnabled) { return $true }
+    if (@($cfg.WorkDays) -notcontains [int]$At.DayOfWeek) { return $false }
+    return ($At.Hour -ge [int]$cfg.WorkHoursStart -and $At.Hour -lt [int]$cfg.WorkHoursEnd)
+}
+
+function Stop-OfficeForced {
+    $killed = @()
+    foreach ($p in @('WINWORD', 'EXCEL', 'POWERPNT')) {
+        $procs = @(Get-Process -Name $p -ErrorAction SilentlyContinue)
+        if ($procs.Count -gt 0) {
+            $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+            $killed += ($p + ' x' + $procs.Count)
+        }
+    }
+    if ($killed.Count -gt 0) { Start-Sleep -Seconds 5 }
+    return $killed
+}
+
+function Request-OfficeSave {
+    param([int]$TimeoutSeconds)
+    $cfg = $global:cfg
+    $tempDir = $env:windir + '\Temp'
+    $requestFile = Join-Path $tempDir 'RemoteWatchdog-reboot.flag'
+    $resultFile = Join-Path $tempDir 'RemoteWatchdog-office-result.txt'
+    $saver = Join-Path (Split-Path -Parent $ScriptPath) 'Protect-OpenDocuments.ps1'
+    if (-not $cfg.OfficeSaveBeforeReboot) { return $true }
+    $inWork = Test-InWorkHours
+    if (-not $inWork -and $cfg.ForceRestartOutsideWorkHours) {
+        $killed = Stop-OfficeForced
+        $msg = 'mesai disi (' + (Get-Date).ToString('dddd HH:mm') + '): zorla yeniden baslatma' + $(if ($killed.Count) { ' - kapatilan: ' + ($killed -join ', ') + ' (kaydedilmemis belge olabilir)' } else { ' - acik ofis uygulamasi yok' })
+        Write-Log 'ALERT' $msg
+        Send-Telegram ('[UYARI] ' + $env:COMPUTERNAME + ' ' + $msg)
+        return $true
+    }
+    if (-not (Test-Path -LiteralPath $saver)) { Write-Log 'WARN' ('belge kaydetme betigi bulunamadi: ' + $saver); return $true }
+    $stateFile = Join-Path $tempDir 'RemoteWatchdog-docs.json'
+    if (Test-Path -LiteralPath $stateFile) {
+        try {
+            $ds = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
+            if ([int]$ds.unsaved -gt 0) {
+                Write-Log 'ALERT' ('belge koruyucu ' + $ds.unsaved + ' kaydedilmemis belge bildiriyor (' + ((@($ds.names)) -join ', ') + '); reboot yapilmiyor')
+                if ([bool]$cfg.OfficeAbortRebootIfUnsaved) { return $false }
+            }
+        } catch { }
+    }
+    $officeRunning = @(Get-Process -Name 'WINWORD', 'EXCEL' -ErrorAction SilentlyContinue).Count -gt 0
+    if (-not $officeRunning) { Write-Log 'INFO' 'Word/Excel sistemde calismiyor, kaydedilecek belge yok - beklemeden devam'; return $true }
+    try { Remove-Item -LiteralPath $resultFile -Force -ErrorAction SilentlyContinue } catch { }
+    Set-Content -LiteralPath $requestFile -Value ((Get-Date).ToString('o')) -Encoding UTF8
+    Write-Log 'ALERT' ('yeniden baslatma oncesi Word/Excel kaydetme istegi yazildi; ' + $TimeoutSeconds + ' sn bekleniyor')
+    $waited = 0
+    $done = $false
+    $cleared = $false
+    while ($waited -lt $TimeoutSeconds) {
+        Start-Sleep -Seconds 5
+        $waited += 5
+        $done = $false
+        if (Test-Path -LiteralPath $resultFile) {
+            $txt = ''
+            try { $txt = Get-Content -LiteralPath $resultFile -Raw } catch { }
+            if ($txt -match 'TIMEOUT|HATA') { $done = $true; $cleared = $false; Write-Log 'ERR' ('belge kaydetme sonucu: ' + $txt.Trim()) }
+            elseif ($txt.Trim()) { $done = $true; $cleared = $true; Write-Log 'INFO' ('belge kaydetme sonucu: ' + ($txt.Trim() -replace "`r?`n", ' | ')) }
+        }
+        if ($done) { break }
+    }
+    try { Remove-Item -LiteralPath $requestFile -Force -ErrorAction SilentlyContinue } catch { }
+    if (-not $done -and $waited -ge $TimeoutSeconds) {
+        Write-Log 'ERR' ('belge kaydetme zaman asimina ugradi (' + $TimeoutSeconds + ' sn); Word/Excel acik olabilir')
+        return (-not [bool]$cfg.OfficeAbortRebootIfStillOpen)
+    }
+    return $cleared
+}
+
 function Invoke-RebootIfNeeded {
     param([bool]$AllOk)
     $cfg = $global:cfg
@@ -467,6 +625,7 @@ function Invoke-RebootIfNeeded {
     $state.ConsecutiveFailures = [int]$state.ConsecutiveFailures + 1
     Save-State $state
     $limit = [int]$cfg.RebootAfterFailedCycles
+    if ([int]$state.NetResetPendingReboot -eq 1) { $limit = [math]::Min($limit, 1); Write-Log 'INFO' 'winsock/IP reset uygulanmisti, etkisi icin yeniden baslatma bir sonraki dongude yapilacak' }
     Write-Log 'INFO' ('basarisiz dongu ' + $state.ConsecutiveFailures + '/' + $limit)
     if ($limit -le 0 -or $state.ConsecutiveFailures -lt $limit) { return }
     $uptime = Get-UptimeMinutes
@@ -475,6 +634,11 @@ function Invoke-RebootIfNeeded {
         return
     }
     Send-Telegram ('[KRITIK] ' + $env:COMPUTERNAME + ' ' + $state.ConsecutiveFailures + ' kez onarilamadi, ' + $cfg.RebootDelaySeconds + ' sn sonra yeniden baslatiliyor')
+    if (-not (Request-OfficeSave -TimeoutSeconds ([int]$cfg.OfficeSaveTimeoutSeconds))) {
+        Write-Log 'ALERT' 'yeniden baslatma iptal edildi: Word/Excel belgeleri kaydedilemedi (kayip olmamasi icin durduruldu)'
+        Send-Telegram ('[UYARI] ' + $env:COMPUTERNAME + ' yeniden baslatma iptal: kaydedilmemis Word/Excel belgesi var, once kaydedip kapatin')
+        return
+    }
     Write-Log 'ALERT' ('yeniden baslatma tetiklendi: ' + $cfg.RebootDelaySeconds + ' sn sonra')
     shutdown.exe /r /t $cfg.RebootDelaySeconds /c 'RemoteHostWatchdog: onarilamayan baglanti sorunu' 2>&1 | Out-Null
 }
@@ -497,7 +661,7 @@ function Invoke-Watchdog {
     try { $ip = Invoke-Probe -Url 'https://api.ipify.org' -TimeoutSec 8; if ($ip.Ok) { $script:PublicIp = [string]$ip.Raw.Content } } catch { }
     Test-Internet
     Test-Clock
-    Test-NetworkStack
+    Test-NetworkLayer
     Test-CrdService
     Test-Rdp
     Test-ServerPower
@@ -543,6 +707,19 @@ function Install-Watchdog {
     $stg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName $TaskName -Action $act -Trigger @($trgStartup, $trgLogon, $trgRep) -Principal $prn -Settings $stg -Force | Out-Null
     Write-Log 'INFO' ('zamanlanmis gorev kuruldu: ' + $TaskName + ' (acilista + oturum acilista + her ' + $IntervalMinutes + ' dk)')
+    $saver = Join-Path (Split-Path -Parent $ScriptPath) 'Protect-OpenDocuments.ps1'
+    if (Test-Path -LiteralPath $saver) {
+        $officeTask = 'RemoteHostOfficeSaver'
+        $act2 = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $saver + '"')
+        $trg2 = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+        $trg2b = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes 2)
+        $prn2 = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+        $stg2 = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 1)
+        try {
+            Register-ScheduledTask -TaskName $officeTask -Action $act2 -Trigger @($trg2, $trg2b) -Principal $prn2 -Settings $stg2 -Force | Out-Null
+            Write-Log 'INFO' ('belge kaydetme gorevi kuruldu: ' + $officeTask + ' (kullanici ' + $env:USERNAME + ', her 2 dk)')
+        } catch { Write-Log 'WARN' ('belge kaydetme gorevi kurulamadi: ' + $_.Exception.Message) }
+    } else { Write-Log 'WARN' ('bulge kaydetme betigi yok, reboot oncesi belge koruma devre disi: ' + $saver) }
     Write-Host ('Kuruldu. Elle calistirmak icin: Start-ScheduledTask -TaskName ' + $TaskName)
     Write-Host 'Sunucu modu: BIOS icinde "Restore on AC Power Loss = Power On" ve "Wake on LAN" acik olmali.'
 }
@@ -550,6 +727,7 @@ function Install-Watchdog {
 function Uninstall-Watchdog {
     if (-not (Test-Admin)) { Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ScriptPath + '"'), '-Uninstall'); return }
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false; Write-Host ('Zamanlanmis gorev kaldirildi: ' + $TaskName) }
+    if (Get-ScheduledTask -TaskName 'RemoteHostOfficeSaver' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostOfficeSaver' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostOfficeSaver' }
     Write-Host ('Config/loglar korundu: ' + $BaseDir)
 }
 
