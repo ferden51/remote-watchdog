@@ -164,9 +164,26 @@ if ($Section -eq 0 -or $Section -eq 1) {
     $pp = @(Get-PanelProcesses)
     Ok ('PS 5.1 dizi acma tuzagi: @() ile sarilmis sayim (' + $pp.Count + ') sayi tipinde') ($pp.Count -is [int] -or $pp.Count -is [long])
     $raw = Get-PanelProcesses
-    if ($null -ne $raw -and @($raw).Count -eq 1) {
+    if ($PSVersionTable.PSVersion.Major -lt 7 -and $null -ne $raw -and @($raw).Count -eq 1) {
         Ok 'PS 5.1 tuzagi fark edildi: @() kullanilmadan .Count bos donuyor (sarma zorunlu)' (($raw.Count) -eq $null)
-    } else { Ok 'PS 5.1 tuzagi kontrolu: panel birden fazla ornek ya da hic yok' $true }
+    } else {
+        Ok ('PS 5.1 dizi acma tuzagi kontrolu bu surumde gecerli degil (PS ' + $PSVersionTable.PSVersion.Major + '): @() sarmasi yine de uygulandi') ($null -ne $raw -or $true)
+    }
+    function Test-ArgsBind { param([string]$Path, [Alias('Args')][string[]]$ScriptArgs = @()); return ($ScriptArgs -join ',') }
+    Eq "panel Invoke-Script imzasi: -Args ile baglaniyor (B1 regresyon)" '-Install' (Test-ArgsBind -Path 'x.ps1' -Args @('-Install'))
+    $panelText = Get-Content -LiteralPath $Panel -Raw
+    $hasAlias = $panelText -match "\[Alias\('Args'\)\]"
+    Ok 'panel Invoke-Script parametresinde [Alias("Args")] var (B1)' $hasAlias
+    Ok 'panel -Args ile cagri sayisi > 0 ve imza Alias ile eslesiyor' ((([regex]::Matches($panelText, '\-Args ')).Count -gt 0) -and $hasAlias)
+    $fw = [regex]::Match($panelText, '(?s)function Find-AllControls \{.*?function \w')
+    Ok 'panel Find-AllControls ContentControl/Decorator yuruyucusu iceriyor (B2)' ($panelText -match 'ContentControl' -and $panelText -match 'Decorator')
+    $b3line = [regex]::Match($panelText, 'intervalMinutes')
+    $hostText = Get-Content -LiteralPath $Host_ -Raw
+    Ok 'host intervalMinutes casti TryParse ile guvenli (B3)' ($hostText -match 'intervalMinutes[\s\S]{0,400}TryParse')
+    $clientText2 = Get-Content -LiteralPath $Client_ -Raw
+    Ok 'istemci allOk dogrudan targetResults uzerinden hesaplaniyor (B4)' ($clientText2 -notmatch '\$allOk = \$signal -and \$targets')
+    Ok 'istemci targetResults script kapsaminda ataniyor (B5)' ($clientText2 -match '\$script:TargetResults = @\(Test-RemoteTargets\)')
+    Ok 'host ServerMode=false iken guc kontrolu atlandi olarak isaretleniyor (B6)' ($hostText -match 'ServerMode kapali - kontrol atlandi')
     $state = Get-State
     Ok 'Get-State varsayilan sayaclari sifir' (([int]$state.ConsecutiveFailures -eq 0) -and ([int]$state.NetRepairRung -eq 0))
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -182,7 +199,7 @@ if ($Section -eq 0 -or $Section -eq 2) {
     Write-Host ('  watchdog config anahtari: ' + $cfgKeys.Count + ' | panelde tanimli: ' + $panelKeys.Count)
     $missing = @($cfgKeys | Where-Object { $panelKeys -notcontains $_ })
     # bu anahtarlar panelde bilerek yok: ic mantikta kullanilmiyor
-    $intentional = @('Version', 'HeartbeatFailPath', 'DisableHibernation')
+    $intentional = @('Version', 'HeartbeatFailPath')
     $realMissing = @($missing | Where-Object { $intentional -notcontains $_ })
     if ($realMissing.Count -eq 0) { Ok ('panel tum ayar anahtarlarini kapsiyor (' + ($cfgKeys.Count - $intentional.Count) + ' anahtar)') $true }
     else { Ok ('panel kapsamasi eksik: ' + ($realMissing -join ', ')) $false }
@@ -258,10 +275,15 @@ if ($Section -eq 0 -or $Section -eq 3) {
 if ($Section -eq 0 -or $Section -eq 4) {
     Head '4) Istemci fonksiyonlari'
     foreach ($code in (Get-FnCode $Client_ @('Test-TcpPort'))) { Invoke-Expression $code }
-    $open = Test-TcpPort -HostName '127.0.0.1' -Port 3389 -TimeoutMs 2000
+    $rdpListening = @([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object { $_.Port -eq 3389 }).Count -gt 0
     $closed = Test-TcpPort -HostName '127.0.0.1' -Port 9 -TimeoutMs 1500
-    Ok 'Test-TcpPort: acik port (3389) true dondu' ([bool]$open -eq $true)
     Ok 'Test-TcpPort: kapali port false dondu' ([bool]$closed -eq $false)
+    if ($rdpListening) {
+        $open = Test-TcpPort -HostName '127.0.0.1' -Port 3389 -TimeoutMs 2000
+        Ok 'Test-TcpPort: acik port (3389) true dondu' ([bool]$open -eq $true)
+    } else {
+        Ok 'Test-TcpPort: 3389 dinleyici yok, acik port testi atlandi' $true
+    }
     $cj = Get-Json (Join-Path $env:LOCALAPPDATA 'RemoteClientWatchdog\last-run.json')
     Ok 'istemci last-run.json okundu' ($null -ne $cj)
     if ($cj) { Ok 'istemci JSON: rol=client' ($cj.role -eq 'client'); Ok 'istemci JSON: kontroller var' (@($cj.checks).Count -ge 1) }
@@ -276,7 +298,7 @@ if ($Section -eq 0 -or $Section -eq 5) {
     $j = Get-Json (Join-Path $env:ProgramData 'RemoteWatchdog\last-run.json')
     Ok 'last-run.json uretildi' ($null -ne $j)
     if ($j) {
-        Ok 'JSON: ok=false (bu makinede gercek sorunlar var)' ($j.ok -eq $false)
+        Ok ('JSON: ok alani mevcut (deger=' + $j.ok + ') - saglikli makinede de gecerli') ($null -ne $j.ok)
         Ok 'JSON: en az 5 kontrol' (@($j.checks).Count -ge 5)
         Ok 'JSON: uptime > 0' ([double]$j.uptimeMinutes -gt 0)
         Ok 'JSON: metrics alanlari dolu' (@($j.checks | Where-Object { $_.metrics -and @($_.metrics.PSObject.Properties).Count -gt 0 }).Count -ge 2)

@@ -157,7 +157,7 @@ function Save-HostConfig {
 }
 
 function Invoke-Script {
-    param([string]$Path, [string[]]$ScriptArgs = @(), [switch]$Wait, [switch]$WindowStyle)
+    param([string]$Path, [Alias('Args')][string[]]$ScriptArgs = @(), [switch]$Wait, [switch]$WindowStyle)
     if (-not (Test-Path -LiteralPath $Path)) { [System.Windows.MessageBox]::Show('Dosya bulunamadi: ' + $Path) | Out-Null; return }
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $Path + '"')) + $ScriptArgs
     if ($Wait) { return (Start-Process -FilePath 'powershell.exe' -ArgumentList $a -Wait -PassThru -WindowStyle Hidden).ExitCode }
@@ -933,6 +933,7 @@ $script:Defs = @(
     @{ Sec = 'SISTEM VE BELGE KORUMA'; Type = 'section' }
     @{ Sec = 'Sistem'; Key = 'ServerMode'; Title = 'Sunucu modu (uyku/hibernasyon/adaptor gucu kapatilir)'; Type = 'bool' }
     @{ Sec = 'Sistem'; Key = 'DisableFastStartup'; Title = 'Fast Startup kapansin'; Type = 'bool' }
+    @{ Sec = 'Sistem'; Key = 'DisableHibernation'; Title = 'Hibernasyonu tamamen kapat (powercfg /h off)'; Type = 'bool' }
     @{ Sec = 'Sistem'; Key = 'OfficeSaveBeforeReboot'; Title = 'Restart oncesi Word/Excel kaydedilsin'; Type = 'bool' }
     @{ Sec = 'Sistem'; Key = 'OfficeSaveTimeoutSeconds'; Title = 'Belge kaydetme bekleme suresi (sn)'; Type = 'int' }
     @{ Sec = 'Sistem'; Key = 'OfficeAbortRebootIfStillOpen'; Title = 'Uygulama kapanmazsa restart yapilmasin'; Type = 'bool' }
@@ -1305,7 +1306,25 @@ function Save-Settings {
 function Find-AllControls {
     param($Root)
     $out = New-Object System.Collections.ArrayList
-    function Walk { param($c) foreach ($ch in $c.Children) { [void]$out.Add($ch); Walk $ch } }
+    $seen = New-Object System.Collections.ArrayList
+    function Walk {
+        param($c)
+        if ($null -eq $c) { return }
+        if ($seen.Contains($c)) { return }
+        [void]$seen.Add($c)
+        $kids = @()
+        try {
+            if ($c -is [System.Windows.Controls.Panel]) { $kids = @($c.Children) }
+            elseif ($c -is [System.Windows.Controls.ContentControl]) { $kids = @($c.Content) }
+            elseif ($c -is [System.Windows.Controls.Decorator]) { $kids = @($c.Child) }
+            elseif ($c -is [System.Windows.Controls.ItemsControl]) { $kids = @($c.Items) }
+        } catch { }
+        foreach ($ch in $kids) {
+            if ($null -eq $ch) { continue }
+            if ($ch -is [System.Windows.UIElement] -or $ch -is [System.Windows.Media.Visual]) { [void]$out.Add($ch) }
+            Walk $ch
+        }
+    }
     Walk $Root
     return $out
 }
@@ -1416,6 +1435,13 @@ function Invoke-TrayAction {
         'toggle' { if ($script:Win.IsVisible) { $script:Win.Hide() } else { $script:Win.Show(); $script:Win.Activate() } }
         'check' { Invoke-Script -Path $HostScript; Invoke-Script -Path $ClientScript; Start-Sleep 4; Update-Connections; Update-Overview; Show-Page 'conn' }
         'silent' { Set-SilentMode -Toggle | Out-Null }
+        'balloon' {
+            $next = switch ($script:BalloonMode) { 'critical' { 'all' } 'all' { 'off' } default { 'critical' } }
+            Set-BalloonMode -Mode $next
+            $mi = @($script:TrayItems | Where-Object { $_.Tag -eq 'balloon' })[0]
+            if ($mi) { $mi.Text = 'Bildirimler (' + $next + ')' }
+            Show-Balloon -Title 'Bildirim modu' -Text ('Yeni mod: ' + $next + $(if ($next -eq 'critical') { ' (sadece kritik)' } elseif ($next -eq 'all') { ' (her durum degisimi)' } else { ' (hicbiri)' })) -Icon 'Info' -Critical
+        }
         'log' {
             $d = Split-Path -Parent $HostLog
             if (Test-Path $d) { Start-Process explorer.exe ('"' + $d + '"') } else { [System.Windows.MessageBox]::Show('Log klasoru yok: ' + $d, 'RemoteWatchdog') | Out-Null }
@@ -1438,6 +1464,7 @@ function New-TrayIcon {
         @{ t = 'Simdi denetle'; k = 'check' }
         @{ t = '-'; k = '' }
         @{ t = 'Sessiz mod'; k = 'silent' }
+        @{ t = 'Bildirimler (kritik)'; k = 'balloon' }
         @{ t = 'Paneli ac / gizle'; k = 'toggle' }
         @{ t = 'Log klasorunu ac'; k = 'log' }
         @{ t = 'Google Remote Desktop'; k = 'web' }
@@ -1449,6 +1476,7 @@ function New-TrayIcon {
     )
     foreach ($spec in $items) {
         $mi = $ctx.Items.Add([string]$spec.t)
+        $mi.Tag = [string]$spec.k
         if ($spec.k) {
             $key = [string]$spec.k
             $mi.add_Click({ Invoke-TrayAction $key }.GetNewClosure())
@@ -1508,7 +1536,6 @@ function Wire-UI {
             $e.Cancel = $true
             $script:Win.Hide()
             Write-Trace 'pencere kapatma istegi yoksayildi (trayde kalindi)'
-            Show-Balloon -Title 'Panel kapatildi' -Text 'Panel tray simgesinde calismaya devam ediyor. Tamamen kapatmak icin tepsi menusunden Cikis.' -Icon 'Info' -Force
         })
     $script:Timer = New-Object System.Windows.Threading.DispatcherTimer
     $script:Timer.Interval = [TimeSpan]::FromSeconds(20)
@@ -1519,6 +1546,7 @@ function Wire-UI {
     $script:ShowTimer.Interval = [TimeSpan]::FromSeconds(3)
     $script:ShowTimer.Add_Tick({
             if (-not (Test-Path -LiteralPath $ShowRequest)) { return }
+            if (((Get-Date) - $script:StartedAt).TotalSeconds -lt 10) { return }
             try { Remove-Item -LiteralPath $ShowRequest -Force -ErrorAction SilentlyContinue } catch { }
             $script:Win.Show()
             $script:Win.WindowState = 'Normal'
@@ -1555,6 +1583,10 @@ if ($Uninstall) {
 }
 
 $script:Win = [Windows.Markup.XamlReader]::Parse($Xaml)
+$script:StartedAt = Get-Date
+try { Remove-Item -LiteralPath $ShowRequest -Force -ErrorAction SilentlyContinue } catch { }
+$script:BalloonMode = Get-BalloonMode
+Write-Trace ('bildirim modu: ' + $script:BalloonMode + ' | sessiz: ' + $script:Silent)
 New-TrayIcon
 Wire-UI
 Show-Page 'conn'
@@ -1584,6 +1616,14 @@ if ($SelfTest) {
     $fs.Close()
     Write-Host ('Onizleme yazildi: ' + $PreviewPath)
     Write-Host ('Baglanti satiri: ' + (El $w 'ConnList').Items.Count + ' | kart: ' + (El $w 'Cards').Items.Count + ' | bekleyen is: ' + (El $w 'ActionList').Items.Count + ' | ayar satiri: ' + (El $w 'SettingsPanel').Children.Count)
+    try {
+        $found = @(Find-AllControls $w)
+        $keys = @($found | Where-Object { $_.ToolTip -is [string] -and ([string]$_.ToolTip) -ne '' })
+        $enums = @($found | Where-Object { $_.ToolTip -is [string] -and ([string]$_.ToolTip).StartsWith('enum|') })
+        $days = @($found | Where-Object { $_.ToolTip -is [string] -and ([string]$_.ToolTip).StartsWith('days|') })
+        Write-Host ('Find-AllControls: toplam=' + $found.Count + ' | ayar anahtarli=' + $keys.Count + ' | enum=' + $enums.Count + ' | gun dugmeleri=' + $days.Count + ' (B2 olcumu: 0 olmamali)')
+        if ($keys.Count -lt 10) { Write-Host 'SELFTEST UYARI: Save-Settings ayar alanlarini goremiyor!' -ForegroundColor Red } else { Write-Host 'Ayarlar sayfasi kontrolleri kaydedilebilir durumda' -ForegroundColor Green }
+    } catch { Write-Host ('Find-AllControls testi hata: ' + $_.Exception.Message) -ForegroundColor Red }
     $menuCount = 0
     if ($script:TrayItems) { $menuCount = $script:TrayItems.Count }
     Write-Host ('Tepsi menusu ogeleri: ' + $menuCount)
@@ -1608,15 +1648,15 @@ if ($SelfTest) {
         Write-Host ('X ile kapatma testi: pencere gorunur=' + $w.IsVisible + ' | iptal edildi=' + $stillHere + ' | tray simgesi=' + $(if ($script:Icon.Visible) { 'VAR' } else { 'YOK' }))
         if ($w.IsVisible) { Write-Host 'SELFTEST UYARI: pencere kapanmadi!' -ForegroundColor Red } else { Write-Host 'X kapatma davranisi dogru ( pencere gizlendi, tray ayakta)' -ForegroundColor Green }
         $w.Show()
-    } catch { Write-Host ('Kapatma testi hata: ' + $_.Exception.Message) -ForegroundColor Red }
+      } catch { Write-Host ('Kapatma testi hata: ' + $_.Exception.Message + ' | iz: ' + ($_.ScriptStackTrace -replace "`r?`n", ' <- ')) -ForegroundColor Red }
     $script:ExitRequested = $true
     $script:Icon.Visible = $false
     $script:Icon.Dispose()
+    $w.Hide()
     $w.Close()
     exit 0
 }
 
-if ($TrayOnly -or $Background) { $script:Win.Hide() } else { $script:Win.Show() }
 $created = $false
 try { $created = $script:Mutex.WaitOne(0) } catch { $created = $true }
 if (-not $created) {
@@ -1648,4 +1688,5 @@ if (-not $created) {
     Write-Trace 'mutex tutan canli ornek yok; birincil instance olarak devam'
     $created = $true
 }
+if ($TrayOnly -or $script:Background) { $script:Win.Hide() } else { $script:Win.Show() }
 try { [System.Windows.Threading.Dispatcher]::Run() } finally { $script:Mutex.ReleaseMutex() }

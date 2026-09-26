@@ -368,8 +368,8 @@ function Test-Panel {
                             $pa = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Resolve-Path $panelScript).Path + '" -Background')
                         }
                         $pp = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited
-                        $ps = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
-                        Register-ScheduledTask -TaskName 'RemoteHostPanel' -Action $pa -Principal $pp -Settings $ps -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 3)) -Force | Out-Null
+                        $ps = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -Hidden
+                        Register-ScheduledTask -TaskName 'RemoteHostPanel' -Action $pa -Principal $pp -Settings $ps -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5)) -Force | Out-Null
                         Start-ScheduledTask -TaskName 'RemoteHostPanel'
                         $repair += 'panel gorevi olusturuldu ve calistirildi'
                     } catch { $repair += 'panel baslatilamadi (kullanici oturumu gerekli): ' + $_.Exception.Message }
@@ -521,6 +521,11 @@ function Test-ServerPower {
     $onBattery = $false
     try { $bat = Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue; if ($bat) { $onBattery = ($bat.BatteryStatus -eq 1) } } catch { }
     if ($onBattery) { $ok = $false; $repair += 'CIKTAKILAR (pil) - sunucu modu icin AC besleme gerekli' }
+    if (-not $cfg.ServerMode) {
+        Write-Log 'INFO' 'ServerMode kapali (dizustu profili): uyku/hibernasyon ayarlarina dokunulmadi, kontrol atlandi'
+        Add-Result 'Guc/uyku ayarlari' $true ($detail + ', fastStartup=' + $(if ($fastStartup) { 'acik' } else { 'kapali' })) 'ServerMode kapali - kontrol atlandi' $true
+        return
+    }
     Add-Result 'Guc/uyku ayarlari' $ok ($detail + ', fastStartup=' + $(if ($fastStartup) { 'acik' } else { 'kapali' }) + ', pil=' + $(if ($onBattery) { 'VAR/ciktaki' } else { 'yok' })) ($repair -join '; ')
 }
 
@@ -904,7 +909,11 @@ function Write-JsonStatus {
             lastUserNotifyUtc = [string]$state.LastUserNotifyUtc
         }
         config = [ordered]@{
-            intervalMinutes = $(if ($task) { [int]$task.Triggers.Repetition.Interval -replace '^PT', '' -replace 'M$', '' } else { 0 })
+            intervalMinutes = $(if ($task) {
+                    $iv = @(foreach ($tg in @($task.Triggers)) { $tg.Repetition.Interval }) | Where-Object { $_ } | Select-Object -First 1
+                    $ivn = 0
+                    if ($iv -and [int]::TryParse((([string]$iv) -replace '^PT', '' -replace 'M$', ''), [ref]$ivn)) { $ivn } else { 0 }
+                } else { 0 })
             restartPolicy = [string]$cfg.RestartPolicy
             blackoutStart = $cfg.BlackoutStart
             blackoutEnd = $cfg.BlackoutEnd

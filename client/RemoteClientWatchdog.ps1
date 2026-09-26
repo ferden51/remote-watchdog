@@ -248,9 +248,8 @@ function Invoke-Cycle {
     Write-Log 'INFO' ('dongu basladi | rapor=' + $Check.IsPresent)
     Test-LocalNet
     $signal = Test-CrdServicePath
-    $targets = Test-RemoteTargets
-    $allOk = $signal -and $targets
-    $script:TargetResults = $targetResults
+    $script:TargetResults = @(Test-RemoteTargets)
+    $allOk = [bool]$signal
     foreach ($r in $script:Results) { if (-not $r.Ok) { $allOk = $false } }
     foreach ($r in $script:Results) {
         $tag = if ($r.Ok) { 'TAMAM   ' } else { 'SORUN   ' }

@@ -17,7 +17,7 @@ Bağlantı sorunlarının çoğu "makine açık ama erişilemiyor" şeklindedir 
 | `host/Collect-Diagnostics.ps1` | Uzak bilgisayar | 14 günlük olay günlüğü + ağ/DHCP/uyku analizi, puanlı şüpheli listesi (hiçbir şeyi değiştirmez) |
 | `host/Enable-ConsoleAutoLogon.ps1` | Uzak bilgisayar (admin) | Reboot sonrası konsola otomatik giriş (opt-in, riskli) |
 | `client/RemoteClientWatchdog.ps1` | Kendi bilgisayarın | Uzak hedefe TCP erişim testi, kopma uyarısı, RDP/tarayıcı otomatik açma |
-| `ui/RemoteWatchdogTray.ps1` | Her iki makinede (kullanıcı oturumu) | Sistem tepsisi kontrol paneli: durum, bekleyen işler, tüm ayarlar, daima zorla kapatma anahtarı, loglar, teşhis raporu |
+| `ui/RemoteWatchdogPanel.ps1` | Her iki makinede (kullanıcı oturumu) | Sistem tepsisi kontrol paneli: durum, bekleyen işler, tüm ayarlar, daima zorla kapatma anahtarı, loglar, teşhis raporu |
 
 ## Kurulum: iki modül
 
@@ -56,12 +56,12 @@ Repo private olduğu için `irm` ile tek satır indirme yetki ister; USB/OneDriv
 
 
 
-`ui/RemoteWatchdogTray.ps1` tek dosyalık bir WinForms uygulamasıdır; klavye/fare gerektirmez.
+`ui/RemoteWatchdogPanel.ps1` tek dosyalık bir WinForms uygulamasıdır; klavye/fare gerektirmez.
 
 ```powershell
-.\RemoteWatchdogTray.ps1                 # tray'de başlar (simgeye çift tıkla = panel)
-.\RemoteWatchdogTray.ps1 -Install        # oturum açılışında otomatik başlat
-.\RemoteWatchdogTray.ps1 -SelfTest       # arayüzü kurup doldurup kapatır (test için)
+.\RemoteWatchdogPanel.ps1                 # tray'de başlar (simgeye çift tıkla = panel)
+.\RemoteWatchdogPanel.ps1 -Install        # oturum açılışında otomatik başlat
+.\RemoteWatchdogPanel.ps1 -SelfTest       # arayüzü kurup doldurup kapatır (test için)
 ```
 
 Tepsisindeki simge **duruma göre renklenir**: yeşil (ayakta), kırmızı (sorun), gri (veri yok). Simgeye tıkla,
@@ -175,7 +175,7 @@ başlatmadan sonra sekmeler geri gelir.
 
 ## Dışarıdan "hâlâ çalışıyor mu" sinyali
 
-- **Telegram**: durum değişince tek mesaj, sorun sürerse `AlertRepeatHours` saatte bir tekrar.
+- **Telegram**: durum değişince tek mesaj, sorun sürerse `AlertRepeatHours` saatte bir tekrar. Bot token `config.json` içinde **düz metin** saklanır; `Install-Host` klasör ACL'ini (SYSTEM + Administrators + kullanıcı) sıkılaştırır, istemci tarafında dosya kullanıcı profilinde kalır.
 - **healthchecks.io**: `https://hc-ping.com/<uuid>` adresini `-HeartbeatUrl` ile verirseniz sunucu
   dönüp durması / hata vermesi durumunda e-posta veya çağrı gelir. Sorun halinde `<uuid>/fail` adresine gider.
   Yeni bir check oluşturup `Period: 5m`, `Grace: 10m` seçin (dead-man's switch).
@@ -208,24 +208,41 @@ başlatmadan sonra sekmeler geri gelir.
 | `CrdRestartAfterHours` | 0 | >0 ise bağlantı yokken bu yaştan sonra CRD'yi önleyici yeniden başlat |
 | `AlertRepeatHours` | 12 | Aynı sorun için tekrar uyarı aralığı |
 | `ServiceCrashRecovery` | true | Servis çökerse Windows kendini yeniden başlatsın |
-| `WorkHoursEnabled` | true | true ise mesai saatlerinde belge koruması, dışında zorla restart |
-| `WorkHoursStart` / `WorkHoursEnd` | 8 / 17 | Mesai saatleri (başlangıç dahil, bitiş hariç) |
-| `WorkDays` | `[1,2,3,4,5]` | 1=Pzt … 7=Paz. Varsayılan: **Cumartesi ve Pazar tam gün zorla restart** |
-| `ForceRestartOutsideWorkHours` | true | false yapılırsa mesai dışında da belge korunur, zorla kapatma olmaz |
+| `BlackoutEnabled` | true | Blackout penceresini kullan (kapali ise her saat korumali davranis) |
+| `BlackoutStart` / `BlackoutEnd` | 18 / 8 | Blackout saati; bitis < baslangic ise geceye sarar |
+| `BlackoutFullDays` | `[Cmt, Paz]` | Cumartesi ve Pazar tam gun zorla kapatma + restart |
+| `BlackoutNights` | `[Pzt..Paz]` | Hangi gecelerde blackout gecerli |
+| `RestartPolicy` | blackout | `blackout` = sadece blackout saatlerinde restart, `always` = her kosulda, `never` = hic |
+| `ForceRestartAlways` / `ForceRestartUntil` | false / bos | Saat fark etmeksizin zorla kapatma; bitis zamani verilebilir |
+| `HolidayMode` | full | `full` = tatil tam blackout, `default` = normal kural, `none` = yok say |
+| `Holidays` | bos | Tatil listesi, her satir `YYYY-AA-GG` |
+| `NotifyRepeatHours` | 4 | Kullanici bilgilendirme tekrar araligi (ekran/Telegram uyarisi) |
 | `OfficeAbortRebootIfUnsaved` | true | Kaydedilmemiş belge varsa reboot yapılmaz |
 | `OfficeSaveTimeoutSeconds` | 120 | Reboot öncesi belge kaydetmeyi bekleme süresi |
 
-### Mesai saatine göre restart politikası
+### Blackout saatine göre restart politikası
 
 | Zaman | Davranış |
 |---|---|
-| Pzt–Cum 08:00–16:59 | Belge korunur: kaydedilmemiş Word/Excel varsa **restart yapılmaz**, Telegram'dan uyarılır. Kapatılacaksa önce kaydedilip kapatılır. |
-| Pzt–Cum 17:00–07:59 | Word/Excel/PPT **zorla kapatılır**, restart yapılır (kaydedilmemiş belge kaybolabilir, loglanır ve Telegram'dan bildirilir). |
-| Cumartesi–Pazar (tam gün) | Zorla kapatma + restart. |
-| `WorkHoursEnabled: false` | Her zaman korumalı davranış. |
-| `WorkDays: [1..7]` | Hafta sonu da mesai gibi korunur. |
+| Blackout dışı (gündüz) | Restart **yapılmaz**; ekranda ve Telegram'da sadece bilgilendirme yapılır, karar kullanıcıya kalır. |
+| Blackout saatleri (varsayılan 18:00 → 08:00) | Word/Excel/PPT **zorla kapatılır**, restart yapılır (kaydedilmemiş belge kaybolabilir; loglanır ve Telegram'dan bildirilir). |
+| Cumartesi-Pazar (tam gün) | Zorla kapatma + restart. |
+| `BlackoutEnabled: false` | Blackout kullanılmaz, her saat korumalı davranış. |
+| `BlackoutFullDays: []` | Hafta sonu da mesai gibi korunur. |
+| `ForceRestartAlways: true` | Saat fark etmez zorla kapatma + restart. |
 
 ## Testler
 
-`host/RemoteHostWatchdog.ps1 -Check` ve `client/RemoteClientWatchdog.ps1 -Check` hiçbir sistem değişikliği
-yapmadan tüm kontrolleri çalıştırır; `-Status` son logları ve sayaçları gösterir.
+`tests/Test-All.ps1` 5 bölümde testleri koşar (okuma modunda, hiçbir sistem değişikliği yapmaz):
+
+1. Watchdog saf fonksiyonları — blackout penceresi (9 vaka), tatil modları, gün eşleme, **netstat ayrıştırma canlı doğrulaması**, TCP ölçüm, config/state varsayılanları, PS 5.1 dizi açma tuzağı
+2. Ayar kapsaması — watchdog config'indeki her anahtar panelde tanımlı mı (otomatik karşılaştırma)
+3. Panel veri fonksiyonları — gerçek `last-run.json` ile bağlantı satırları, ölçümler, renkler, rol tespiti
+4. İstemci — açık/kapalı port ayrımı (3389 dinleyicisi yoksa atlanır), JSON okuma
+5. Uçtan uca — `watchdog -Check` → `last-run.json` → tazelik ve metrics (~40 sn)
+
+Hızlı doğrulama: `.\tests\Test-All.ps1 -Section 1` (veya `-Section 2`).
+
+`ui/RemoteWatchdogPanel.ps1 -SelfTest` arayüzü kurar, PNG önizleme üretir ve şu davranışları doğrular:
+X ile kapatma (pencere gizlenir, tray ayakta kalır), sessiz mod, ayar kontrollerinin kaydedilebilirliği
+(`Find-AllControls` sayımı).

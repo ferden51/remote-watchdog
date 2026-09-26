@@ -75,7 +75,7 @@ if ($SkipTray) { Warn 'atlandi (-SkipTray)' }
 else {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $TrayScript -Install | Out-Null
     if (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'RemoteWatchdogTray' -ErrorAction SilentlyContinue) { Ok 'tray oturum acilinda baslayacak' } else { Warn 'tray kaydi olusmadi' }
-    Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-STA', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $TrayScript + '"'), '-ShowPanel') | Out-Null
+    Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-STA', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $TrayScript + '"')) | Out-Null
     Ok 'tray baslatildi, panel acik'
 }
 
