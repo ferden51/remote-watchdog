@@ -26,7 +26,16 @@ function Test-Admin {
     return (New-Object Security.Principal.WindowsPrincipal $id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-if (-not (Test-Admin)) { Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), $PSBoundParameters.Keys.ForEach({ "-$_ $($PSBoundParameters[$_])" })); exit 0 }
+if (-not (Test-Admin)) {
+    $forward = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'))
+    if ($User) { $forward += @('-User', ('"' + $User + '"')) }
+    if ($Password) { $forward += @('-Password', ('"' + ($Password -replace '"', '\"') + '"')) }
+    if ($Domain) { $forward += @('-Domain', ('"' + $Domain + '"')) }
+    if ($Disable) { $forward += '-Disable' }
+    Write-Host 'Yonetici yetkisi icin yeniden baslatiliyor...'
+    Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $forward
+    exit 0
+}
 
 if ($Disable) {
     Set-ItemProperty -Path $Winlogon -Name 'AutoAdminLogon' -Value '0'

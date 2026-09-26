@@ -209,7 +209,7 @@ function Get-CrdSignalConnections {
     try { $ns = netstat -ano -p tcp 2>&1 } catch { return 0 }
     foreach ($line in $ns) {
         if ($line -match '^\s*TCP\s+\S+\s+(\S+):(\d+)\s+(\S+)\s+(\d+)\s*$') {
-            if ($matches[1] -eq 'ESTABLISHED' -and ($Ports -contains [int]$matches[2]) -and ($pids -contains [int]$matches[4])) { $count++ }
+            if ($matches[3] -eq 'ESTABLISHED' -and ($Ports -contains [int]$matches[2]) -and ($pids -contains [int]$matches[4])) { $count++ }
         }
     }
     return $count
@@ -604,7 +604,7 @@ function Invoke-Alerts {
         $state.AlertUtc = $now.ToString('o')
         if ($key -eq 'OK') { $state.LastOkUtc = $now.ToString('o') }
         Save-State $state
-        $head = if ($recovered) { '[DUZELDI] ' } elseif ($key -eq 'OK') { '[SAYGI] ' } else { '[UYARI] ' }
+        $head = if ($recovered) { '[DUZELDI] ' } elseif ($key -eq 'OK') { '[BILGI] ' } else { '[UYARI] ' }
         $text = $head + $env:COMPUTERNAME + ' | ' + $Summary
         Write-Log 'ALERT' $text
         Send-Telegram $text

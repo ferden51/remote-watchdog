@@ -125,6 +125,34 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'TCP olcum: kapali port -1 doner' ($closed -eq -1)
     $conns = Get-CrdSignalConnections -Ports @(443, 5222)
     Ok ('CRD sinyal baglantisi sayimi calisti (' + $conns + ')') ($conns -ge 0)
+    $sample = '  TCP    192.168.1.109:49029    104.18.2.115:443       ESTABLISHED     2088'
+    $sample -match '^\s*TCP\s+\S+\s+(\S+):(\d+)\s+(\S+)\s+(\d+)\s*$' | Out-Null
+    Eq 'netsat ayristirma: uzak IP = matches[1]' '104.18.2.115' $matches[1]
+    Eq 'netstat ayristirma: uzak port = matches[2]' '443' $matches[2]
+    Eq 'netstat ayristirma: durum = matches[3] (ESKIDEN matches[1] idi -> hep 0 donuyordu)' 'ESTABLISHED' $matches[3]
+    Eq 'netstat ayristirma: PID = matches[4]' '2088' $matches[4]
+    $ns = netstat -ano -p tcp 2>&1
+    $pids = @()
+    foreach ($l in $ns) {
+        if ($l -match '^\s*TCP\s+\S+\s+(\S+):(\d+)\s+(\S+)\s+(\d+)\s*$') {
+            if ($matches[3] -eq 'ESTABLISHED' -and [int]$matches[2] -eq 443) { $pids += [int]$matches[4] }
+        }
+    }
+    if ($pids.Count -gt 0) {
+        $real = 0
+        foreach ($l in $ns) {
+            if ($l -match '^\s*TCP\s+\S+\s+(\S+):(\d+)\s+(\S+)\s+(\d+)\s*$') {
+                if ($matches[3] -eq 'ESTABLISHED' -and ([int]$matches[2] -eq 443) -and ($pids -contains [int]$matches[4])) { $real++ }
+            }
+        }
+        $broken = 0
+        foreach ($l in $ns) {
+            if ($l -match '^\s*TCP\s+\S+\s+(\S+):(\d+)\s+(\S+)\s+(\d+)\s*$') {
+                if ($matches[1] -eq 'ESTABLISHED' -and ([int]$matches[2] -eq 443) -and ($pids -contains [int]$matches[4])) { $broken++ }
+            }
+        }
+        Ok ("canli netstat dogrulamasi: duzeltilmis sayim=$real (beklenen>0), eski mantik=$broken (0 olmali)") ($real -gt 0 -and $broken -eq 0)
+    } else { Ok 'canli netstat dogrulamasi: 443 baglantisi yok, atlandi' $true }
     Ok 'CRD host config yolu bulundu' ([bool](Get-CrdHostConfigPath))
     Ok 'uptime hesaplandi' ((Get-UptimeMinutes) -gt 0)
     $pwr = Get-PowerSettingAcIndex -AliasPath @('SUB_SLEEP', 'STANDBYIDLE')

@@ -47,6 +47,8 @@ $script:Win = $null
 $script:Icon = $null
 $script:Silent = [bool]((Get-ItemProperty -Path $RunKey -Name ($RunName + 'Silent') -ErrorAction SilentlyContinue).($RunName + 'Silent'))
 $script:LastState = ''
+$script:LastColor = $null
+$script:HIcon = [IntPtr]::Zero
 $script:ExitRequested = $false
 $script:Mutex = New-Object System.Threading.Mutex($false, 'Local\RemoteWatchdogPanel')
 $script:Page = 'overview'
@@ -1310,20 +1312,29 @@ function Find-ByTag { param($Root, [string]$Tag) foreach ($c in (Find-AllControl
 function Refresh-Icon {
     $st = Get-StatusInfo
     $color = if ($null -eq $st.Host -and $null -eq $st.Client) { [System.Drawing.Color]::Gray } elseif ($st.Bad -gt 0) { [System.Drawing.Color]::Firebrick } else { [System.Drawing.Color]::ForestGreen }
-    $bmp = New-Object System.Drawing.Bitmap(16, 16)
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.SmoothingMode = 'AntiAlias'
-    $g.Clear([System.Drawing.Color]::Transparent)
-    $br = New-Object System.Drawing.SolidBrush($color)
-    $g.FillEllipse($br, 1, 1, 14, 14)
-    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::White, 1.5)
-    $g.DrawEllipse($pen, 1, 1, 14, 14)
-    $g.Dispose(); $br.Dispose(); $pen.Dispose()
-    $ico = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
-    $bmp.Dispose()
-    $old = $script:Icon.Icon
-    $script:Icon.Icon = $ico
-    if ($old) { try { $old.Dispose() } catch { } }
+    if ($null -eq $script:LastColor -or $script:LastColor.ToArgb() -ne $color.ToArgb()) {
+        if (-not ('IconNative' -as [type])) {
+            Add-Type -Name IconNative -Namespace Native -MemberDefinition '[DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr h);'
+        }
+        $bmp = New-Object System.Drawing.Bitmap(16, 16)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.SmoothingMode = 'AntiAlias'
+        $g.Clear([System.Drawing.Color]::Transparent)
+        $br = New-Object System.Drawing.SolidBrush($color)
+        $g.FillEllipse($br, 1, 1, 14, 14)
+        $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::White, 1.5)
+        $g.DrawEllipse($pen, 1, 1, 14, 14)
+        $g.Dispose(); $br.Dispose(); $pen.Dispose()
+        $hIcon = $bmp.GetHicon()
+        $bmp.Dispose()
+        $ico = [System.Drawing.Icon]::FromHandle($hIcon)
+        $oldIcon = $script:Icon.Icon
+        $script:Icon.Icon = $ico
+        if ($oldIcon) { try { $oldIcon.Dispose() } catch { } }
+        if ($script:HIcon -ne [IntPtr]::Zero) { try { [void][Native.IconNative]::DestroyIcon($script:HIcon) } catch { } }
+        $script:HIcon = $hIcon
+        $script:LastColor = $color
+    }
     $state = '' + $(if ($st.Host) { $st.Host.ok } else { 'yok' }) + '|' + $(if ($st.Client) { $st.Client.ok } else { 'yok' })
     if ($state -ne $script:LastState) {
         $script:LastState = $state

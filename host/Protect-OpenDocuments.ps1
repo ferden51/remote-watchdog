@@ -143,7 +143,7 @@ function Invoke-SaveAndClose {
         try { foreach ($d in @($w.Documents)) { if (-not $d.Saved) { $d.Save(); $out += 'word kaydedildi: ' + $d.Name } }; $w.Quit(-1); $out += 'word kapatildi' } catch { $out += 'word HATA: ' + $_.Exception.Message }
     }
     if ($x) {
-        try { foreach ($b in @($x.Workbooks)) { if (-not $b.Saved) { $b.Save(); $out += 'excel kaydedildi: ' + $b.Name } }; $x.Quit(-1); $out += 'excel kapatildi' } catch { $out += 'excel HATA: ' + $_.Exception.Message }
+        try { try { $x.DisplayAlerts = $false } catch { }; foreach ($b in @($x.Workbooks)) { if (-not $b.Saved) { $b.Save(); $out += 'excel kaydedildi: ' + $b.Name } }; $x.Quit(); $out += 'excel kapatildi' } catch { $out += 'excel HATA: ' + $_.Exception.Message }
     }
     if ($out.Count -eq 0) { $out += 'word/excel acik degil' }
     Save-StateFile $snap
@@ -183,7 +183,7 @@ if ($hasRequest -or $Force) {
         }
         $x = Get-App 'Excel.Application'
         if ($x) {
-            try { try { $x.AutoRecoverInterval = $arm } catch { }; foreach ($b in @($x.Workbooks)) { if (-not $b.Saved) { $b.Save(); $out += 'excel kaydedildi: ' + $b.Name } }; $x.Quit(-1); $out += 'excel kapatildi' } catch { $out += 'excel HATA: ' + $_.Exception.Message }
+            try { try { $x.AutoRecoverInterval = $arm; $x.DisplayAlerts = $false } catch { }; foreach ($b in @($x.Workbooks)) { if (-not $b.Saved) { $b.Save(); $out += 'excel kaydedildi: ' + $b.Name } }; $x.Quit(); $out += 'excel kapatildi' } catch { $out += 'excel HATA: ' + $_.Exception.Message }
         }
         if ($out.Count -eq 0) { $out += 'word/excel acik degil' }
         $stillOpen = ((Get-App 'Word.Application') -ne $null) -or ((Get-App 'Excel.Application') -ne $null)

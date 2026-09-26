@@ -51,7 +51,7 @@ foreach ($f in @($HostScript, $DiagScript, $DocsScript)) {
     if (-not (Test-Path -LiteralPath $f)) { Die ('Dosya bulunamadi: ' + $f + ' (tum klasoru kopyaladin mi?)') }
 }
 
-if (-not $IsAdmin) { Warn 'Yonetici degilsin. Zamanlanmis gorev ve servis ayarlari icin gerekli; script kendini yonetici olarak yeniden baslatacak.' }
+if (-not (Is-Admin)) { Warn 'Yonetici degilsin. Zamanlanmis gorev ve servis ayarlari icin gerekli; script kendini yonetici olarak yeniden baslatacak.' }
 
 if ($DryRun) {
     Warn 'KURULUM YAPILMAYACAK (DryRun)'
@@ -98,6 +98,14 @@ if ($TelegramChatId) { $args += @('-TelegramChatId', ('"' + $TelegramChatId + '"
 if ($KeepSleep) { $args += '-KeepSleep' }
 $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $args -Wait -PassThru -WindowStyle Hidden
 if ($p.ExitCode -eq 0) { Ok 'zamanlanmis gorev kuruldu (acilista + oturum acilista + her ' + $IntervalMinutes + ' dk)' } else { Warn ('kurulum donus kodu: ' + $p.ExitCode) }
+
+$cfgPath = 'C:\ProgramData\RemoteWatchdog'
+if (Test-Path -LiteralPath $cfgPath) {
+    try {
+        icacls $cfgPath /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "BUILTIN\Administrators:(OI)(CI)F" "$env:USERNAME:(OI)(CI)M" /T /C 2>&1 | Out-Null
+        Ok 'config klasoru izinleri kisitlandi (SYSTEM + Administrators + kullanimici)'
+    } catch { Warn ('izin kisitlamasi yapilamadi (Telegram token gibi degerler duz metin kalir): ' + $_.Exception.Message) }
+}
 Start-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 5
 $task = Get-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue
