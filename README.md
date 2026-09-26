@@ -52,6 +52,21 @@ Repo **private** olduğu için indirme için GitHub kimlik doğrulaması gerekir
 Kurulumdan sonra: `Get-ScheduledTask RemoteHostWatchdog`, log: `C:\ProgramData\RemoteWatchdog\host-watchdog.log`,
 config: `C:\ProgramData\RemoteWatchdog\config.json`.
 
+### Profil seçimi: masaüstü (sürekli açık) vs dizüstü
+
+Varsayılan **sunucu modu**: uyku, hibernasyon, disk zaman aşımı kapatılır, Fast Startup kapanır, ağ adaptörü
+uykuya girmez. Bu, dışarıdan erişilecek makine için doğru olan ayardır.
+
+Dizüstü olarak kullanılacak, uyuması gereken bir makineye kuruyorsan değişiklik yapılmasın:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:TEMP\RW.ps1" -Install -KeepSleep
+```
+
+`-KeepSleep` yalnızca `ServerMode`, `DisableHibernation` ve `DisableFastStartup` değerlerini kapatır; CRD
+servisi, RDP, saat senkronu, ağ ve alarm tarafı yine kurulur. Kural: **bir kişinin önünde açık duran ve
+uzaktan kullanılan makine** → varsayılan; **taşınabilir, günlük kullanılan makine** → `-KeepSleep`.
+
 ## Kurulum — kendi bilgisayarın (istemci, admin gerektirmez)
 
 ```powershell

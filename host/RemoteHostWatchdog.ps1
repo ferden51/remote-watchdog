@@ -21,7 +21,8 @@ param(
     [string]$TelegramToken = '',
     [string]$TelegramChatId = '',
     [string]$TunnelName = '',
-    [switch]$EnableTunnelRepair
+    [switch]$EnableTunnelRepair,
+    [switch]$KeepSleep
 )
 
 $ErrorActionPreference = 'Continue'
@@ -519,6 +520,7 @@ function Install-Watchdog {
     if ($TelegramChatId) { $forward += @('-TelegramChatId', ('"' + $TelegramChatId + '"')) }
     if ($TunnelName) { $forward += @('-TunnelName', ('"' + $TunnelName + '"')) }
     if ($EnableTunnelRepair) { $forward += '-EnableTunnelRepair' }
+    if ($KeepSleep) { $forward += '-KeepSleep' }
     if (-not (Test-Admin)) { Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $forward; Write-Host 'Yonetici yetkisiyle yeniden baslatildi.'; return }
     $global:cfg = Get-Config
     if ($HeartbeatUrl) { $global:cfg.HeartbeatUrl = $HeartbeatUrl }
@@ -526,6 +528,12 @@ function Install-Watchdog {
     if ($TelegramChatId) { $global:cfg.TelegramChatId = $TelegramChatId }
     if ($TunnelName) { $global:cfg.TunnelName = $TunnelName }
     if ($EnableTunnelRepair) { $global:cfg.TunnelRepair = $true }
+    if ($KeepSleep) {
+        $global:cfg.ServerMode = $false
+        $global:cfg.DisableHibernation = $false
+        $global:cfg.DisableFastStartup = $false
+        Write-Log 'INFO' ' profil: dizustu (uyku ve Fast Startup oldugu gibi birakildi)'
+    }
     Save-Config $global:cfg
     $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '"')
     $trgStartup = New-ScheduledTaskTrigger -AtStartup
