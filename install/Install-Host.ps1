@@ -30,7 +30,7 @@ $Root = Split-Path -Parent $InstallDir
 $HostScript = Join-Path $Root 'host\RemoteHostWatchdog.ps1'
 $DiagScript = Join-Path $Root 'host\Collect-Diagnostics.ps1'
 $DocsScript = Join-Path $Root 'host\Protect-OpenDocuments.ps1'
-$TrayScript = Join-Path $Root 'ui\RemoteWatchdogTray.ps1'
+$TrayScript = Join-Path $Root 'ui\RemoteWatchdogPanel.ps1'
 
 function Step { param([string]$Text) Write-Host ''; Write-Host ('==> ' + $Text) -ForegroundColor Cyan }
 function Ok { param([string]$Text) Write-Host ('    [OK] ' + $Text) -ForegroundColor Green }

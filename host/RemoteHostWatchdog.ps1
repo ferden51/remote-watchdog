@@ -134,22 +134,38 @@ function Save-State {
 }
 
 function Add-Result {
-    param([string]$Name, [bool]$Ok, [string]$Detail = '', [string]$Repair = '', [bool]$Skipped = $false)
-    [void]$script:Results.Add([pscustomobject]@{ Name = $Name; Ok = $Ok; Skipped = $Skipped; Detail = $Detail; Repair = $Repair })
+    param([string]$Name, [bool]$Ok, [string]$Detail = '', [string]$Repair = '', [bool]$Skipped = $false, [hashtable]$Metrics = @{})
+    [void]$script:Results.Add([pscustomobject]@{ Name = $Name; Ok = $Ok; Skipped = $Skipped; Detail = $Detail; Repair = $Repair; Metrics = $Metrics })
     $tag = if ($Skipped) { 'ATLANDI ' } elseif ($Ok) { 'TAMAM    ' } else { 'SORUN    ' }
     Write-Log 'CHECK' ('{0} {1} | {2}{3}' -f $tag, $Name, $Detail, $(if ($Repair) { ' | onarim: ' + $Repair } else { '' }))
 }
 
 function Invoke-Probe {
     param([string]$Url, [int]$TimeoutSec = 10, [string]$Method = 'GET')
+    $sw = [Diagnostics.Stopwatch]::StartNew()
     try {
         $r = Invoke-WebRequest -Uri $Url -Method $Method -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop
-        return [pscustomobject]@{ Ok = $true; Status = [int]$r.StatusCode; Raw = $r; Error = '' }
+        $sw.Stop()
+        return [pscustomobject]@{ Ok = $true; Status = [int]$r.StatusCode; Raw = $r; Error = ''; Ms = [int]$sw.ElapsedMilliseconds }
     } catch {
+        $sw.Stop()
         $code = $null
         if ($_.Exception.Response) { try { $code = [int]$_.Exception.Response.StatusCode } catch { } }
-        return [pscustomobject]@{ Ok = $false; Status = $code; Raw = $null; Error = $_.Exception.Message }
+        return [pscustomobject]@{ Ok = $false; Status = $code; Raw = $null; Error = $_.Exception.Message; Ms = [int]$sw.ElapsedMilliseconds }
     }
+}
+
+function Get-TcpMs {
+    param([string]$HostName, [int]$Port = 443, [int]$TimeoutMs = 3000)
+    $c = New-Object System.Net.Sockets.TcpClient
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $iar = $c.BeginConnect($HostName, $Port, $null, $null)
+        if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) { return -1 }
+        $c.EndConnect($iar)
+        $sw.Stop()
+        return [int]$sw.ElapsedMilliseconds
+    } catch { return -1 } finally { try { $c.Close() } catch { } }
 }
 
 function Get-PowerSettingAcIndex {
@@ -199,9 +215,11 @@ function Get-CrdSignalConnections {
 
 function Test-Internet {
     $r = Invoke-Probe -Url 'https://www.google.com/generate_204' -TimeoutSec 8
-    $mtalk = Test-NetConnection -ComputerName 'mtalk.google.com' -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue
+    $mtalkMs = Get-TcpMs -HostName 'mtalk.google.com' -Port 443
+    $mtalk = ($mtalkMs -ge 0)
     $ok = $r.Ok -and $mtalk
-    Add-Result 'Internet' $ok ('google204=' + $(if ($r.Ok) { $r.Status } else { 'HATA' }) + ', mtalk:443=' + $(if ($mtalk) { 'acik' } else { 'KAPALI' })) $(if ($ok) { '' } else { 'CRD kayit olamaz' })
+    $m = [ordered]@{ google204 = $(if ($r.Ok) { $r.Status } else { 'hata' }); google204ms = $r.Ms; mtalk443 = $(if ($mtalk) { 'acik' } else { 'kapali' }); mtalk443ms = $mtalkMs }
+    Add-Result 'Internet' $ok ('google204=' + $(if ($r.Ok) { $r.Status } else { 'HATA' }) + ' (' + $r.Ms + 'ms), mtalk:443=' + $(if ($mtalk) { 'acik/' + $mtalkMs + 'ms' } else { 'KAPALI' })) $(if ($ok) { '' } else { 'ag yok; CRD kayit olamaz' }) $false $m
 }
 
 function Test-Clock {
@@ -233,12 +251,17 @@ function Test-TcpPortFast {
 }
 
 function Get-NetworkHealth {
-    $h = [ordered]@{ Ip = $false; Dns = $false; Https = $false; Signal = $false; Dhcp = $false; TimeWait = 0; Link = '' }
-    $h.Ip = Test-TcpPortFast -HostName '1.1.1.1' -Port 443 -TimeoutMs 3000
-    $h.Signal = Test-TcpPortFast -HostName 'mtalk.google.com' -Port 443 -TimeoutMs 3000
+    $h = [ordered]@{ Ip = $false; Dns = $false; Https = $false; Signal = $false; Dhcp = $false; TimeWait = 0; Link = ''; IpMs = -1; SignalMs = -1; HttpsMs = -1; DnsMs = -1 }
+    $h.IpMs = Get-TcpMs -HostName '1.1.1.1' -Port 443 -TimeoutMs 3000
+    $h.Ip = ($h.IpMs -ge 0)
+    $h.SignalMs = Get-TcpMs -HostName 'mtalk.google.com' -Port 443 -TimeoutMs 3000
+    $h.Signal = ($h.SignalMs -ge 0)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
     try { $h.Dns = [bool](Resolve-DnsName -Name 'remotedesktop.google.com' -Type A -DnsOnly -QuickTimeout -ErrorAction Stop | Where-Object { $_.IPAddress }) } catch { }
+    $sw.Stop(); $h.DnsMs = [int]$sw.ElapsedMilliseconds
     $r = Invoke-Probe -Url 'https://www.google.com/generate_204' -TimeoutSec 6
     $h.Https = $r.Ok
+    $h.HttpsMs = $r.Ms
     try { $h.Dhcp = @((Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ConnectionState -eq 'Connected' -and $_.Dhcp -eq 'Enabled' })).Count -gt 0 } catch { }
     try {
         $ns = netstat -s -p tcp 2>&1 | Out-String
@@ -290,6 +313,7 @@ function Test-NetworkLayer {
     $detail = 'ip=' + $h.Ip + ', dns=' + $h.Dns + ', https=' + $h.Https + ', sinyal=' + $h.Signal + ', dhcp=' + $h.Dhcp + ', timewait=' + $h.TimeWait + ', link=' + $h.Link
     if ($h.TimeWait -gt 15000) { Write-Log 'WARN' ('TCP TIME_WAIT sayisi yuksek: ' + $h.TimeWait + ' -> soket yigini sizmis olabilir') }
     $ok = ($h.Ip -and $h.Dns -and $h.Https)
+    $metrics = [ordered]@{ ip443 = $(if ($h.Ip) { $h.IpMs } else { -1 }); ip443state = $(if ($h.Ip) { 'acik' } else { 'kapali' }); dnsms = $h.DnsMs; dnsstate = $(if ($h.Dns) { 'cozuldu' } else { 'cozulemedi' }); httpsms = $h.HttpsMs; httpsstate = $(if ($h.Https) { 'acik' } else { 'kapali' }); signalms = $h.SignalMs; signalstate = $(if ($h.Signal) { 'acik' } else { 'kapali' }); timewait = $h.TimeWait; dhcp = $h.Dhcp; link = $h.Link }
     $repair = @()
     if ($ok) {
         if ([int]$state.NetRepairRung -gt 0) { $repair += 'saga likli, onarim merdiveni sifirlandi (son: ' + $state.NetRepairRung + '. kademe)' }
@@ -307,7 +331,7 @@ function Test-NetworkLayer {
         $state.NetRepairRung = $rung
     }
     Save-State $state
-    Add-Result 'Ag katmani' $ok $detail ($repair -join '; ')
+    Add-Result 'Ag katmani' $ok $detail ($repair -join '; ') $false $metrics
 }
 
 function Test-CrdService {
@@ -375,7 +399,8 @@ function Test-CrdService {
         try { Set-Service -Name 'chromoting' -StartupType Automatic; $repair += 'servis Automatic yapildi' } catch { }
     }
     if (-not $registered) { $ok = $false; $detail += ' -> cihaz Google listesinde gorunmez' }
-    Add-Result 'CRD servisi' $ok $detail ($repair -join '; ')
+    $m = [ordered]@{ servis = [string]$svc.Status; startType = [string]$svc.StartType; hostId = $(if ($registered) { 'var' } else { 'yok' }); googleBaglanti = $conns; daemon = $daemon.Count; yasSaat = [math]::Round($ageH, 1) }
+    Add-Result 'CRD servisi' $ok $detail ($repair -join '; ') $false $m
 }
 
 function Test-Rdp {
@@ -806,7 +831,7 @@ function Write-JsonStatus {
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     $checks = @()
     foreach ($r in $script:Results) {
-        $checks += [ordered]@{ name = $r.Name; ok = [bool]$r.Ok; skipped = [bool]$r.Skipped; detail = $r.Detail; repair = $r.Repair }
+        $checks += [ordered]@{ name = $r.Name; ok = [bool]$r.Ok; skipped = [bool]$r.Skipped; detail = $r.Detail; repair = $r.Repair; metrics = $(if ($r.Metrics) { $r.Metrics } else { @{} }) }
     }
     $obj = [ordered]@{
         generated = (Get-Date).ToString('o')

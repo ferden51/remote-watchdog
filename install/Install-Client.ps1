@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Continue'
 $InstallDir = Split-Path -Parent $PSCommandPath
 $Root = Split-Path -Parent $InstallDir
 $ClientScript = Join-Path $Root 'client\RemoteClientWatchdog.ps1'
-$TrayScript = Join-Path $Root 'ui\RemoteWatchdogTray.ps1'
+$TrayScript = Join-Path $Root 'ui\RemoteWatchdogPanel.ps1'
 
 function Step { param([string]$Text) Write-Host ''; Write-Host ('==> ' + $Text) -ForegroundColor Cyan }
 function Ok { param([string]$Text) Write-Host ('    [OK] ' + $Text) -ForegroundColor Green }

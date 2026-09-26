@@ -1,0 +1,1297 @@
+#Requires -Version 5.1
+<#
+    RemoteWatchdogPanel - RemoteWatchdog icin modern kontrol paneli (WPF, koyu tema)
+
+    Durum, bekleyen isler, ayarlar, gunluk sekmeleri; sistem tepsisi simgesi; balloon bildirimleri.
+    Mantik host/RemoteHostWatchdog.ps1 ve client/RemoteClientWatchdog.ps1 ile paylasir; onlarin
+    last-run.json ve config.json dosyalarini okur, ayarlari oraya yazar.
+
+    .\RemoteWatchdogPanel.ps1              pencereyi acar
+    .\RemoteWatchdogPanel.ps1 -TrayOnly    sadece tepside calisir
+    .\RemoteWatchdogPanel.ps1 -Install     oturum acilinda otomatik baslatir
+    .\RemoteWatchdogPanel.ps1 -Uninstall
+    .\RemoteWatchdogPanel.ps1 -SelfTest    arayuzu kurar, PNG onizleme uretir, cikar
+#>
+[CmdletBinding()]
+param(
+    [switch]$Install,
+    [switch]$Uninstall,
+    [switch]$SelfTest,
+    [switch]$TrayOnly,
+    [switch]$NoBalloon,
+    [string]$PreviewPage = 'conn',
+    [string]$PreviewPath = ''
+)
+
+$ErrorActionPreference = 'Continue'
+$ScriptPath = $PSCommandPath
+$UiDir = Split-Path -Parent $ScriptPath
+$Root = Split-Path -Parent $UiDir
+$HostScript = Join-Path $Root 'host\RemoteHostWatchdog.ps1'
+$HostDiag = Join-Path $Root 'host\Collect-Diagnostics.ps1'
+$HostDocs = Join-Path $Root 'host\Protect-OpenDocuments.ps1'
+$ClientScript = Join-Path $Root 'client\RemoteClientWatchdog.ps1'
+$HostData = Join-Path $env:ProgramData 'RemoteWatchdog'
+$HostJson = Join-Path $HostData 'last-run.json'
+$HostConfig = Join-Path $HostData 'config.json'
+$HostLog = Join-Path $HostData 'host-watchdog.log'
+$ClientData = Join-Path $env:LOCALAPPDATA 'RemoteClientWatchdog'
+$ClientJson = Join-Path $ClientData 'last-run.json'
+$ClientConfig = Join-Path $ClientData 'config.json'
+$ClientLog = Join-Path $ClientData 'client-watchdog.log'
+$RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$RunName = 'RemoteWatchdogTray'
+
+$script:Win = $null
+$script:Icon = $null
+$script:Silent = [bool]((Get-ItemProperty -Path $RunKey -Name ($RunName + 'Silent') -ErrorAction SilentlyContinue).($RunName + 'Silent'))
+$script:LastState = ''
+$script:ExitRequested = $false
+$script:Mutex = New-Object System.Threading.Mutex($false, 'Local\RemoteWatchdogPanel')
+$script:Page = 'overview'
+
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+$script:C = @{
+    Bg = '#0F1114'
+    Side = '#14161A'
+    Card = '#1A1D22'
+    Card2 = '#21252B'
+    Line = '#2A2F36'
+    Text = '#E8EAED'
+    Muted = '#98A0AA'
+    Accent = '#4C8DFF'
+    Ok = '#3FB950'
+    Warn = '#E3B341'
+    Bad = '#F85149'
+    Info = '#58A6FF'
+}
+
+function Bx { param([string]$Hex) if ($script:C.ContainsKey($Hex)) { $Hex = $script:C[$Hex] } return [System.Windows.Media.BrushConverter]::new().ConvertFromString($Hex) }
+function El { param($Window, [string]$Name) return $Window.FindName($Name) }
+
+function Write-Trace {
+    param([string]$Text)
+    try {
+        if (-not (Test-Path -LiteralPath $HostData)) { New-Item -ItemType Directory -Force -Path $HostData | Out-Null }
+        Add-Content -LiteralPath (Join-Path $HostData 'panel.log') -Value ((Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' ' + $Text) -Encoding UTF8
+    } catch { }
+}
+
+function Get-Json {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try { return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { return $null }
+}
+
+function Get-HostConfig {
+    $cfg = [ordered]@{
+        IntervalMinutes = 5; RestartPolicy = 'blackout'; BlackoutEnabled = $true; BlackoutStart = 18; BlackoutEnd = 8
+        BlackoutFullDays = @('Cmt', 'Paz'); HolidayMode = 'full'; RebootAfterFailedCycles = 3; RebootDelaySeconds = 60
+        MinUptimeMinutes = 30; ServerMode = $true; DisableFastStartup = $true; OfficeSaveBeforeReboot = $true
+        OfficeAbortRebootIfUnsaved = $true; ForceRestartAlways = $false; ForceRestartUntil = ''
+        TelegramToken = ''; TelegramChatId = ''; HeartbeatUrl = ''; AlertRepeatHours = 12; NetMaxRepairRung = 4
+    }
+    if (Test-Path -LiteralPath $HostConfig) {
+        try {
+            $s = Get-Content -LiteralPath $HostConfig -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($k in @($cfg.Keys)) { if ($s.PSObject.Properties.Name -contains $k) { $cfg[$k] = $s.$k } }
+        } catch { }
+    }
+    return $cfg
+}
+
+function Save-HostConfig {
+    param($Values)
+    if (-not (Test-Path -LiteralPath $HostData)) { New-Item -ItemType Directory -Force -Path $HostData | Out-Null }
+    $obj = [ordered]@{}
+    if (Test-Path -LiteralPath $HostConfig) {
+        try {
+            $raw = Get-Content -LiteralPath $HostConfig -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($p in $raw.PSObject.Properties) { $obj[$p.Name] = $p.Value }
+        } catch { }
+    }
+    foreach ($k in $Values.Keys) { $obj[$k] = $Values[$k] }
+    $obj | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $HostConfig -Encoding UTF8
+}
+
+function Invoke-Script {
+    param([string]$Path, [string[]]$ScriptArgs = @(), [switch]$Wait)
+    if (-not (Test-Path -LiteralPath $Path)) { [System.Windows.MessageBox]::Show('Dosya bulunamadi: ' + $Path) | Out-Null; return }
+    $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $Path + '"')) + $ScriptArgs
+    if ($Wait) { return (Start-Process -FilePath 'powershell.exe' -ArgumentList $a -Wait -PassThru -WindowStyle Hidden).ExitCode }
+    Start-Process -FilePath 'powershell.exe' -ArgumentList $a -WindowStyle Hidden | Out-Null
+}
+
+function Get-StatusInfo {
+    $hj = Get-Json $HostJson
+    $cj = Get-Json $ClientJson
+    $crit = 0
+    if ($hj) { $crit = @($hj.checks | Where-Object { -not $_.ok }).Count }
+    $cjCrit = 0
+    if ($cj) { $cjCrit = @($cj.checks | Where-Object { -not $_.ok }).Count }
+    $total = $crit + $cjCrit
+    $age = $null
+    if ($hj -and $hj.generated) {
+        try { $age = (Get-Date) - [datetime]::Parse([string]$hj.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) } catch { }
+    }
+    return [pscustomobject]@{ Host = $hj; Client = $cj; Bad = $total; Age = $age }
+}
+
+function Get-Actions {
+    $st = Get-StatusInfo
+    $hj = $st.Host
+    $cfg = Get-HostConfig
+    $a = New-Object System.Collections.ArrayList
+    if (-not $hj) {
+        [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = 'Uzak makine verisi yok'; Detail = 'Watchdog kurulu degil veya hic calismadi.'; Key = 'host'; Action = 'Kur' })
+        return $a
+    }
+    if (-not $hj.taskInstalled) { [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = 'Zamanlanmis gorev kurulu degil'; Detail = 'Kontrol sadece elle calistikca yapiliyor.'; Key = 'host'; Action = 'Kur' }) }
+    if ($st.Age -and $st.Age.TotalMinutes -gt ([double]$cfg.IntervalMinutes * 3)) {
+        [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ('Watchdog donmuyor (' + [math]::Round($st.Age.TotalMinutes) + ' dk once)'); Detail = 'Gorev durmus olabilir veya makine uyuyor.'; Key = 'run'; Action = 'Simdi denetle' })
+    }
+    foreach ($c in @($hj.checks)) {
+        if ($c.ok -or $c.skipped) { continue }
+        $key = 'run'
+        $act = 'Loglari ac'
+        if ($c.name -eq 'CRD servisi' -and [string]$c.detail -match 'host_id=YOK') { $key = 'crd'; $act = 'CRD sayfasi'; $lvl = 'bad' } else { $lvl = 'warn' }
+        if ($c.name -match 'Ag katmani') { $key = 'run'; $act = 'Ag onarimi' }
+        [void]$a.Add([pscustomobject]@{ Level = $lvl; Title = $c.name; Detail = [string]$c.detail; Key = $key; Action = $act })
+    }
+    $docsState = Join-Path $env:windir 'Temp\RemoteWatchdog-docs.json'
+    if (Test-Path -LiteralPath $docsState) {
+        try {
+            $ds = Get-Content -LiteralPath $docsState -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ([int]$ds.unsaved -gt 0) { [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ($ds.unsaved + ' kaydedilmemis belge'); Detail = (@($ds.names) -join ', '); Key = 'docs'; Action = 'Kaydet ve kapat' }) }
+        } catch { }
+    }
+    if ($hj.state -and [int]$hj.state.netResetPendingReboot -eq 1) { [void]$a.Add([pscustomobject]@{ Level = 'bad'; Title = 'winsock/IP reset uygulandi'; Detail = 'Etkisi icin makine yeniden baslatilmali.'; Key = 'reboot'; Action = 'Yeniden baslat' }) }
+    if ($hj.state -and [int]$hj.state.consecutiveFailures -gt 0) { [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ('Ardisik basarisiz deneme: ' + $hj.state.consecutiveFailures); Detail = 'Blackout saatlerinde otomatik restart yapilir, disinda sadece bilgilendirilir.'; Key = 'reboot'; Action = 'Yeniden baslat' }) }
+    if ($a.Count -eq 0) { [void]$a.Add([pscustomobject]@{ Level = 'ok'; Title = 'Bekleyen is yok'; Detail = 'Her sey yolunda.'; Key = ''; Action = '' }) }
+    return $a
+}
+
+$Xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="RemoteWatchdog" Height="720" Width="1080" MinHeight="600" MinWidth="900"
+        Background="#0F1114" WindowStartupLocation="CenterScreen" FontFamily="Segoe UI" FontSize="13"
+        TextOptions.TextFormattingMode="Display" UseLayoutRounding="True">
+  <Window.Resources>
+    <SolidColorBrush x:Key="Bgc" Color="#0F1114"/>
+    <SolidColorBrush x:Key="Side" Color="#14161A"/>
+    <SolidColorBrush x:Key="Card" Color="#1A1D22"/>
+    <SolidColorBrush x:Key="Card2" Color="#21252B"/>
+    <SolidColorBrush x:Key="Line" Color="#2A2F36"/>
+    <SolidColorBrush x:Key="Tx" Color="#E8EAED"/>
+    <SolidColorBrush x:Key="Mut" Color="#98A0AA"/>
+    <SolidColorBrush x:Key="Acc" Color="#4C8DFF"/>
+    <SolidColorBrush x:Key="Ok" Color="#3FB950"/>
+    <SolidColorBrush x:Key="Warn" Color="#E3B341"/>
+    <SolidColorBrush x:Key="Bad" Color="#F85149"/>
+
+    <Style x:Key="CardStyle" TargetType="Border">
+      <Setter Property="Background" Value="{StaticResource Card}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="10"/>
+      <Setter Property="Padding" Value="14"/>
+    </Style>
+
+    <Style x:Key="H1" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource Tx}"/>
+      <Setter Property="FontSize" Value="20"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+    <Style x:Key="H2" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource Tx}"/>
+      <Setter Property="FontSize" Value="15"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+    <Style x:Key="H3" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource Mut}"/>
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+    <Style x:Key="Body" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource Tx}"/>
+      <Setter Property="FontSize" Value="12.5"/>
+    </Style>
+    <Style x:Key="Small" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource Mut}"/>
+      <Setter Property="FontSize" Value="11.5"/>
+    </Style>
+    <Style x:Key="Mono" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#C9D1D9"/>
+      <Setter Property="FontFamily" Value="Cascadia Mono, Consolas"/>
+      <Setter Property="FontSize" Value="11.5"/>
+    </Style>
+
+    <Style x:Key="Btn" TargetType="Button">
+      <Setter Property="Background" Value="{StaticResource Card2}"/>
+      <Setter Property="Foreground" Value="{StaticResource Tx}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="14,7"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FontSize" Value="12.5"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="7" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#2B313A"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="BtnAccent" TargetType="Button" BasedOn="{StaticResource Btn}">
+      <Setter Property="Background" Value="{StaticResource Acc}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Acc}"/>
+      <Setter Property="Foreground" Value="#0B1220"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+    <Style x:Key="BtnDanger" TargetType="Button" BasedOn="{StaticResource Btn}">
+      <Setter Property="Background" Value="{StaticResource Bad}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Bad}"/>
+      <Setter Property="Foreground" Value="#1A0B0B"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+
+    <Style x:Key="ToggleBtn" TargetType="Button">
+      <Setter Property="Foreground" Value="{StaticResource Tx}"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Padding" Value="16,6"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="1" CornerRadius="7" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Opacity" Value="0.85"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Nav" TargetType="Button">
+      <Setter Property="Foreground" Value="{StaticResource Mut}"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="Transparent" CornerRadius="8" Padding="12,10">
+              <ContentPresenter HorizontalAlignment="Left" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#1D2127"/>
+                <Setter Property="Foreground" Value="{StaticResource Tx}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Input" TargetType="TextBox">
+      <Setter Property="Background" Value="#0E1013"/>
+      <Setter Property="Foreground" Value="{StaticResource Tx}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="9,6"/>
+      <Setter Property="CaretBrush" Value="{StaticResource Tx}"/>
+      <Setter Property="FontSize" Value="12.5"/>
+    </Style>
+    <Style x:Key="Combo" TargetType="ComboBox">
+      <Setter Property="Background" Value="#0E1013"/>
+      <Setter Property="Foreground" Value="{StaticResource Tx}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+      <Setter Property="Padding" Value="8,5"/>
+      <Setter Property="FontSize" Value="12.5"/>
+    </Style>
+
+    <DataTemplate x:Key="StatusCard">
+      <Border Style="{StaticResource CardStyle}" Width="228" Margin="0,0,12,12">
+        <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <Ellipse Width="10" Height="10" Margin="0,0,10,0" VerticalAlignment="Top" Fill="{Binding Brush}"/>
+          <StackPanel Grid.Column="1">
+            <TextBlock Text="{Binding Title}" Style="{StaticResource H2}" TextTrimming="CharacterEllipsis"/>
+            <TextBlock Text="{Binding Detail}" Style="{StaticResource Small}" Margin="0,5,0,0" TextWrapping="Wrap" MaxHeight="46"/>
+            <TextBlock Text="{Binding Repair}" Foreground="{StaticResource Acc}" FontSize="11" Margin="0,6,0,0" TextWrapping="Wrap" MaxHeight="34"/>
+          </StackPanel>
+        </Grid>
+      </Border>
+    </DataTemplate>
+
+    <DataTemplate x:Key="ActionRow">
+      <Border Style="{StaticResource CardStyle}" Margin="0,0,0,10" Padding="16,13">
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="4"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <Border Grid.Column="0" Background="{Binding Brush}" CornerRadius="2"/>
+          <StackPanel Grid.Column="1" Margin="14,0,14,0" VerticalAlignment="Center">
+            <TextBlock Text="{Binding Title}" Style="{StaticResource H2}"/>
+            <TextBlock Text="{Binding Detail}" Style="{StaticResource Small}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+          </StackPanel>
+          <Button Grid.Column="2" Content="{Binding Action}" Style="{StaticResource Btn}" VerticalAlignment="Center"
+                  Tag="{Binding Key}" MinWidth="120"/>
+        </Grid>
+      </Border>
+    </DataTemplate>
+
+    <DataTemplate x:Key="ConnRow">
+      <Border Style="{StaticResource CardStyle}" Margin="0,0,0,10" Padding="16,13">
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/><ColumnDefinition Width="215"/><ColumnDefinition Width="120"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+
+          <Border Grid.Column="0" Width="4" CornerRadius="2" Background="{Binding Brush}" Margin="0,1,14,1"/>
+
+          <StackPanel Grid.Column="1" VerticalAlignment="Center">
+            <TextBlock Text="{Binding Name}" Style="{StaticResource H2}" TextTrimming="CharacterEllipsis"/>
+            <TextBlock Text="{Binding Sub}" Style="{StaticResource Small}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
+          </StackPanel>
+
+          <Border Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Left" CornerRadius="6" Padding="10,4" Background="{Binding PillBg}">
+            <TextBlock Text="{Binding StateText}" Foreground="{Binding StateFg}" FontWeight="SemiBold" FontSize="12"/>
+          </Border>
+
+          <TextBlock Grid.Column="3" Text="{Binding Measure}" Style="{StaticResource Mono}" VerticalAlignment="Center" Margin="14,0,14,0" TextWrapping="Wrap"/>
+
+          <Button Grid.Column="4" Tag="{Binding Key}" MinWidth="118" VerticalAlignment="Center" Content="{Binding Action}">
+            <Button.Style>
+              <Style TargetType="Button" BasedOn="{StaticResource Btn}">
+                <Style.Triggers>
+                  <DataTrigger Binding="{Binding Action}" Value="">
+                    <Setter Property="Visibility" Value="Collapsed"/>
+                  </DataTrigger>
+                </Style.Triggers>
+              </Style>
+            </Button.Style>
+          </Button>
+        </Grid>
+      </Border>
+    </DataTemplate>
+
+    <DataTemplate x:Key="SettingRow">
+      <Grid Margin="0,0,0,11">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="250"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <TextBlock Text="{Binding Title}" Style="{StaticResource Body}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,14,0"/>
+        <ContentPresenter Grid.Column="1" Content="{Binding Control}" VerticalAlignment="Center"/>
+      </Grid>
+    </DataTemplate>
+  </Window.Resources>
+
+  <Grid Background="{StaticResource Bgc}">
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+
+    <!-- UST BAR -->
+    <Border Grid.Row="0" Background="{StaticResource Side}" BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Padding="22,16">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+          <Border Width="34" Height="34" CornerRadius="9" Background="#1D2733" Margin="0,0,12,0">
+            <Ellipse x:Name="StatusDot" Width="12" Height="12" Fill="#98A0AA" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <StackPanel VerticalAlignment="Center">
+            <TextBlock Text="RemoteWatchdog" Style="{StaticResource H1}" FontSize="17"/>
+            <TextBlock x:Name="TxtSubtitle" Text=" kontrol yukleniyor..." Style="{StaticResource Small}"/>
+          </StackPanel>
+        </StackPanel>
+
+        <Border Grid.Column="2" x:Name="Pill" Background="#1D2733" CornerRadius="14" Padding="14,6" Margin="0,0,12,0" VerticalAlignment="Center">
+          <TextBlock x:Name="TxtPill" Text="..." Foreground="{StaticResource Mut}" FontWeight="SemiBold" FontSize="12.5"/>
+        </Border>
+        <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
+          <Button x:Name="BtnCheck" Content="Simdi denetle" Style="{StaticResource BtnAccent}" Margin="0,0,8,0"/>
+          <Button x:Name="BtnReboot" Content="Yeniden baslat" Style="{StaticResource BtnDanger}"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- GOVDE -->
+    <Grid Grid.Row="1">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="212"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+
+      <!-- KENAR CUBUGU -->
+      <Border Grid.Column="0" Background="{StaticResource Side}" BorderBrush="{StaticResource Line}" BorderThickness="0,0,1,0" Padding="14,18">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+          <StackPanel Grid.Row="0">
+            <Button x:Name="NavConn" Content="Baglantilar" Style="{StaticResource Nav}" Tag="conn" Margin="0,0,0,4"/>
+            <Button x:Name="NavOverview" Content="Genel durum" Style="{StaticResource Nav}" Tag="overview" Margin="0,0,0,4"/>
+            <Button x:Name="NavActions" Content="Bekleyen isler" Style="{StaticResource Nav}" Tag="actions" Margin="0,0,0,4"/>
+            <Button x:Name="NavSettings" Content="Ayarlar" Style="{StaticResource Nav}" Tag="settings" Margin="0,0,0,4"/>
+            <Button x:Name="NavLog" Content="Gunluk" Style="{StaticResource Nav}" Tag="log" Margin="0,0,0,4"/>
+          </StackPanel>
+          <StackPanel Grid.Row="2">
+            <Border Style="{StaticResource CardStyle}" Padding="12,10">
+              <StackPanel>
+                <TextBlock x:Name="TxtBlackout" Text="Blackout: -" Style="{StaticResource Small}"/>
+                <TextBlock x:Name="TxtTaskState" Text="Gorev: -" Style="{StaticResource Small}" Margin="0,4,0,0"/>
+                <TextBlock x:Name="TxtUptime" Text="Uptime: -" Style="{StaticResource Small}" Margin="0,4,0,0"/>
+              </StackPanel>
+            </Border>
+            <Button x:Name="BtnDiag" Content="Tehis raporu uret" Style="{StaticResource Btn}" Margin="0,10,0,0"/>
+            <Button x:Name="BtnInstall" Content="Watchdog kur" Style="{StaticResource Btn}" Margin="0,8,0,0"/>
+          </StackPanel>
+        </Grid>
+      </Border>
+
+      <!-- ICERIK -->
+      <Grid Grid.Column="1">
+        <!-- BAGLANTILAR -->
+        <ScrollViewer x:Name="PageConn" VerticalScrollBarVisibility="Auto" Padding="22,20">
+          <StackPanel>
+            <TextBlock Text="Baglantilar" Style="{StaticResource H1}" Margin="0,0,0,4"/>
+            <TextBlock x:Name="TxtConnSub" Text="" Style="{StaticResource Small}" Margin="0,0,0,16"/>
+            <ItemsControl x:Name="ConnList"/>
+          </StackPanel>
+        </ScrollViewer>
+
+        <!-- GENEL -->
+        <ScrollViewer x:Name="PageOverview" VerticalScrollBarVisibility="Auto" Padding="22,20">
+          <StackPanel>
+            <TextBlock Text="Genel durum" Style="{StaticResource H1}" Margin="0,0,0,4"/>
+            <TextBlock x:Name="TxtOverviewSub" Text="" Style="{StaticResource Small}" Margin="0,0,0,16"/>
+            <ItemsControl x:Name="Cards">
+              <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+              </ItemsControl.ItemsPanel>
+            </ItemsControl>
+            <Border Style="{StaticResource CardStyle}" Margin="0,4,0,0">
+              <StackPanel>
+                <TextBlock Text="Ortam" Style="{StaticResource H2}" Margin="0,0,0,10"/>
+                <TextBlock x:Name="TxtEnv" Style="{StaticResource Mono}" TextWrapping="Wrap"/>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+
+        <!-- BEKLEYEN ISLER -->
+        <ScrollViewer x:Name="PageActions" VerticalScrollBarVisibility="Auto" Padding="22,20" Visibility="Collapsed">
+          <StackPanel>
+            <TextBlock Text="Bekleyen isler" Style="{StaticResource H1}" Margin="0,0,0,4"/>
+            <TextBlock x:Name="TxtActionsSub" Text="" Style="{StaticResource Small}" Margin="0,0,0,16"/>
+            <ItemsControl x:Name="ActionList"/>
+            <Border Style="{StaticResource CardStyle}" Background="#1A1512" BorderBrush="#4A3410">
+              <StackPanel>
+                <TextBlock Text="Zorla kapatma" Style="{StaticResource H2}" Foreground="{StaticResource Warn}" Margin="0,0,0,6"/>
+                <TextBlock Style="{StaticResource Small}" TextWrapping="Wrap"
+                           Text="Blackout saatlerinde (varsayilan 18:00-08:00 ve Cumartesi-Pazar) Word/Excel/PPT zorla kapatilip makine yeniden baslatilir. Diger saatlerde yalnizca bilgilendirilir ve karar size kalir."/>
+                <Button x:Name="BtnForceNow" Content="Simdi zorla kapat ve yeniden baslat" Style="{StaticResource BtnDanger}" HorizontalAlignment="Left" Margin="0,12,0,0"/>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+
+        <!-- AYARLAR -->
+        <ScrollViewer x:Name="PageSettings" VerticalScrollBarVisibility="Auto" Padding="22,20" Visibility="Collapsed">
+          <StackPanel>
+            <TextBlock Text="Ayarlar" Style="{StaticResource H1}" Margin="0,0,0,4"/>
+            <TextBlock Text="Kaydettiginizde config.json guncellenir; bir sonraki denetimde gecerli olur." Style="{StaticResource Small}" Margin="0,0,0,16"/>
+            <ItemsControl x:Name="SettingsHost"/>
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+              <Button x:Name="BtnSave" Content="Ayarlari kaydet" Style="{StaticResource BtnAccent}" Margin="0,0,10,0"/>
+              <Button x:Name="BtnReload" Content="Formu yenile" Style="{StaticResource Btn}"/>
+              <TextBlock x:Name="TxtSaved" Text="" Style="{StaticResource Small}" VerticalAlignment="Center" Margin="14,0,0,0" Foreground="{StaticResource Ok}"/>
+            </StackPanel>
+          </StackPanel>
+        </ScrollViewer>
+
+        <!-- GUNLUK -->
+        <Grid x:Name="PageLog" Visibility="Collapsed" Margin="22,20">
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,12">
+            <TextBlock Text="Gunluk" Style="{StaticResource H1}" Margin="0,0,16,0" VerticalAlignment="Center"/>
+            <Button x:Name="BtnLogRefresh" Content="Yenile" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
+            <Button x:Name="BtnLogCopy" Content="Kopyala" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
+            <Button x:Name="BtnLogOpen" Content="Dosyayi ac" Style="{StaticResource Btn}"/>
+          </StackPanel>
+          <Border Grid.Row="1" Style="{StaticResource CardStyle}" Background="#0C0E11">
+            <TextBox x:Name="TxtLog" Background="Transparent" Foreground="#C9D1D9" BorderThickness="0"
+                     FontFamily="Cascadia Mono, Consolas" FontSize="11.5" IsReadOnly="True"
+                     TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+          </Border>
+        </Grid>
+      </Grid>
+    </Grid>
+  </Grid>
+</Window>
+'@
+
+function New-Toggle {
+    param([string]$Label = '', [bool]$On)
+    $b = New-Object System.Windows.Controls.Button
+    $b.Tag = [bool]$On
+    $b.Content = $(if ($Label) { $Label } elseif ($On) { 'ACIK' } else { 'KAPALI' })
+    $b.Width = 92
+    $b.Margin = New-Object System.Windows.Thickness(0)
+    $style = $script:Win.TryFindResource('ToggleBtn')
+    if ($style) { $b.Style = $style }
+    $b.Background = $(if ($On) { Bx 'Ok' } else { Bx 'Card2' })
+    $b.Foreground = $(if ($On) { Bx '#0B1220' } else { Bx 'Muted' })
+    $b.BorderBrush = Bx 'Line'
+    $b.Add_MouseLeftButtonDown({
+            param($s, $e)
+            $btn = $s.Source
+            $btn.Tag = -not ([bool]$btn.Tag)
+            $on = [bool]$btn.Tag
+            $tip = [string]$btn.ToolTip
+            if ($tip -like 'days|*') { $btn.Content = $tip.Split('|')[2] }
+            else { $btn.Content = $(if ($on) { 'ACIK' } else { 'KAPALI' }) }
+            $btn.Background = $(if ($on) { Bx 'Ok' } else { Bx 'Card2' })
+            $btn.Foreground = $(if ($on) { Bx '#0B1220' } else { Bx 'Muted' })
+        })
+    return $b
+}
+
+function New-TextBox {
+    param([switch]$Multi, [int]$Width = 240, [int]$Height = 60, [string]$Text = '')
+    $t = New-Object System.Windows.Controls.TextBox
+    $t.Text = $Text
+    $t.Width = $Width
+    if ($Multi) { $t.Height = $Height; $t.AcceptsReturn = $true; $t.TextWrapping = 'Wrap'; $t.VerticalScrollBarVisibility = 'Auto' } else { $t.Height = 30 }
+    $t.Background = Bx '#0E1013'
+    $t.Foreground = Bx 'Text'
+    $t.BorderBrush = Bx 'Line'
+    $t.BorderThickness = New-Object System.Windows.Thickness(1)
+    $t.Padding = New-Object System.Windows.Thickness(8, 4, 8, 4)
+    $t.FontSize = 12.5
+    return $t
+}
+
+function New-Combo {
+    param([string[]]$Items, [string]$Selected)
+    $c = New-Object System.Windows.Controls.ComboBox
+    foreach ($i in $Items) { [void]$c.Items.Add($i) }
+    $c.Width = 200
+    $c.Height = 30
+    $c.SelectedItem = $Selected
+    $c.Background = Bx '#0E1013'
+    $c.Foreground = Bx 'Text'
+    $c.BorderBrush = Bx 'Line'
+    $c.Padding = New-Object System.Windows.Thickness(8, 4, 8, 4)
+    return $c
+}
+
+function Get-Connections {
+    $st = Get-StatusInfo
+    $hj = $st.Host
+    $cj = $st.Client
+    $rows = New-Object System.Collections.ArrayList
+    $col = @{ ok = $script:C.Ok; warn = $script:C.Warn; bad = $script:C.Bad; none = $script:C.Muted }
+    $fg = @{ ok = '#0B1220'; warn = '#1A1206'; bad = '#1A0B0B'; none = '#0F1114' }
+
+    function Add-Conn {
+        param([string]$Name, [string]$Sub, [string]$Level, [string]$StateText, [string]$Measure, [string]$Key = '', [string]$Action = '')
+        $lvl = $Level
+        [void]$rows.Add([pscustomobject]@{
+                Name = $Name; Sub = $Sub; StateText = $StateText; Measure = $Measure; Key = $Key; Action = $Action
+                Brush = Bx $col[$lvl]; PillBg = Bx $col[$lvl]; StateFg = Bx $fg[$lvl]
+            })
+    }
+
+    if (-not $hj) {
+        Add-Conn 'Watchdog' 'hic calismadi' 'none' 'BILINMIYOR' 'last-run.json yok' 'host' 'Kur'
+        return $rows
+    }
+
+    $byName = @{}
+    foreach ($c in @($hj.checks)) { $byName[[string]$c.name] = $c }
+    $mt = @{}
+    $nw = $byName['Ag katmani']
+    if ($nw -and $nw.metrics) { foreach ($k in $nw.metrics.PSObject.Properties.Name) { $mt[$k] = $nw.metrics.$k } }
+    $inet = $byName['Internet']
+    if ($inet -and $inet.metrics) { foreach ($k in $inet.metrics.PSObject.Properties.Name) { $mt[$k] = $inet.metrics.$k } }
+
+    if ($inet) {
+        $lvl = if ($inet.ok) { 'ok' } else { 'bad' }
+        Add-Conn 'Internet erisimi' 'genel cikis (HTTPS 204)' $lvl $(if ($inet.ok) { 'BAGLI' } else { 'YOK' }) ('https ' + [string]$mt['google204ms'] + ' ms, mtalk ' + [string]$mt['mtalk443ms'] + ' ms') 'run' 'Yeniden denetir'
+    }
+    if ($mt.ContainsKey('ip443state')) {
+        $lvl = if ($mt['ip443state'] -eq 'acik') { 'ok' } else { 'bad' }
+        Add-Conn 'IP erisimi' '1.1.1.1:443 (DNS bayagi degil)' $lvl $(if ($lvl -eq 'ok') { 'BAGLI' } else { 'YOK' }) ([string]$mt['ip443'] + ' ms')
+    }
+    if ($mt.ContainsKey('dnsstate')) {
+        $lvl = if ($mt['dnsstate'] -eq 'cozuldu') { 'ok' } else { 'bad' }
+        Add-Conn 'DNS cozumlemesi' 'remotedesktop.google.com' $lvl $(if ($lvl -eq 'ok') { 'COZULDU' } else { 'HATA' }) ([string]$mt['dnsms'] + ' ms')
+    }
+    if ($mt.ContainsKey('signalstate')) {
+        $lvl = if ($mt['signalstate'] -eq 'acik') { 'ok' } else { 'bad' }
+        Add-Conn 'CRD sinyal yolu' 'mtalk.google.com:443' $lvl $(if ($lvl -eq 'ok') { 'BAGLI' } else { 'KAPALI' }) ([string]$mt['signalms'] + ' ms')
+    }
+    if ($mt.ContainsKey('link')) {
+        Add-Conn 'Ag adaptoru' ([string]$mt['link']) 'none' 'BILGI' ('DHCP=' + $(if ($mt['dhcp']) { 'acik' } else { 'kapali' }) + ', TIME_WAIT=' + [string]$mt['timewait'])
+    }
+
+    $crd = $byName['CRD servisi']
+    if ($crd) {
+        $m = @{}
+        if ($crd.metrics) { foreach ($k in $crd.metrics.PSObject.Properties.Name) { $m[$k] = $crd.metrics.$k } }
+        $registered = ($m['hostId'] -eq 'var')
+        $lvl = if (-not $registered) { 'bad' } elseif ($crd.ok) { 'ok' } else { 'warn' }
+        Add-Conn 'Google Remote Desktop kaydi' 'cihaz Google hesabinda kayitli mi' $lvl $(if ($registered) { 'KAYITLI' } else { 'KAYITSIZ' }) ('host_id=' + $(if ($registered) { 'var' } else { 'YOK' })) 'crd' 'CRD sayfasi'
+        $gc = [int]($(if ($m.ContainsKey('googleBaglanti')) { $m['googleBaglanti'] } else { 0 }))
+        $lvl2 = if ($gc -gt 0) { 'ok' } elseif ($registered) { 'warn' } else { 'none' }
+        Add-Conn 'CRD canli baglantisi' 'daemonin Google baglantisi' $lvl2 $(if ($gc -gt 0) { 'BAGLI' } else { 'YOK' }) ('baglanti=' + $gc + ', servis=' + [string]$m['servis'] + ', yas=' + [string]$m['yasSaat'] + 'sa') 'run' 'Yeniden denetir'
+    }
+
+    $rdp = $byName['Windows RDP']
+    if ($rdp) {
+        $lvl = if ($rdp.ok) { 'ok' } else { 'bad' }
+        $fw = 0
+        if ([string]$rdp.detail -match 'firewall kapali=(\d+)') { $fw = [int]$matches[1] }
+        Add-Conn 'Windows RDP' '3389 + firewall' $lvl $(if ($rdp.ok) { 'HAZIR' } else { 'KAPALI' }) ('firewall kapali kural=' + $fw) 'log' 'Loglari ac'
+    }
+
+    $tun = $byName['VS Code Tunnel']
+    if ($tun) {
+        Add-Conn 'VS Code Tunnel' 'vscode.dev/tunels' $(if ($tun.ok) { 'ok' } else { 'warn' }) $(if ($tun.ok) { 'CALISIYOR' } else { 'KAPALI' }) ([string]$tun.detail) 'log' 'Loglari ac'
+    }
+
+    $cfg = Get-HostConfig
+    if ($cfg.HeartbeatUrl) {
+        Add-Conn 'Disi heartbeat' 'healthchecks.io ping' 'ok' 'TANIMLI' ([string]$cfg.HeartbeatUrl) 'log' 'Loglari ac'
+    } else {
+        Add-Conn 'Disi heartbeat' 'healthchecks.io ping' 'none' 'KAPALI' 'alarm kurulmamis' 'settings' 'Ayarlar'
+    }
+
+    if ($cj) {
+        Add-Conn 'Bu makine (istemci)' 'uzak hedefe TCP erisimi' $(if ($cj.ok) { 'ok' } else { 'bad' }) $(if ($cj.ok) { 'BAGLI' } else { 'YOK' }) ([string]$cj.summary) 'log' 'Loglari ac'
+    }
+    return $rows
+}
+
+function Update-Connections {
+    $rows = Get-Connections
+    $items = @()
+    $okc = 0; $badc = 0; $info = 0
+    foreach ($r in $rows) {
+        $items += $r
+        if ($r.StateText -in @('BILGI', 'BILINMIYOR')) { $info++ }
+        elseif ($r.StateText -in @('YOK', 'KAPALI', 'KAYITSIZ', 'HATA')) { $badc++ }
+        else { $okc++ }
+    }
+    $cl = El $script:Win 'ConnList'
+    $cl.ItemsSource = $items
+    $cl.ItemTemplate = $script:Win.Resources['ConnRow']
+    $txt = ([string]$okc + ' saglikli') + $(if ($badc -gt 0) { '  |  ' + $badc + ' sorunlu' } else { '' }) + $(if ($info -gt 0) { '  |  ' + $info + ' bilgi' } else { '' })
+    (El $script:Win 'TxtConnSub').Text = ($txt + '   -   olcumler son denetimden (' + (Get-Date).ToString('HH:mm') + ')')
+    (El $script:Win 'TxtConnSub').Foreground = $(if ($badc -gt 0) { Bx 'Warn' } else { Bx 'Muted' })
+}
+
+function Invoke-ConnAction {
+    param([string]$Key)
+    switch ($Key) {
+        'host' { Invoke-Script -Path $HostScript -Args @('-Install') }
+        'run' { Invoke-Script -Path $HostScript; Invoke-Script -Path $ClientScript; Start-Sleep 4; Update-Connections; Update-Overview }
+        'crd' { Start-Process 'https://remotedesktop.google.com/headless' }
+        'docs' { Invoke-Script -Path $HostDocs -Args @('-Force') -Wait }
+        'log' { Show-Page 'log'; Update-Log }
+        'settings' { Show-Page 'settings'; Build-Settings }
+        'reboot' {
+            $r = [System.Windows.MessageBox]::Show('Makine yeniden baslatilsin mi? Kaydedilmemis belge varsa once kaydedilir.', 'RemoteWatchdog', 'YesNo', 'Question')
+            if ($r -eq 'Yes') { Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
+        }
+        default { }
+    }
+}
+
+function Show-Page {
+    param([string]$Name)
+    $script:Page = $Name
+    foreach ($n in @('conn', 'overview', 'actions', 'settings', 'log')) {
+        (El $script:Win ('Page' + $n[0].ToString().ToUpper() + $n.Substring(1))).Visibility = $(if ($n -eq $Name) { 'Visible' } else { 'Collapsed' })
+    }
+    foreach ($n in @('NavConn', 'NavOverview', 'NavActions', 'NavSettings', 'NavLog')) {
+        $b = El $script:Win $n
+        $on = ($b.Tag -eq $Name)
+        $b.Foreground = $(if ($on) { Bx 'Text' } else { Bx 'Muted' })
+        $b.Background = $(if ($on) { Bx '#1D2127' } else { 'Transparent' })
+    }
+    if ($Name -eq 'log') { Update-Log }
+}
+
+function Update-Overview {
+    $st = Get-StatusInfo
+    $hj = $st.Host
+    $cj = $st.Client
+    $color = if ($null -eq $hj -and $null -eq $cj) { $script:C.Muted } elseif ($st.Bad -gt 0) { $script:C.Bad } else { $script:C.Ok }
+    (El $script:Win 'StatusDot').Fill = Bx $color
+    (El $script:Win 'Pill').Background = Bx '#1D2733'
+    $pill = El $script:Win 'TxtPill'
+    $pill.Foreground = Bx $color
+    $pill.Text = $(if ($null -eq $hj -and $null -eq $cj) { 'VERI YOK' } elseif ($st.Bad -gt 0) { ([string]$st.Bad + ' SORUN') } else { 'AYAKTA' })
+    $last = 'kontrol yok'
+    if ($st.Age) { $last = 'son kontrol ' + [math]::Round($st.Age.TotalMinutes) + ' dk once' }
+    (El $script:Win 'TxtSubtitle').Text = $env:COMPUTERNAME + ' | ' + $last
+    (El $script:Win 'TxtOverviewSub').Text = $(if ($hj) { [string]$hj.summary } else { 'Watchdog hic calismadi. "Watchdog kur" ile baslat.' })
+
+    $cards = New-Object System.Collections.ArrayList
+    if ($hj) {
+        foreach ($c in @($hj.checks)) {
+            $col = if ($c.skipped) { $script:C.Muted } elseif ($c.ok) { $script:C.Ok } else { $script:C.Bad }
+            [void]$cards.Add([pscustomobject]@{ Title = [string]$c.name; Detail = [string]$c.detail; Repair = [string]$c.repair; Brush = Bx $col })
+        }
+    }
+    if ($cj) {
+        foreach ($c in @($cj.checks)) {
+            $col = if ($c.ok) { $script:C.Ok } else { $script:C.Bad }
+            [void]$cards.Add([pscustomobject]@{ Title = ([string]$c.name + ' (istemci)'); Detail = [string]$c.detail; Repair = ''; Brush = Bx $col })
+        }
+    }
+    $ic = El $script:Win 'Cards'
+    $ic.ItemsSource = $cards
+    $ic.ItemTemplate = $script:Win.Resources['StatusCard']
+
+    $env = New-Object System.Collections.ArrayList
+    if ($hj) {
+        [void]$env.Add('son kontrol    : ' + $hj.generated)
+        [void]$env.Add('uptime         : ' + [math]::Round([double]$hj.uptimeMinutes / 60, 1) + ' saat')
+        [void]$env.Add('kamu IP        : ' + $(if ($hj.publicIp) { $hj.publicIp } else { '?' }))
+        [void]$env.Add('gorev           : ' + $hj.taskState + $(if ($hj.taskInstalled) { '' } else { '  (kurulu degil)' }))
+        [void]$env.Add('blackout        : ' + $(if ($hj.inBlackout) { 'AKTIF - zorla kapatma izinli' } else { 'kapali - sadece bilgilendirme' }))
+        [void]$env.Add('tatil           : ' + $(if ($hj.isHoliday) { 'evet' } else { 'hayir' }) + '  (mod: ' + $hj.config.holidayMode + ')')
+        [void]$env.Add('restart         : ' + $hj.config.restartPolicy + '  |  blackout ' + $hj.config.blackoutStart + ':00-' + $hj.config.blackoutEnd + ':00  |  tam gun: ' + ((@($hj.config.blackoutFullDays)) -join ','))
+        [void]$env.Add('daima zorla     : ' + $(if ($hj.config.forceRestartAlways) { 'ACIK' } else { 'kapali' }) + $(if ($hj.config.forceRestartUntil) { '  (' + $hj.config.forceRestartUntil + ')' } else { '' }))
+        [void]$env.Add('ardisik hata    : ' + $hj.state.consecutiveFailures + '  |  ag onarim kademesi: ' + $hj.state.netRepairRung)
+        [void]$env.Add('tatil listesi   : ' + ((@($hj.config.holidays)) -join ', '))
+    } else { [void]$env.Add('last-run.json bulunamadi: ' + $HostJson) }
+    (El $script:Win 'TxtEnv').Text = ($env -join "`n")
+
+    (El $script:Win 'TxtBlackout').Text = $(if ($hj -and $hj.inBlackout) { 'Blackout: AKTIF' } else { 'Blackout: kapali' })
+    (El $script:Win 'TxtTaskState').Text = 'Gorev: ' + $(if ($hj) { $hj.taskState } else { 'yok' })
+    $up = '-'
+    if ($hj) { $up = ([math]::Round(([double]$hj.uptimeMinutes) / 60.0, 1)).ToString() + ' sa' }
+    (El $script:Win 'TxtUptime').Text = 'Uptime: ' + $up
+}
+
+function Update-Actions {
+    $list = Get-Actions
+    $col = @{ ok = $script:C.Ok; warn = $script:C.Warn; bad = $script:C.Bad; info = $script:C.Muted }
+    $items = @()
+    foreach ($a in $list) {
+        $items += [pscustomobject]@{ Title = [string]$a.Title; Detail = [string]$a.Detail; Action = [string]$a.Action; Key = [string]$a.Key; Brush = Bx $col[[string]$a.Level] }
+    }
+    $al = El $script:Win 'ActionList'
+    $al.ItemsSource = $items
+    $al.ItemTemplate = $script:Win.Resources['ActionRow']
+
+
+    (El $script:Win 'TxtActionsSub').Text = (@($list | Where-Object { $_.Level -ne 'ok' }).Count.ToString() + ' is bekliyor')
+}
+
+function Update-Log {
+    $lines = New-Object System.Collections.ArrayList
+    foreach ($lf in @($HostLog, $ClientLog)) {
+        if (Test-Path -LiteralPath $lf) {
+            [void]$lines.Add('===== ' + $lf + ' =====')
+            foreach ($l in @(Get-Content -LiteralPath $lf -Tail 200 -ErrorAction SilentlyContinue)) { [void]$lines.Add([string]$l) }
+        }
+    }
+    if ($lines.Count -eq 0) { [void]$lines.Add('(log dosyasi yok)') }
+    (El $script:Win 'TxtLog').Text = ($lines -join "`n")
+    (El $script:Win 'TxtLog').ScrollToEnd()
+}
+
+$script:Defs = @(
+    @{ Sec = 'ZAMANLAMA'; Type = 'section' }
+    @{ Sec = 'Zamanlama'; Key = 'IntervalMinutes'; Title = 'Kontrol araligi (dakika)'; Type = 'int' }
+    @{ Sec = 'Zamanlama'; Key = 'AlertRepeatHours'; Title = 'Ayni alarm icin tekrar araligi (saat)'; Type = 'int' }
+    @{ Sec = 'Zamanlama'; Key = 'NotifyRepeatHours'; Title = 'Kullanici bilgilendirme tekrar araligi (saat)'; Type = 'int' }
+
+    @{ Sec = 'RESTART POLITIKASI'; Type = 'section' }
+    @{ Sec = 'Restart'; Key = 'RestartPolicy'; Title = 'Restart politikasi'; Type = 'enum'; Options = @('blackout', 'always', 'never') }
+    @{ Sec = 'Restart'; Key = 'BlackoutEnabled'; Title = 'Blackout penceresi (disinda sadece bilgilendirilir)'; Type = 'bool' }
+    @{ Sec = 'Restart'; Key = 'BlackoutStart'; Title = 'Blackout baslangic saati'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'BlackoutEnd'; Title = 'Blackout bitis saati (geceye sarar)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'BlackoutFullDays'; Title = 'Tam gun blackout (hafta sonu)'; Type = 'days' }
+    @{ Sec = 'Restart'; Key = 'BlackoutNights'; Title = 'Blackout geceleri'; Type = 'days' }
+    @{ Sec = 'Restart'; Key = 'RebootAfterFailedCycles'; Title = 'Kac basarisiz denemeden sonra restart'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'RebootDelaySeconds'; Title = 'Restart gecikmesi (saniye)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'MinUptimeMinutes'; Title = 'Minimum uptime (dk, yeni acilan makine icin bekle)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'RebootSkipIfUnregistered'; Title = 'CRD kayitsizken restart etme'; Type = 'bool' }
+    @{ Sec = 'Restart'; Key = 'ForceRestartAlways'; Title = 'DAIMA zorla kapat (saat fark etmez)'; Type = 'bool' }
+    @{ Sec = 'Restart'; Key = 'ForceRestartUntil'; Title = 'Daima zorla kapat bitis zamani'; Type = 'datetime' }
+
+    @{ Sec = 'OTOMATIK ONARIM'; Type = 'section' }
+    @{ Sec = 'Onarim'; Key = 'FixNetwork'; Title = 'Ag onarimini uygula'; Type = 'bool' }
+    @{ Sec = 'Onarim'; Key = 'NetMaxRepairRung'; Title = 'Ag onarim kademesi (1-5)'; Type = 'int' }
+    @{ Sec = 'Onarim'; Key = 'FixRdp'; Title = 'RDP ayarlarini onar (firewall + servis)'; Type = 'bool' }
+    @{ Sec = 'Onarim'; Key = 'FixCrd'; Title = 'CRD servisini onar'; Type = 'bool' }
+    @{ Sec = 'Onarim'; Key = 'CrdNoConnRestartCycles'; Title = 'CRD baglantisi yoksa kac dongu sonra yeniden baslat'; Type = 'int' }
+    @{ Sec = 'Onarim'; Key = 'CrdRestartAfterHours'; Title = 'CRD onleyici restart (saat, 0 = kapali)'; Type = 'int' }
+    @{ Sec = 'Onarim'; Key = 'CrdSignalPorts'; Title = 'CRD sinyal portlari'; Type = 'csv' }
+    @{ Sec = 'Onarim'; Key = 'FixClock'; Title = 'Saat senkronunu onar'; Type = 'bool' }
+    @{ Sec = 'Onarim'; Key = 'ServiceAutoStart'; Title = 'Servisleri Automatic yap (acilista baslasin)'; Type = 'bool' }
+    @{ Sec = 'Onarim'; Key = 'ServiceCrashRecovery'; Title = 'Servis cokerse Windows kendini yeniden bassin'; Type = 'bool' }
+
+    @{ Sec = 'VS CODE TUNNEL'; Type = 'section' }
+    @{ Sec = 'Tunnel'; Key = 'TunnelRepair'; Title = 'Tunnel yoksa yeniden baslat'; Type = 'bool' }
+    @{ Sec = 'Tunnel'; Key = 'TunnelName'; Title = 'Tunnel adi'; Type = 'text' }
+
+    @{ Sec = 'SISTEM VE BELGE KORUMA'; Type = 'section' }
+    @{ Sec = 'Sistem'; Key = 'ServerMode'; Title = 'Sunucu modu (uyku/hibernasyon/adaptor gucu kapatilir)'; Type = 'bool' }
+    @{ Sec = 'Sistem'; Key = 'DisableFastStartup'; Title = 'Fast Startup kapansin'; Type = 'bool' }
+    @{ Sec = 'Sistem'; Key = 'OfficeSaveBeforeReboot'; Title = 'Restart oncesi Word/Excel kaydedilsin'; Type = 'bool' }
+    @{ Sec = 'Sistem'; Key = 'OfficeSaveTimeoutSeconds'; Title = 'Belge kaydetme bekleme suresi (sn)'; Type = 'int' }
+    @{ Sec = 'Sistem'; Key = 'OfficeAbortRebootIfStillOpen'; Title = 'Uygulama kapanmazsa restart yapilmasin'; Type = 'bool' }
+    @{ Sec = 'Sistem'; Key = 'OfficeAbortRebootIfUnsaved'; Title = 'Kaydedilmemis belge varsa restart yapilmasin'; Type = 'bool' }
+
+    @{ Sec = 'BILDIRIM'; Type = 'section' }
+    @{ Sec = 'Bildirim'; Key = 'TelegramToken'; Title = 'Telegram bot token'; Type = 'text' }
+    @{ Sec = 'Bildirim'; Key = 'TelegramChatId'; Title = 'Telegram chat id'; Type = 'text' }
+    @{ Sec = 'Bildirim'; Key = 'HeartbeatUrl'; Title = 'Healthchecks ping adresi'; Type = 'text' }
+
+    @{ Sec = 'TATIL'; Type = 'section' }
+    @{ Sec = 'Tatil'; Key = 'HolidayMode'; Title = 'Tatil modu (full = tam blackout)'; Type = 'enum'; Options = @('full', 'default', 'none') }
+    @{ Sec = 'Tatil'; Key = 'Holidays'; Title = 'Tatiller (her satir YYYY-AA-GG)'; Type = 'lines' }
+    @{ Sec = 'Tatil'; Key = 'HolidaysFile'; Title = 'Tatil dosyasi (bos birakilirsa betik yanindaki holidays.txt)'; Type = 'text' }
+
+    @{ Sec = 'ISTEMCI (BU BILGISAYAR)'; Type = 'section' }
+    @{ Sec = 'Istemci'; Key = 'Targets'; Title = 'Uzak hedefler (her satir ip:port)'; Type = 'lines'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'RdpFile'; Title = 'RDP dosyasi (.rdp)'; Type = 'text'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'BrowserUrl'; Title = 'Tarayici adresi (CRD)'; Type = 'text'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'LaunchOnRecover'; Title = 'Baglanti duzelince otomatik ac'; Type = 'bool'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'KeepAliveMinutes'; Title = 'Oturumu canli tutma araligi (dk, 0 = kapali)'; Type = 'int'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'TelegramToken'; Title = 'Telegram bot token (istemci)'; Type = 'text'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'TelegramChatId'; Title = 'Telegram chat id (istemci)'; Type = 'text'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'HeartbeatUrl'; Title = 'Healthchecks ping adresi (istemci)'; Type = 'text'; Target = 'client' }
+
+    @{ Sec = 'ISLEMLER'; Type = 'section' }
+    @{ Sec = 'Islem'; Type = 'actions' }
+)
+
+function Read-ConfigFile {
+    param([string]$Path)
+    $obj = [ordered]@{}
+    if (Test-Path -LiteralPath $Path) {
+        try {
+            $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($p in $raw.PSObject.Properties) { $obj[$p.Name] = $p.Value }
+        } catch { }
+    }
+    return $obj
+}
+
+function Write-ConfigFile {
+    param([string]$Path, $Values)
+    $obj = Read-ConfigFile $Path
+    foreach ($k in $Values.Keys) { $obj[$k] = $Values[$k] }
+    if (-not (Test-Path -LiteralPath (Split-Path -Parent $Path))) { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null }
+    $obj | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Path -Encoding UTF8
+}
+
+function Get-CurrentValues {
+    $host_ = Read-ConfigFile $HostConfig
+    $client_ = Read-ConfigFile $ClientConfig
+    $out = [ordered]@{}
+    foreach ($d in $script:Defs) {
+        if (-not $d.Key) { continue }
+        $src = $(if ($d.Target -eq 'client') { $client_ } else { $host_ })
+        $def = $script:Defs | Where-Object { $_.Key -eq $d.Key -and $_.Type -ne 'section' } | Select-Object -First 1
+        $v = $null
+        if ($src.Contains($d.Key)) { $v = $src[$d.Key] } else { $v = (Get-HostConfigDefaults) }
+        if ($def -and $def.Type -eq 'bool' -and $null -eq $v) { $v = $false }
+        $out[$d.Key + $(if ($d.Target -eq 'client') { '|client' } else { '' })] = $v
+    }
+    return $out
+}
+
+function Get-HostConfigDefaults {
+    $c = Get-HostConfig
+    return $c
+}
+
+function Build-Settings {
+    $cur = Get-CurrentValues
+    $rows = New-Object System.Collections.ArrayList
+    $lastSec = ''
+    foreach ($d in $script:Defs) {
+        if ($d.Type -eq 'section') {
+            $hdr = New-Object System.Windows.Controls.TextBlock
+            $hdr.Text = [string]$d.Sec
+            $hdr.Foreground = Bx 'Acc'
+            $hdr.FontSize = 11
+            $hdr.FontWeight = 'SemiBold'
+            $hdr.Margin = New-Object System.Windows.Thickness(0, $(if ($lastSec) { 18 } else { 0 }), 0, 10)
+            [void]$rows.Add([pscustomobject]@{ Title = ''; Control = $hdr })
+            $lastSec = [string]$d.Sec
+            continue
+        }
+        if ($d.Type -eq 'actions') {
+            [void]$rows.Add([pscustomobject]@{ Title = ''; Control = (New-ActionBar) })
+            continue
+        }
+        $ck = [string]$d.Key + $(if ($d.Target -eq 'client') { '|client' } else { '' })
+        $val = $cur[$ck]
+        $ctrl = $null
+        switch ($d.Type) {
+            'bool' { $ctrl = New-Toggle -On ([bool]$val); $ctrl.ToolTip = $ck }
+            'enum' { $ctrl = New-Combo -Items $d.Options -Selected ([string]$val); $ctrl.ToolTip = $ck }
+            'int' { $ctrl = New-TextBox -Width 130; $ctrl.Text = [string]$val; $ctrl.ToolTip = $ck }
+            'text' { $ctrl = New-TextBox -Width 300; $ctrl.Text = [string]$val; $ctrl.ToolTip = $ck }
+            'datetime' {
+                $ctrl = New-TextBox -Width 200
+                $t = ''
+                if ($val) { try { $t = ([datetime]::Parse([string]$val)).ToString('yyyy-MM-dd HH:mm') } catch { $t = '' } }
+                $ctrl.Text = $t
+                $ctrl.ToolTip = $ck
+            }
+            'lines' { $ctrl = New-TextBox -Multi -Width 430 -Height 66 -Text ((@($val)) -join "`n"); $ctrl.ToolTip = $ck }
+            'csv' { $ctrl = New-TextBox -Width 300; $ctrl.Text = ((@($val)) -join ', '); $ctrl.ToolTip = $ck }
+            'days' {
+                $p = New-Object System.Windows.Controls.StackPanel
+                $p.Orientation = 'Horizontal'
+                foreach ($day in @('Pzt', 'Sal', 'Car', 'Per', 'Cum', 'Cmt', 'Paz')) {
+                    $on = @($val) -contains $day
+                    $t = New-Toggle -Label $day -On $on
+                    $t.Width = 50
+                    $t.Margin = New-Object System.Windows.Thickness(0, 0, 6, 0)
+                    $t.ToolTip = 'days|' + $ck + '|' + $day
+                    [void]$p.Children.Add($t)
+                }
+                $ctrl = $p
+            }
+        }
+        [void]$rows.Add([pscustomobject]@{ Title = [string]$d.Title; Control = $ctrl })
+    }
+    $settingsHost = El $script:Win 'SettingsHost'
+    $settingsHost.ItemsSource = $rows
+    $settingsHost.ItemTemplate = $script:Win.Resources['SettingRow']
+}
+
+function New-ActionBar {
+    $p = New-Object System.Windows.Controls.StackPanel
+    $p.Orientation = 'Vertical'
+    $r1 = New-Object System.Windows.Controls.StackPanel
+    $r1.Orientation = 'Horizontal'
+    $r1.Margin = New-Object System.Windows.Thickness(0, 4, 0, 8)
+    $mk = {
+        param([string]$Text, [string]$Key, [switch]$Danger)
+        $b = New-Object System.Windows.Controls.Button
+        $b.Content = $Text
+        $b.Tag = $Key
+        $b.Margin = New-Object System.Windows.Thickness(0, 0, 8, 0)
+        $b.Padding = New-Object System.Windows.Thickness(14, 7, 14, 7)
+        $b.Cursor = [System.Windows.Input.Cursors]::Hand
+        $style = $script:Win.TryFindResource($(if ($Danger) { 'BtnDanger' } else { 'Btn' }))
+        if ($style) { $b.Style = $style }
+        return $b
+    }
+    $b1 = & $mk 'Watchdog kur' 'install'
+    $b2 = & $mk 'Watchdog kaldir' 'uninstall'
+    $b3 = & $mk 'Zamanlanmis gorevi durdur' 'stoptask'
+    $b4 = & $mk 'Gorevi hemen calistir' 'runtask'
+    $b5 = & $mk 'Tehis raporu uret' 'diag'
+    $r1.Children.Add($b1); $r1.Children.Add($b2); $r1.Children.Add($b3); $r1.Children.Add($b4); $r1.Children.Add($b5)
+    $p.Children.Add($r1)
+    $r2 = New-Object System.Windows.Controls.StackPanel
+    $r2.Orientation = 'Horizontal'
+    $r2.Margin = New-Object System.Windows.Thickness(0, 0, 0, 8)
+    $b6 = & $mk 'Telegram test mesaji' 'testalert'
+    $b7 = & $mk 'Sayaclari sifirla' 'resetstate'
+    $b8 = & $mk 'Loglari temizle' 'clearlog'
+    $b9 = & $mk 'config.json ac' 'openconfig'
+    $b10 = & $mk 'Simdi zorla kapat + restart' 'forcereboot' -Danger
+    $r2.Children.Add($b6); $r2.Children.Add($b7); $r2.Children.Add($b8); $r2.Children.Add($b9); $r2.Children.Add($b10)
+    $p.Children.Add($r2)
+    $p.add_MouseLeftButtonUp({
+            param($s, $e)
+            $btn = $e.OriginalSource
+            while ($btn -and -not ($btn -is [System.Windows.Controls.Button])) { $btn = $btn.Parent }
+            if (-not $btn) { return }
+            Invoke-SettingsAction ([string]$btn.Tag)
+        })
+    return $p
+}
+
+function Invoke-SettingsAction {
+    param([string]$Key)
+    switch ($Key) {
+        'install' { Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null }
+        'uninstall' {
+            if ([System.Windows.MessageBox]::Show('Watchdog zamanlanmis gorevi kaldirilsin mi?', 'RemoteWatchdog', 'YesNo', 'Question') -eq 'Yes') { Invoke-Script -Path $HostScript -Args @('-Uninstall') -Wait }
+        }
+        'stoptask' { Disable-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue | Out-Null; Write-Host 'gorev durduruldu' }
+        'runtask' { Start-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue; Start-Sleep 5; Update-Connections; Update-Overview }
+        'diag' { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaustune yazildi.', 'RemoteWatchdog') | Out-Null }
+        'testalert' {
+            $cfg = Get-HostConfig
+            $msg = 'RemoteWatchdog test bildirimi - ' + $env:COMPUTERNAME + ' - ' + (Get-Date).ToString('HH:mm:ss')
+            if (-not $cfg.TelegramToken) { [System.Windows.MessageBox]::Show('Telegram token ayarli degil.', 'RemoteWatchdog') | Out-Null; break }
+            try {
+                Invoke-RestMethod -Method Post -Uri ('https://api.telegram.org/bot' + $cfg.TelegramToken + '/sendMessage') -Body @{ chat_id = $cfg.TelegramChatId; text = $msg } -TimeoutSec 15 -ErrorAction Stop | Out-Null
+                [System.Windows.MessageBox]::Show('Test mesaji gonderildi.', 'RemoteWatchdog') | Out-Null
+            } catch { [System.Windows.MessageBox]::Show('Gonderilemedi: ' + $_.Exception.Message, 'RemoteWatchdog') | Out-Null }
+        }
+        'resetstate' {
+            Remove-Item -LiteralPath (Join-Path $HostData 'host-state.json') -Force -ErrorAction SilentlyContinue
+            [System.Windows.MessageBox]::Show('Sayaclar sifirlandi.', 'RemoteWatchdog') | Out-Null
+        }
+        'clearlog' {
+            if ([System.Windows.MessageBox]::Show('Log dosyalari silinsin mi?', 'RemoteWatchdog', 'YesNo', 'Question') -eq 'Yes') {
+                foreach ($f in @($HostLog, (Join-Path $HostData 'tray.log'), (Join-Path $HostData 'panel.log'), $ClientLog)) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+                Update-Log
+            }
+        }
+        'openconfig' { if (Test-Path -LiteralPath $HostConfig) { Start-Process notepad.exe $HostConfig } }
+        'forcereboot' {
+            $r = [System.Windows.MessageBox]::Show('Daima zorla kapatma ACILIR ve makine yeniden baslatilir. Kaydedilmemis belge varsa once kaydedilir. Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Warning')
+            if ($r -eq 'Yes') { Write-ConfigFile -Path $HostConfig -Values @{ ForceRestartAlways = $true }; Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
+        }
+        default { }
+    }
+}
+
+function Save-Settings {
+    $hostVals = [ordered]@{}
+    $clientVals = [ordered]@{}
+    $daysVals = @{}
+    $csvVals = @{}
+    foreach ($ctrl in (Find-AllControls $script:Win)) {
+        $key = $ctrl.ToolTip
+        if ($key -isnot [string] -or $key -eq '') { continue }
+        if ($key.StartsWith('days|')) {
+            $parts = $key.Split('|')
+            if ($parts.Count -ge 3) {
+                if (-not $daysVals.ContainsKey($parts[1])) { $daysVals[$parts[1]] = @() }
+                if ([bool]$ctrl.Tag) { $daysVals[$parts[1]] = @($daysVals[$parts[1]] + $parts[2]) }
+            }
+            continue
+        }
+        $ck = $key
+        $isClient = $ck.EndsWith('|client')
+        if ($isClient) { $ck = $ck.Substring(0, $ck.Length - 7) }
+        $def = $script:Defs | Where-Object { $_.Key -eq $ck -and $_.Type -ne 'section' -and $_.Type -ne 'actions' } | Select-Object -First 1
+        if (-not $def) { continue }
+        $val = $null
+        switch ($def.Type) {
+            'bool' { $val = [bool]$ctrl.Tag }
+            'enum' { $val = [string]$ctrl.SelectedItem }
+            'int' { $n = 0; if ([int]::TryParse(([string]$ctrl.Text).Trim(), [ref]$n)) { $val = $n } else { continue } }
+            'text' { $val = ([string]$ctrl.Text).Trim() }
+            'datetime' {
+                $t = ([string]$ctrl.Text).Trim()
+                if ($t -eq '') { $val = '' } else {
+                    $d = [datetime]::MinValue
+                    if (-not [datetime]::TryParse($t, [ref]$d)) { continue }
+                    $val = $d.ToString('yyyy-MM-ddTHH:mm:ss')
+                }
+            }
+            'lines' { $val = @((([string]$ctrl.Text) -split "`r?`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+            'csv' { $csvVals[$ck] = @((([string]$ctrl.Text) -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+        }
+        if ($null -eq $val) { continue }
+        if ($isClient) { $clientVals[$ck] = $val } else { $hostVals[$ck] = $val }
+    }
+    foreach ($k in $daysVals.Keys) { $hostVals[$k] = @($daysVals[$k]) }
+    foreach ($k in $csvVals.Keys) { $hostVals[$k] = $csvVals[$k] }
+    Write-ConfigFile -Path $HostConfig -Values $hostVals
+    if ($clientVals.Count -gt 0) { Write-ConfigFile -Path $ClientConfig -Values $clientVals }
+    (El $script:Win 'TxtSaved').Text = 'Kaydedildi: ' + (Get-Date).ToString('HH:mm:ss') + '  (' + $hostVals.Count + ' host + ' + $clientVals.Count + ' istemci)'
+}
+
+function Find-AllControls {
+    param($Root)
+    $out = New-Object System.Collections.ArrayList
+    function Walk { param($c) foreach ($ch in $c.Children) { [void]$out.Add($ch); Walk $ch } }
+    Walk $Root
+    return $out
+}
+
+function Find-ByTag { param($Root, [string]$Tag) foreach ($c in (Find-AllControls $Root)) { if ($c.Tag -is [string] -and $c.Tag -eq $Tag) { return $c } } return $null }
+
+function Refresh-Icon {
+    $st = Get-StatusInfo
+    $color = if ($null -eq $st.Host -and $null -eq $st.Client) { [System.Drawing.Color]::Gray } elseif ($st.Bad -gt 0) { [System.Drawing.Color]::Firebrick } else { [System.Drawing.Color]::ForestGreen }
+    $bmp = New-Object System.Drawing.Bitmap(16, 16)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = 'AntiAlias'
+    $g.Clear([System.Drawing.Color]::Transparent)
+    $br = New-Object System.Drawing.SolidBrush($color)
+    $g.FillEllipse($br, 1, 1, 14, 14)
+    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::White, 1.5)
+    $g.DrawEllipse($pen, 1, 1, 14, 14)
+    $g.Dispose(); $br.Dispose(); $pen.Dispose()
+    $ico = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+    $bmp.Dispose()
+    $old = $script:Icon.Icon
+    $script:Icon.Icon = $ico
+    if ($old) { try { $old.Dispose() } catch { } }
+    $state = '' + $(if ($st.Host) { $st.Host.ok } else { 'yok' }) + '|' + $(if ($st.Client) { $st.Client.ok } else { 'yok' })
+    if ($state -ne $script:LastState) {
+        $script:LastState = $state
+        if (-not $script:Silent -and -not $NoBalloon -and $st.Host) {
+            if ($st.Bad -gt 0) {
+                $bad = @($st.Host.checks | Where-Object { -not $_.ok } | ForEach-Object { $_.name }) -join ', '
+                Show-Balloon 'Uzak makine sorunlu' $bad 'Warning'
+            } else { Show-Balloon 'Uzak makine ayakta' 'Tum kontroller tamam.' 'Info' }
+        }
+    }
+}
+
+function Show-Balloon {
+    param([string]$Title, [string]$Text, [System.Windows.Forms.ToolTipIcon]$Icon = 'Info')
+    try {
+        $script:Icon.BalloonTipTitle = $Title
+        $script:Icon.BalloonTipText = $Text
+        $script:Icon.BalloonTipIcon = $Icon
+        $script:Icon.ShowBalloonTip(7000)
+    } catch { }
+}
+
+function New-TrayIcon {
+    $ctx = New-Object System.Windows.Forms.ContextMenuStrip
+    $i1 = $ctx.Items.Add('Kontrol panelini ac'); $i1.Add_Click({ $script:Win.Show(); $script:Win.Activate() })
+    $i2 = $ctx.Items.Add('Simdi denetle'); $i2.Add_Click({ Invoke-Script -Path $HostScript; Invoke-Script -Path $ClientScript })
+    [void]$ctx.Items.Add('-')
+    $i3 = $ctx.Items.Add('Sessiz mod'); $i3.Add_Click({
+            $script:Silent = -not $script:Silent
+            New-ItemProperty -Path $RunKey -Name ($RunName + 'Silent') -Value ([int]$script:Silent) -PropertyType String -Force | Out-Null
+            $i3.Checked = $script:Silent
+        })
+    $i3.Checked = $script:Silent
+    $i4 = $ctx.Items.Add('Log klasorunu ac'); $i4.Add_Click({ $d = Split-Path -Parent $HostLog; if (Test-Path $d) { Start-Process explorer.exe ('"' + $d + '"') } })
+    $i5 = $ctx.Items.Add('Google Remote Desktop'); $i5.Add_Click({ Start-Process 'https://remotedesktop.google.com' })
+    [void]$ctx.Items.Add('-')
+    $i6 = $ctx.Items.Add('Cikis'); $i6.Add_Click({ $script:ExitRequested = $true; $script:Win.Close(); $script:Icon.Visible = $false; $script:Icon.Dispose() })
+    $script:Icon = New-Object System.Windows.Forms.NotifyIcon
+    $script:Icon.ContextMenuStrip = $ctx
+    $script:Icon.Visible = $true
+    Refresh-Icon
+    $script:Icon.add_MouseDoubleClick({ $script:Win.Show(); $script:Win.Activate() })
+}
+
+function Wire-UI {
+    $w = $script:Win
+    foreach ($n in @('NavConn', 'NavOverview', 'NavActions', 'NavSettings', 'NavLog')) {
+        (El $w $n).Add_Click({ Show-Page ([string]$this.Tag) }.GetNewClosure())
+    }
+    (El $w 'ConnList').Add_MouseLeftButtonUp({
+            param($s, $e)
+            $btn = $e.OriginalSource
+            while ($btn -and -not ($btn -is [System.Windows.Controls.Button])) { $btn = $btn.Parent }
+            if (-not $btn) { return }
+            Invoke-ConnAction ([string]$btn.Tag)
+        })
+    (El $w 'ActionList').Add_MouseLeftButtonUp({
+            param($s, $e)
+            $btn = $e.OriginalSource
+            while ($btn -and -not ($btn -is [System.Windows.Controls.Button])) { $btn = $btn.Parent }
+            if (-not $btn) { return }
+            Invoke-ConnAction ([string]$btn.Tag)
+        })
+    (El $w 'BtnCheck').Add_Click({ Invoke-Script -Path $HostScript; Invoke-Script -Path $ClientScript; Start-Sleep 3; Update-Overview; Update-Actions })
+    (El $w 'BtnDiag').Add_Click({
+            $r = [System.Windows.MessageBox]::Show('Collect-Diagnostics calisacak (okuma modunda, ~40 sn). Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Question')
+            if ($r -eq 'Yes') { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaustune yazildi.', 'RemoteWatchdog') | Out-Null }
+        })
+    (El $w 'BtnInstall').Add_Click({ Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null })
+    (El $w 'BtnReboot').Add_Click({
+            $r = [System.Windows.MessageBox]::Show('Makine yeniden baslatilsin mi? Kaydedilmemis belge varsa once kaydedilir.', 'RemoteWatchdog', 'YesNo', 'Question')
+            if ($r -eq 'Yes') { Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
+        })
+    (El $w 'BtnForceNow').Add_Click({
+            $r = [System.Windows.MessageBox]::Show('Daima zorla kapatma ACILIR ve makine yeniden baslatilir. Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Warning')
+            if ($r -ne 'Yes') { return }
+            Save-HostConfig @{ ForceRestartAlways = $true }
+            Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait
+        })
+    (El $w 'BtnSave').Add_Click({ Save-Settings })
+    (El $w 'BtnReload').Add_Click({ Build-Settings; (El $w 'TxtSaved').Text = '' })
+    (El $w 'BtnLogRefresh').Add_Click({ Update-Log })
+    (El $w 'BtnLogCopy').Add_Click({ try { [System.Windows.Clipboard]::SetText((El $w 'TxtLog').Text) } catch { } })
+    (El $w 'BtnLogOpen').Add_Click({ if (Test-Path $HostLog) { Start-Process notepad.exe $HostLog } })
+    $w.Add_Closing({
+            param($s, $e)
+            if ($script:ExitRequested) { return }
+            $e.Cancel = $true
+            $w.Hide()
+        })
+    $script:Timer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:Timer.Interval = [TimeSpan]::FromSeconds(20)
+    $script:Timer.Add_Tick({ Update-Connections; Update-Overview; Update-Actions; Refresh-Icon })
+    $script:Timer.Start()
+}
+
+if ($Install) {
+    $cmd = 'powershell.exe -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '"'
+    New-ItemProperty -Path $RunKey -Name $RunName -Value $cmd -PropertyType String -Force | Out-Null
+    Write-Host 'Panel oturum acilinda otomatik baslayacak.'
+    exit 0
+}
+if ($Uninstall) {
+    Remove-ItemProperty -Path $RunKey -Name $RunName -ErrorAction SilentlyContinue
+    Write-Host 'Oturum acilista baslatma kaldirildi.'
+    exit 0
+}
+
+$script:Win = [Windows.Markup.XamlReader]::Parse($Xaml)
+New-TrayIcon
+Wire-UI
+Show-Page 'conn'
+Update-Connections
+Update-Overview
+Update-Actions
+Build-Settings
+
+if ($SelfTest) {
+    if (-not $PreviewPath) { $PreviewPath = Join-Path $UiDir ('preview-' + $PreviewPage + '.png') }
+    $w = $script:Win
+    $w.Show()
+    Start-Sleep -Milliseconds 900
+    Show-Page $PreviewPage
+    Start-Sleep -Milliseconds 400
+    Update-Connections
+    Update-Overview
+    $w.UpdateLayout()
+    Start-Sleep -Milliseconds 500
+    $rtb = New-Object System.Windows.Media.Imaging.RenderTargetBitmap(1080, 720, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
+    $root = $w.Content
+    $rtb.Render($root)
+    $enc = New-Object System.Windows.Media.Imaging.PngBitmapEncoder
+    $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($rtb))
+    $fs = [System.IO.File]::Create($PreviewPath)
+    $enc.Save($fs)
+    $fs.Close()
+    Write-Host ('Onizleme yazildi: ' + $PreviewPath)
+    Write-Host ('Baglanti satiri: ' + (El $w 'ConnList').Items.Count + ' | kart: ' + (El $w 'Cards').Items.Count + ' | bekleyen is: ' + (El $w 'ActionList').Items.Count + ' | ayar satiri: ' + (El $w 'SettingsHost').Items.Count)
+    $script:ExitRequested = $true
+    $script:Icon.Visible = $false
+    $script:Icon.Dispose()
+    $w.Close()
+    exit 0
+}
+
+if ($TrayOnly) { $script:Win.Hide() } else { $script:Win.Show() }
+$created = $false
+try { $created = $script:Mutex.WaitOne(0) } catch { $created = $true }
+if (-not $created) { $script:Icon.Visible = $false; $script:Icon.Dispose(); exit 0 }
+try { [System.Windows.Threading.Dispatcher]::Run() } finally { $script:Mutex.ReleaseMutex() }

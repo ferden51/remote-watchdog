@@ -8,3 +8,4 @@ logs/
 Thumbs.db
 host/holidays.txt
 install/output*.txt
+ui/preview*.png
