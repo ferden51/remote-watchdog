@@ -18,6 +18,7 @@ param(
     [switch]$Uninstall,
     [switch]$Check,
     [switch]$Status,
+    [switch]$Json,
     [int]$IntervalMinutes = 10,
     [string[]]$Target = @(),
     [string]$RdpFile = '',
@@ -205,6 +206,31 @@ function Send-Heartbeat {
     try { Invoke-WebRequest -Uri $url -Method Post -Body $payload -ContentType 'application/json' -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop | Out-Null } catch { Write-Log 'WARN' ('heartbeat basarisiz: ' + $_.Exception.Message) }
 }
 
+function Write-JsonStatus {
+    param([bool]$AllOk, [string]$Summary)
+    $state = Get-State
+    $checks = @()
+    foreach ($r in $script:Results) { $checks += [ordered]@{ name = $r.Name; ok = [bool]$r.Ok; detail = $r.Detail } }
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $obj = [ordered]@{
+        generated = (Get-Date).ToString('o')
+        host = $env:COMPUTERNAME
+        user = $env:USERNAME
+        role = 'client'
+        ok = $AllOk
+        summary = $Summary
+        taskInstalled = [bool]$task
+        taskState = $(if ($task) { [string]$task.State } else { 'yok' })
+        lastOkUtc = [string]$state.LastOkUtc
+        alertKey = [string]$state.AlertKey
+        checks = $checks
+        config = [ordered]@{ targets = @($cfg.Targets); rdpFile = [string]$cfg.RdpFile; browserUrl = [string]$cfg.BrowserUrl; heartbeatUrl = [string]$cfg.HeartbeatUrl }
+    }
+    $json = $obj | ConvertTo-Json -Depth 6
+    try { Set-Content -LiteralPath (Join-Path $BaseDir 'last-run.json') -Value $json -Encoding UTF8 } catch { }
+    if ($Json) { Write-Output $json }
+}
+
 function Invoke-Cycle {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $global:cfg = Get-Config
@@ -222,6 +248,7 @@ function Invoke-Cycle {
     }
     $summary = @($script:Results | ForEach-Object { $_.Name + '=' + $(if ($_.Ok) { 'OK' } else { 'FAIL' }) }) -join '; '
     Write-Log $(if ($allOk) { 'INFO' } else { 'WARN' }) ('SONUC: ' + $(if ($allOk) { 'uzak erisim hat sagligi' } else { 'ERISIM SORUNU' }))
+    Write-JsonStatus -AllOk $allOk -Summary $summary
     if (-not $Check) {
         Send-Heartbeat -Ok $allOk -Summary $summary
         Invoke-Alerts -AllOk $allOk -Summary $summary

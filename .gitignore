@@ -6,3 +6,4 @@ logs/
 .vs/
 .vscode/
 Thumbs.db
+host/holidays.txt

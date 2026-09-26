@@ -22,7 +22,12 @@ param(
     [string]$TelegramChatId = '',
     [string]$TunnelName = '',
     [switch]$EnableTunnelRepair,
-    [switch]$KeepSleep
+    [switch]$KeepSleep,
+    [string]$AddHoliday = '',
+    [string]$RemoveHoliday = '',
+    [switch]$ListHolidays,
+    [switch]$Json,
+    [switch]$ForceReboot
 )
 
 $ErrorActionPreference = 'Continue'
@@ -74,11 +79,18 @@ function Get-Config {
         OfficeSaveTimeoutSeconds = 120
         OfficeAbortRebootIfStillOpen = $true
         OfficeAbortRebootIfUnsaved = $true
-        WorkHoursEnabled = $true
-        WorkHoursStart = 8
-        WorkHoursEnd = 17
-        WorkDays = @(1, 2, 3, 4, 5)
-        ForceRestartOutsideWorkHours = $true
+        RestartPolicy = 'blackout'
+        BlackoutEnabled = $true
+        BlackoutStart = 18
+        BlackoutEnd = 8
+        BlackoutNights = @('Pzt', 'Sal', 'Car', 'Per', 'Cum', 'Cmt', 'Paz')
+        BlackoutFullDays = @('Cmt', 'Paz')
+        HolidayMode = 'full'
+        Holidays = @()
+        HolidaysFile = ''
+        NotifyRepeatHours = 4
+        ForceRestartAlways = $false
+        ForceRestartUntil = ''
         CrdRestartAfterHours = 0
         CrdSignalPorts = @(443, 5222, 5223, 19302, 19303, 8443, 4433)
         CrdNoConnRestartCycles = 3
@@ -106,7 +118,7 @@ function Save-Config {
 }
 
 function Get-State {
-    $s = [pscustomobject]@{ ConsecutiveFailures = 0; CrdNoConnCycles = 0; NetRepairRung = 0; NetResetPendingReboot = 0; LastBootUtc = ''; AlertKey = ''; AlertUtc = ''; LastOkUtc = '' }
+    $s = [pscustomobject]@{ ConsecutiveFailures = 0; CrdNoConnCycles = 0; NetRepairRung = 0; NetResetPendingReboot = 0; LastBootUtc = ''; AlertKey = ''; AlertUtc = ''; LastOkUtc = ''; LastUserNotifyUtc = '' }
     if (Test-Path -LiteralPath $StateFile) {
         try {
             $raw = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json
@@ -533,12 +545,136 @@ function Invoke-Alerts {
     }
 }
 
-function Test-InWorkHours {
+function Get-HolidayList {
+    $cfg = $global:cfg
+    $list = @()
+    foreach ($d in @($cfg.Holidays)) {
+        if ($null -ne $d -and ([string]$d).Trim() -ne '') { $list += ([string]$d).Trim() }
+    }
+    $file = [string]$cfg.HolidaysFile
+    if ([string]::IsNullOrEmpty($file)) { $file = Join-Path (Split-Path -Parent $ScriptPath) 'holidays.txt' }
+    if (Test-Path -LiteralPath $file) {
+        foreach ($line in @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue)) {
+            $t = ([string]$line).Trim()
+            if ($t -and -not $t.StartsWith('#')) { $list += $t }
+        }
+    }
+    return @($list | Sort-Object -Unique)
+}
+
+function Test-IsHoliday {
     param([datetime]$At = (Get-Date))
     $cfg = $global:cfg
-    if (-not $cfg.WorkHoursEnabled) { return $true }
-    if (@($cfg.WorkDays) -notcontains [int]$At.DayOfWeek) { return $false }
-    return ($At.Hour -ge [int]$cfg.WorkHoursStart -and $At.Hour -lt [int]$cfg.WorkHoursEnd)
+    if ([string]$cfg.HolidayMode -eq 'none') { return $false }
+    return (@(Get-HolidayList) -contains $At.ToString('yyyy-MM-dd'))
+}
+
+function Add-HolidayToFile {
+    param([string[]]$Dates)
+    $cfg = $global:cfg
+    $file = [string]$cfg.HolidaysFile
+    if ([string]::IsNullOrEmpty($file)) { $file = Join-Path (Split-Path -Parent $ScriptPath) 'holidays.txt' }
+    $existing = @()
+    if (Test-Path -LiteralPath $file) { $existing = @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue) }
+    foreach ($d in $Dates) {
+        $t = $d.Trim()
+        if ($t -notmatch '^\d{4}-\d{2}-\d{2}$') { Write-Host ('Hatali tarih (YYYY-AA-GG olmali): ' + $d) -ForegroundColor Red; continue }
+        if ($existing -notcontains $t) { $existing += $t; Write-Host ('Eklendi: ' + $t) }
+    }
+    try {
+        $dir = Split-Path -Parent $file
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        Set-Content -LiteralPath $file -Value (@('# RemoteWatchdog tatil listesi - her satir YYYY-AA-GG') + ($existing | Where-Object { $_ })) -Encoding UTF8
+        Write-Host ('Dosya: ' + $file)
+    } catch { Write-Host ('Yazilamadi (yonetici yetkisi gerekebilir): ' + $_.Exception.Message) -ForegroundColor Red }
+}
+
+function Remove-HolidayFromFile {
+    param([string[]]$Dates)
+    $cfg = $global:cfg
+    $file = [string]$cfg.HolidaysFile
+    if ([string]::IsNullOrEmpty($file)) { $file = Join-Path (Split-Path -Parent $ScriptPath) 'holidays.txt' }
+    if (-not (Test-Path -LiteralPath $file)) { Write-Host 'Tatil dosyasi yok'; return }
+    $existing = @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue | Where-Object { $_ -and -not $_.StartsWith('#') })
+    foreach ($d in $Dates) {
+        $t = $d.Trim()
+        if ($existing -contains $t) { $existing = @($existing | Where-Object { $_ -ne $t }); Write-Host ('Silindi: ' + $t) } else { Write-Host ('Bulunamadi: ' + $t) }
+    }
+    Set-Content -LiteralPath $file -Value (@('# RemoteWatchdog tatil listesi - her satir YYYY-AA-GG') + $existing) -Encoding UTF8
+}
+
+function ConvertTo-DotNetDays {
+    param($Spec)
+    $map = @{
+        'pzt' = 1; 'pazartesi' = 1; 'mon' = 1; 'monday' = 1
+        'sal' = 2; 'sali' = 2; 'tue' = 2; 'tuesday' = 2
+        'car' = 3; 'carsamba' = 3; 'wed' = 3; 'wednesday' = 3
+        'per' = 4; 'persembe' = 4; 'thu' = 4; 'thursday' = 4
+        'cum' = 5; 'cuma' = 5; 'fri' = 5; 'friday' = 5
+        'cmt' = 6; 'cumartesi' = 6; 'sat' = 6; 'saturday' = 6
+        'paz' = 0; 'pazar' = 0; 'sun' = 0; 'sunday' = 0
+    }
+    $out = @()
+    foreach ($s in @($Spec)) {
+        if ($null -eq $s -or ([string]$s).Trim() -eq '') { continue }
+        $t = ([string]$s).Trim().ToLowerInvariant()
+        if ($t -match '^\d+$') { $out += [int]$t; continue }
+        if ($map.ContainsKey($t)) { $out += $map[$t]; continue }
+        Write-Log 'WARN' ('bilinmeyen gun tanimi yok sayildi: ' + $s + ' (ornek: Pzt, Sal, Car, Per, Cum, Cmt, Paz)')
+    }
+    return @($out | Sort-Object -Unique)
+}
+
+function Test-InBlackout {
+    param([datetime]$At = (Get-Date))
+    $cfg = $global:cfg
+    $forceUntil = $null
+    if ($cfg.ForceRestartUntil) { try { $forceUntil = [datetime]::Parse([string]$cfg.ForceRestartUntil, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) } catch { } }
+    $forceActive = [bool]$cfg.ForceRestartAlways -and (($null -eq $forceUntil) -or ($forceUntil -gt $At))
+    if ($forceActive) { return $true }
+    if ($null -ne $forceUntil -and $forceUntil -le $At -and [bool]$cfg.ForceRestartAlways) { Write-Log 'INFO' ('daima zorla kapatma suresi doldu (' + $forceUntil.ToString('yyyy-MM-dd HH:mm') + '); normal blackoutu kuralina donuluyor') }
+    if (-not $cfg.BlackoutEnabled) { return $true }
+    $dow = [int]$At.DayOfWeek
+    $h = $At.Hour + ($At.Minute / 60.0)
+    $fullDays = ConvertTo-DotNetDays $cfg.BlackoutFullDays
+    $nights = ConvertTo-DotNetDays $cfg.BlackoutNights
+    if ($fullDays -contains $dow) { return $true }
+    if (Test-IsHoliday -At $At) {
+        $mode = ([string]$cfg.HolidayMode).ToLowerInvariant()
+        if ($mode -eq 'full') { return $true }
+        Write-Log 'INFO' ($At.ToString('yyyy-MM-dd') + ' resmi/dini tatil, normal mesai kurali uygulandi')
+    }
+    $s = [double]$cfg.BlackoutStart
+    $e = [double]$cfg.BlackoutEnd
+    if ($e -gt $s) { return ($nights -contains $dow -and $h -ge $s -and $h -lt $e) }
+    $prevDow = ($dow + 6) % 7
+    if ($nights -contains $dow -and $h -ge $s) { return $true }
+    if ($nights -contains $prevDow -and $h -lt $e) { return $true }
+    return $false
+}
+
+function Send-UserNotification {
+    param([string]$Text, [string]$Title = 'Uzak Makine Uyarisi')
+    $cfg = $global:cfg
+    $state = Get-State
+    $now = Get-Date
+    $repeat = [double]$cfg.NotifyRepeatHours
+    if ($state.LastUserNotifyUtc) {
+        $last = [datetime]::Parse([string]$state.LastUserNotifyUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        if (($now - $last).TotalHours -lt $repeat) {
+            Write-Log 'INFO' ('kullanici bildirimi bastan sona gonderildi, tekrar icin ' + $repeat + ' saat beklenecek')
+            return $false
+        }
+    }
+    $state.LastUserNotifyUtc = $now.ToString('o')
+    Save-State $state
+    Write-Log 'ALERT' ('KULLANICI BILDIRIMI: ' + $Text)
+    Send-Telegram ('[BILDIRIM] ' + $env:COMPUTERNAME + ' - ' + $Title + ': ' + $Text)
+    try {
+        msg.exe * /TIME:600 ('[' + $env:COMPUTERNAME + '] ' + $Title + ': ' + $Text) 2>&1 | Out-Null
+        Write-Log 'INFO' 'ekran bildirimi gosterildi (msg.exe, 10 dk)'
+    } catch { Write-Log 'WARN' 'ekran bildirimi gosterilemedi' }
+    return $true
 }
 
 function Stop-OfficeForced {
@@ -562,10 +698,9 @@ function Request-OfficeSave {
     $resultFile = Join-Path $tempDir 'RemoteWatchdog-office-result.txt'
     $saver = Join-Path (Split-Path -Parent $ScriptPath) 'Protect-OpenDocuments.ps1'
     if (-not $cfg.OfficeSaveBeforeReboot) { return $true }
-    $inWork = Test-InWorkHours
-    if (-not $inWork -and $cfg.ForceRestartOutsideWorkHours) {
+    if (Test-InBlackout) {
         $killed = Stop-OfficeForced
-        $msg = 'mesai disi (' + (Get-Date).ToString('dddd HH:mm') + '): zorla yeniden baslatma' + $(if ($killed.Count) { ' - kapatilan: ' + ($killed -join ', ') + ' (kaydedilmemis belge olabilir)' } else { ' - acik ofis uygulamasi yok' })
+        $msg = 'blackout saatleri (' + (Get-Date).ToString('dddd HH:mm') + '): zorla yeniden baslatma' + $(if ($killed.Count) { ' - kapatilan: ' + ($killed -join ', ') + ' (kaydedilmemis belge olabilir)' } else { ' - acik ofis uygulamasi yok' })
         Write-Log 'ALERT' $msg
         Send-Telegram ('[UYARI] ' + $env:COMPUTERNAME + ' ' + $msg)
         return $true
@@ -633,6 +768,16 @@ function Invoke-RebootIfNeeded {
         Write-Log 'INFO' ('restart ertelendi: makine sadece ' + $uptime + ' dk acik (esik ' + $cfg.MinUptimeMinutes + ' dk)')
         return
     }
+    $badNames = ($bad | ForEach-Object { $_.Name }) -join ', '
+    $policy = [string]$cfg.RestartPolicy
+    $inBlackout = Test-InBlackout
+    if ($policy -eq 'never' -or ($policy -eq 'blackout' -and -not $inBlackout)) {
+        Write-Log 'INFO' ('yeniden baslatma yapilmayacak (politika=' + $policy + ', blackout=' + $inBlackout + '); kullaniciya bildiriliyor')
+        Send-UserNotification -Title 'Baglanti sorunu - karar sizin' -Text ('Uzaktan erisim onarilamadi (' + $state.ConsecutiveFailures + ' deneme). Sorun: ' + $badNames + '. Bilgisayarı istediginiz zaman yeniden baslatabilirsiniz; zorla kapatma yapilmadi.')
+        $state.ConsecutiveFailures = 0
+        Save-State $state
+        return
+    }
     Send-Telegram ('[KRITIK] ' + $env:COMPUTERNAME + ' ' + $state.ConsecutiveFailures + ' kez onarilamadi, ' + $cfg.RebootDelaySeconds + ' sn sonra yeniden baslatiliyor')
     if (-not (Request-OfficeSave -TimeoutSeconds ([int]$cfg.OfficeSaveTimeoutSeconds))) {
         Write-Log 'ALERT' 'yeniden baslatma iptal edildi: Word/Excel belgeleri kaydedilemedi (kayip olmamasi icin durduruldu)'
@@ -652,6 +797,58 @@ function Show-Results {
     }
     if ($bad.Count -eq 0) { Write-Log 'INFO' 'SONUC: tum kontroller tamam.' } else { Write-Log 'WARN' ('SONUC: ' + $bad.Count + ' sorun -> ' + (($bad | ForEach-Object { $_.Name }) -join ', ')) }
     return $bad.Count
+}
+
+function Write-JsonStatus {
+    param([bool]$AllOk, [string]$Summary, [int]$BadCount)
+    $cfg = $global:cfg
+    $state = Get-State
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $checks = @()
+    foreach ($r in $script:Results) {
+        $checks += [ordered]@{ name = $r.Name; ok = [bool]$r.Ok; skipped = [bool]$r.Skipped; detail = $r.Detail; repair = $r.Repair }
+    }
+    $obj = [ordered]@{
+        generated = (Get-Date).ToString('o')
+        host = $env:COMPUTERNAME
+        user = $env:USERNAME
+        role = 'host'
+        ok = $AllOk
+        badCount = $BadCount
+        summary = $Summary
+        uptimeMinutes = (Get-UptimeMinutes)
+        publicIp = $script:PublicIp
+        taskInstalled = [bool]$task
+        taskState = $(if ($task) { [string]$task.State } else { 'yok' })
+        inBlackout = (Test-InBlackout)
+        isHoliday = (Test-IsHoliday)
+        checks = $checks
+        state = [ordered]@{
+            consecutiveFailures = [int]$state.ConsecutiveFailures
+            netRepairRung = [int]$state.NetRepairRung
+            netResetPendingReboot = [int]$state.NetResetPendingReboot
+            crdNoConnCycles = [int]$state.CrdNoConnCycles
+            alertKey = [string]$state.AlertKey
+            lastOkUtc = [string]$state.LastOkUtc
+            lastUserNotifyUtc = [string]$state.LastUserNotifyUtc
+        }
+        config = [ordered]@{
+            intervalMinutes = $(if ($task) { [int]$task.Triggers.Repetition.Interval -replace '^PT', '' -replace 'M$', '' } else { 0 })
+            restartPolicy = [string]$cfg.RestartPolicy
+            blackoutStart = $cfg.BlackoutStart
+            blackoutEnd = $cfg.BlackoutEnd
+            blackoutFullDays = @($cfg.BlackoutFullDays)
+            holidayMode = [string]$cfg.HolidayMode
+            holidays = @(Get-HolidayList)
+        }
+    }
+    $json = $obj | ConvertTo-Json -Depth 6
+    try {
+        if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
+        Set-Content -LiteralPath (Join-Path $BaseDir 'last-run.json') -Value $json -Encoding UTF8
+    } catch { }
+    if ($Json) { Write-Output $json }
+    return $json
 }
 
 function Invoke-Watchdog {
@@ -674,6 +871,7 @@ function Invoke-Watchdog {
     Send-Heartbeat -Ok $allOk -Summary $summary
     Invoke-Alerts -AllOk $allOk -Summary $summary
     Invoke-RebootIfNeeded -AllOk $allOk
+    $null = Write-JsonStatus -AllOk $allOk -Summary $summary -BadCount $badCount
     return $badCount
 }
 
@@ -746,6 +944,33 @@ function Show-Status {
 
 if ($Status) { Show-Status; exit 0 }
 if ($Uninstall) { Uninstall-Watchdog; exit 0 }
+if ($AddHoliday) { $global:cfg = Get-Config; Add-HolidayToFile -Dates (@($AddHoliday -split '[,;\s]+' | Where-Object { $_ })); exit 0 }
+if ($RemoveHoliday) { $global:cfg = Get-Config; Remove-HolidayFromFile -Dates (@($RemoveHoliday -split '[,;\s]+' | Where-Object { $_ })); exit 0 }
+if ($ListHolidays) {
+    $global:cfg = Get-Config
+    Write-Host ('Tatil modu: ' + $cfg.HolidayMode + ' (full = tatil gunu tamamen blackout, default = normal mesai kurali, none = yok say)')
+    Write-Host ('Bugun: ' + (Get-Date).ToString('yyyy-MM-dd dddd') + ' | tatil mi: ' + (Test-IsHoliday))
+    $list = Get-HolidayList
+    Write-Host ('Kayitli tatil sayisi: ' + $list.Count)
+    $list | Sort-Object | ForEach-Object { Write-Host ('  ' + $_) }
+    exit 0
+}
 if ($Install) { Install-Watchdog; exit 0 }
+if ($ForceReboot) {
+    $global:cfg = Get-Config
+    $state = Get-State
+    $state.ConsecutiveFailures = [int]$cfg.RebootAfterFailedCycles
+    $state.NetResetPendingReboot = 1
+    Save-State $state
+    Write-Log 'ALERT' ('elle restart istendi (pano butonu), gecikmeli yeniden baslatma: ' + $cfg.RebootDelaySeconds + ' sn')
+    Send-Telegram ('[BILDIRIM] ' + $env:COMPUTERNAME + ' elle restart istendi, ' + $cfg.RebootDelaySeconds + ' sn sonra yeniden baslatilacak')
+    if (-not (Request-OfficeSave -TimeoutSeconds ([int]$cfg.OfficeSaveTimeoutSeconds))) {
+        Write-Log 'ALERT' 'elle restart iptal: kaydedilmemis belge var, once kaydedip kapatin'
+        Send-Telegram ('[UYARI] ' + $env:COMPUTERNAME + ' restart iptal: kaydedilmemis Word/Excel belgesi var')
+        exit 1
+    }
+    shutdown.exe /r /t $cfg.RebootDelaySeconds /c 'RemoteHostWatchdog: kullanici restart istedi' 2>&1 | Out-Null
+    exit 0
+}
 $null = Invoke-Watchdog
 exit 0

@@ -17,6 +17,41 @@ Bağlantı sorunlarının çoğu "makine açık ama erişilemiyor" şeklindedir 
 | `host/Collect-Diagnostics.ps1` | Uzak bilgisayar | 14 günlük olay günlüğü + ağ/DHCP/uyku analizi, puanlı şüpheli listesi (hiçbir şeyi değiştirmez) |
 | `host/Enable-ConsoleAutoLogon.ps1` | Uzak bilgisayar (admin) | Reboot sonrası konsola otomatik giriş (opt-in, riskli) |
 | `client/RemoteClientWatchdog.ps1` | Kendi bilgisayarın | Uzak hedefe TCP erişim testi, kopma uyarısı, RDP/tarayıcı otomatik açma |
+| `ui/RemoteWatchdogTray.ps1` | Her iki makinede (kullanıcı oturumu) | Sistem tepsisi kontrol paneli: durum, bekleyen işler, tüm ayarlar, daima zorla kapatma anahtarı, loglar, teşhis raporu |
+
+## Tray kontrol paneli
+
+`ui/RemoteWatchdogTray.ps1` tek dosyalık bir WinForms uygulamasıdır; klavye/fare gerektirmez.
+
+```powershell
+.\RemoteWatchdogTray.ps1                 # tray'de başlar (simgeye çift tıkla = panel)
+.\RemoteWatchdogTray.ps1 -Install        # oturum açılışında otomatik başlat
+.\RemoteWatchdogTray.ps1 -SelfTest       # arayüzü kurup doldurup kapatır (test için)
+```
+
+Tepsisindeki simge **duruma göre renklenir**: yeşil (ayakta), kırmızı (sorun), gri (veri yok). Simgeye tıkla,
+sağ tıkla: *Şimdi denetle*, *Kontrol panelini aç*, *Sessiz mod*, *Log klasörünü aç*, *Google Remote Desktop*,
+*Watchdog kur*, *Teşhis raporu üret*, *Tray'den kapat*. Çift tıklama paneli açar. Tek kopya çalışır (mutex).
+
+Panelde dört sekme:
+
+**1. Durum** — sistem ayakta mı, uzak makinenin her kontrolünün sonucu, bu makinenin (istemci) kontrolü,
+son denetim zamanı, uptime, kamu IP, görev durumu, blackout/tatil durumu, arıza sayacı, ağ onarım kademesi.
+
+**2. Bekleyen işler** — yapılması gerekenler listelenir ve tek tıkla çözülür: görev kurulu değil, watchdog
+dönmüyor, `host_id=YOK` (CRD yeniden kayıt), ağ onarımı, kaydedilmemiş belge (kaydet), winsock reset sonrası
+restart. Ayrıca **"Şimdi zorla kapat ve yeniden başlat"** düğmesi: `ForceRestartAlways` anahtarını açar ve
+restart ister (belgeler önce kaydedilir).
+
+**3. Ayarlar** — kontrol aralığı, restart politikası (`blackout` / `always` / `never`), blackout başlangıç/bitiş
+saati, tam gün blackout günleri, tatil modu ve tatil listesi, **daima zorla kapatma (isteğe bağlı bitiş zamanıyla)**,
+restart koşulları (başarısız deneme sayısı, gecikme, minimum uptime, ağ kademesi), sunucu modu / Fast Startup,
+belge koruma anahtarları, Telegram token/chat id, alarm tekrar aralığı, healthchecks adresi, istemci hedefleri.
+Kaydet dediğinde `config.json` güncellenir, bir sonraki denetimde geçerli olur.
+
+**4. Günlük** — host ve istemci loglarının son 120 satırı; *Yenile*, *Log dosyasını aç*, *Tümünü kopyala*,
+*Teşhis raporu üret*.
+
 
 ## Host tarafı ne yapar
 
