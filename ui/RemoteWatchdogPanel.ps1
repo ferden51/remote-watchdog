@@ -241,19 +241,19 @@ function Get-Actions {
         [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = 'Uzak makine verisi yok'; Detail = 'Watchdog kurulu degil veya hic calismadi.'; Key = 'host'; Action = 'Kur' })
         return $a
     }
-    $fresh = $false
-    if ($hj -and $hj.generated) { try { $fresh = (((Get-Date) - [datetime]::Parse([string]$hj.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -lt 30) } catch { } }
-    $hostTaskState = 'bilinmiyor'
     if ($hj) {
-        if ($hj.taskInstalled -eq $true) { $hostTaskState = 'kurulu ve calisiyor' }
-        elseif ($hj.taskInstalled -eq $false) { $hostTaskState = 'KURULU DEGIL' }
-        elseif ($fresh) { $hostTaskState = 'calisiyor (bu oturumda gorunmuyor)' }
-        else { $hostTaskState = 'calismiyor olabilir' }
-    }
-    if ($hostTaskState -eq 'KURULU DEGIL' -or $hostTaskState -eq 'calismiyor olabilir') {
-        [void]$a.Add([pscustomobject]@{ Level = 'bad'; Title = 'Zamanlanmış görev kurulu değil'; Detail = 'RemoteHostWatchdog görevi bulunamadı. Bu görev olmadan kontrol, onarım, alarm ve restart politikası çalışmaz. Kurulum: install\Install-Host.ps1 (yönetici) ya da aşağıdaki Kur işlemi.'; Key = 'host'; Action = 'Kur' })
-    } elseif ($hostTaskState -eq 'calisiyor (bu oturumda gorunmuyor)') {
-        [void]$a.Add([pscustomobject]@{ Level = 'ok'; Title = 'Zamanlanmış görev çalışıyor'; Detail = 'RemoteHostWatchdog SYSTEM hesabına ait olduğu için normal kullanıcı sorgusunda görünmez. Veriler taze (' + [math]::Round(0) + ' dk), yani görev düzenli çalışıyor.'; Key = ''; Action = '' })
+        $fresh = $false
+        try { $fresh = (((Get-Date) - [datetime]::Parse([string]$hj.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -lt 30) } catch { }
+        $hState = 'bilinmiyor'
+        if ($hj.taskInstalled -eq $true) { $hState = 'calisiyor' }
+        elseif ($hj.taskInstalled -eq $false) { $hState = 'KURULU DEGIL' }
+        elseif ($fresh) { $hState = 'gorunmuyor-ama-calisiyor' }
+        else { $hState = 'calismiyor' }
+        if ($hState -eq 'KURULU DEGIL' -or $hState -eq 'calismiyor') {
+            [void]$a.Add([pscustomobject]@{ Level = 'bad'; Title = 'Zamanlanmış görev kurulu değil'; Detail = 'RemoteHostWatchdog görevi bulunamadı. Bu görev olmadan kontrol, onarım, alarm ve restart politikası çalışmaz. Kurulum: install\Install-Host.ps1 (yönetici) ya da aşağıdaki Kur işlemi.'; Key = 'host'; Action = 'Kur' })
+        } elseif ($hState -eq 'gorunmuyor-ama-calisiyor') {
+            [void]$a.Add([pscustomobject]@{ Level = 'ok'; Title = 'Zamanlanmış görev çalışıyor'; Detail = 'RemoteHostWatchdog SYSTEM hesabına ait olduğu için normal kullanıcı sorgusunda görünmez; ancak veriler taze, yani görev düzenli çalışıyor.'; Key = ''; Action = '' })
+        }
     }
     if ($st.Age -and $st.Age.TotalMinutes -gt ([double]$cfg.IntervalMinutes * 3)) {
         [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ('Watchdog donmuyor (' + [math]::Round($st.Age.TotalMinutes) + ' dk once)'); Detail = 'Gorev durmus olabilir veya makine uyuyor.'; Key = 'run'; Action = 'Şimdi denetle' })
@@ -664,7 +664,7 @@ function Get-HelpTopics {
         [pscustomobject]@{ Title = 'Ayar yardımı 7/10 - Sunucu modu'; Text = 'Açık: uyku, hibernasyon ve Fast Startup kapatılır, ağ adaptörü uykuya girmez. Dizüstü kullanıyorsanız kapatın (kurulumda -KeepSleep). Kapalıyken bu kontrol atlanır, zorla restart baskısı oluşmaz.' }
         [pscustomobject]@{ Title = 'Ayar yardımı 8/10 - Belge koruma'; Text = 'Word/Excel belgeleri 2 dakikada bir otomatik kaydedilir. Restart öncesi kaydedilip kapatılır. Kaydedilemeyen belge varsa restart iptal edilir. "Daima zorla kapatma" bu korumayı baypaslar.' }
         [pscustomobject]@{ Title = 'Ayar yardımı 9/10 - Ağ onarımı'; Text = 'Ağ bozulursa sırayla DNS, DHCP, adaptör/sürücü ve winsock onarımı uygulanır. Kademe 5 gerektiğinde restart önerilir. 4. kademe adaptörü sıfırlar; uzak erişiminiz tamamen kesilebilir.' }
-        [pscustomobject]@{ Title = 'Ayar yardımı 10/10 - Dış izleme (heartbeat)'; Text = 'Watchdog kendi bağlantısını kendisi izleyemez; makine sessizce kapanırsa bunu ancak dışarıdan biri fark eder. İki seçenek: (1) healthchecks.io ücretsiz hesabı açıp ping adresini aşağıdaki alana yazın, (2) install klasöründeki github-action-machine-health.yml dosyasını bir repoya kopyalayın; GitHub 15 dakikada bir kontrol eder ve erişilemezse size e-posta ve Telegram ile haber verir. Telegram token girildiyse anlık uyarı zaten çalışır; heartbeat ise "sessizce öldü" durumunu yakalar.' }
+        [pscustomobject]@{ Title = 'Ayar yardımı 10/10 - Bildirimler ve dış izleme'; Text = 'Telegram token ve chat id girerseniz sorunlar anında telefonunuza düşer. Dış izleme (heartbeat) ise tersini yakalar: makine sessizce kapanırsa. healthchecks.io ücretsiz hesabı açıp ping adresini Ayarlar > Bildirim > Healthchecks alanına yazın; ya da install klasöründeki github-action-machine-health.yml dosyasını bir repoya kopyalayın (GitHub 15 dakikada bir kontrol eder, e-posta ve Telegram ile haber verir). Tepsi bildirimleri varsayılan olarak yalnızca kritik olayları gösterir.' }
     )
 }
 
@@ -829,7 +829,8 @@ function Get-Connections {
     if ($cfg.HeartbeatUrl) {
         Add-Conn 'Dış izleme (heartbeat)' 'healthchecks.io ping adresi' 'ok' 'TANIMLI' ([string]$cfg.HeartbeatUrl) 'log' 'Logları aç'
     } else {
-        Add-Conn 'Dış izleme (heartbeat)' 'healthchecks.io veya GitHub Actions' 'none' 'KAPALI - kurun' 'Dışarıdan "makine hâlâ çalışıyor mu" kontrolü yok; makine sessizce ölürse fark edilmez. İki seçenek: (1) healthchecks.io ücretsiz hesap açıp ping adresini Ayarlar'a yazın, (2) install\github-action-machine-health.yml dosyasını bir repoya .github\workflows altına kopyalayın - üçüncü hesap gerekmez, GitHub size e-posta ile haber verir.' 'settings' 'Ayarlar'
+        $hbMsg = 'Kurulmadı. Makine sessizce kapanırsa dışarıdan fark edilmez. Seçenek 1: healthchecks.io ücretsiz hesabı açın, ping adresini Ayarlar > Bildirim > Healthchecks alanına yazın. Seçenek 2 (üçüncü hesap gerekmez): install\github-action-machine-health.yml dosyasını bir repoya .github\workflows altına kopyalayın; GitHub 15 dakikada bir kontrol eder, erişilemezse e-posta ve Telegram ile haber verir.'
+        Add-Conn 'Dış izleme (heartbeat)' 'healthchecks.io veya GitHub Actions' 'none' 'KAPALI - kurun' $hbMsg 'settings' 'Ayarlar'
     }
 
     $cfg = Get-HostConfig
@@ -930,36 +931,33 @@ function Update-Overview {
     (El $script:Win 'RoleBadge').ToolTip = $role.Tip
     (El $script:Win 'TxtOverviewSub').Text = $(if ($role.ClientTask -and -not $role.HostTask) { 'Izlenen uzak makine: ' + $role.RemoteName + '  (' + (@($role.Targets) -join ', ') + ')' } elseif ($hj) { [string]$hj.summary } else { 'Watchdog hic calismadi. "Watchdog kur" ile baslat.' })
 
+    $cards = New-Object System.Collections.ArrayList
     $labels = @{
         'Internet' = 'İnternet erişimi'
-        'Saat senkronu' = 'Saat senkronu'
         'Ag katmani' = 'Ağ katmanı (IP/DNS/HTTPS)'
         'CRD servisi' = 'Google Remote Desktop (CRD)'
-        'Windows RDP' = 'Windows RDP'
-        'Kontrol paneli' = 'Kontrol paneli'
         'Guc/uyku ayarlari' = 'Güç ve uyku ayarları'
-        'VS Code Tunnel' = 'VS Code Tunnel'
+        'Kontrol paneli' = 'Kontrol paneli'
     }
     $hints = @{
-        'CRD servisi' = 'Düzeltmek için: bu makinede Chrome kurun, sonra remotedesktop.google.com/headless -> "Set up remote access". Tarayıcıdaki Google oturumu bu kaydı oluşturmaz.'
+        'CRD servisi' = 'Kırmızıysa cihaz Google hesabına kayıtlı değildir (host.json yok). Bu makinede Chrome kurun, sonra remotedesktop.google.com/headless -> "Set up remote access". Tarayıcıda açık olan Google oturumu bu kaydı oluşturmaz.'
     }
-    $cards = New-Object System.Collections.ArrayList
     if ($hj) {
         foreach ($c in @($hj.checks)) {
             $col = if ($c.skipped) { 'Muted' } elseif ($c.ok) { 'Ok' } else { 'Bad' }
-            $name = [string]$c.name
-            if ($labels.ContainsKey($name)) { $name = $labels[$name] }
-            $repair = [string]$c.repair
-            if ($hints.ContainsKey([string]$c.name)) { $repair = $hints[[string]$c.name] }
-            [void]$cards.Add([pscustomobject]@{ Title = $name; Detail = [string]$c.detail; Repair = $repair; Brush = Bx $col })
+            $nm = [string]$c.name
+            if ($labels.ContainsKey($nm)) { $nm = $labels[$nm] }
+            $rp = [string]$c.repair
+            if ($hints.ContainsKey([string]$c.name)) { $rp = $hints[[string]$c.name] }
+            [void]$cards.Add([pscustomobject]@{ Title = $nm; Detail = [string]$c.detail; Repair = $rp; Brush = Bx $col })
         }
     }
     if ($cj) {
         foreach ($c in @($cj.checks)) {
             $col = if ($c.ok) { 'Ok' } else { 'Bad' }
-            $name = [string]$c.name
-            if ($labels.ContainsKey($name)) { $name = $labels[$name] }
-            [void]$cards.Add([pscustomobject]@{ Title = ($name + ' (istemci)'); Detail = [string]$c.detail; Repair = ''; Brush = Bx $col })
+            $nm = [string]$c.name
+            if ($labels.ContainsKey($nm)) { $nm = $labels[$nm] }
+            [void]$cards.Add([pscustomobject]@{ Title = ($nm + ' (istemci)'); Detail = [string]$c.detail; Repair = ''; Brush = Bx $col })
         }
     }
     $ic = El $script:Win 'Cards'
