@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     RemoteHostWatchdog - UZAK MAKINE tarafi (host)
     Kendini periyodik test eder, bozulan parcalari onarir, olculmezse makineyi yeniden baslatir,
@@ -73,6 +73,9 @@ function Get-Config {
         ServiceCrashRecovery = $true
         RebootAfterFailedCycles = 3
         RebootDelaySeconds = 60
+        MaxRestartsPerDay = 3
+        RebootCooldownMinutes = 60
+        HealthyMinutesToReset = 60
         RebootSkipIfUnregistered = $true
         MinUptimeMinutes = 30
         OfficeSaveBeforeReboot = $true
@@ -120,7 +123,7 @@ function Save-Config {
 }
 
 function Get-State {
-    $s = [pscustomobject]@{ ConsecutiveFailures = 0; CrdNoConnCycles = 0; NetRepairRung = 0; NetResetPendingReboot = 0; LastBootUtc = ''; AlertKey = ''; AlertUtc = ''; LastOkUtc = ''; LastUserNotifyUtc = '' }
+    $s = [pscustomobject]@{ ConsecutiveFailures = 0; CrdNoConnCycles = 0; NetRepairRung = 0; NetResetPendingReboot = 0; RebootsUtc = @(); LastBootUtc = ''; LastHealthyUtc = ''; AlertKey = ''; AlertUtc = ''; LastOkUtc = ''; LastUserNotifyUtc = '' }
     if (Test-Path -LiteralPath $StateFile) {
         try {
             $raw = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json
@@ -614,7 +617,7 @@ function Invoke-Alerts {
         $state.AlertUtc = $now.ToString('o')
         if ($key -eq 'OK') { $state.LastOkUtc = $now.ToString('o') }
         Save-State $state
-        $head = if ($recovered) { '[DUZELDI] ' } elseif ($key -eq 'OK') { '[BILGI] ' } else { '[UYARI] ' }
+        $head = if ($recovered) { '[DUZELDI] ' } elseif ($key -eq 'OK') { '[BİLGİ] ' } else { '[UYARI] ' }
         $text = $head + $env:COMPUTERNAME + ' | ' + $Summary
         Write-Log 'ALERT' $text
         Send-Telegram $text
@@ -776,7 +779,7 @@ function Request-OfficeSave {
     if (-not $cfg.OfficeSaveBeforeReboot) { return $true }
     if (Test-InBlackout) {
         $killed = Stop-OfficeForced
-        $msg = 'blackout saatleri (' + (Get-Date).ToString('dddd HH:mm') + '): zorla yeniden baslatma' + $(if ($killed.Count) { ' - kapatilan: ' + ($killed -join ', ') + ' (kaydedilmemis belge olabilir)' } else { ' - acik ofis uygulamasi yok' })
+        $msg = 'blackout saatleri (' + (Get-Date).ToString('dddd HH:mm') + '): zorla yeniden baslatma' + $(if ($killed.Count) { ' - kapatilan: ' + ($killed -join ', ') + ' (kaydedilmemiş belge olabilir)' } else { ' - acik ofis uygulamasi yok' })
         Write-Log 'ALERT' $msg
         Send-Telegram ('[UYARI] ' + $env:COMPUTERNAME + ' ' + $msg)
         return $true
@@ -787,7 +790,7 @@ function Request-OfficeSave {
         try {
             $ds = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
             if ([int]$ds.unsaved -gt 0) {
-                Write-Log 'ALERT' ('belge koruyucu ' + $ds.unsaved + ' kaydedilmemis belge bildiriyor (' + ((@($ds.names)) -join ', ') + '); reboot yapilmiyor')
+                Write-Log 'ALERT' ('belge koruyucu ' + $ds.unsaved + ' kaydedilmemiş belge bildiriyor (' + ((@($ds.names)) -join ', ') + '); reboot yapilmiyor')
                 if ([bool]$cfg.OfficeAbortRebootIfUnsaved) { return $false }
             }
         } catch { }
@@ -820,11 +823,70 @@ function Request-OfficeSave {
     return $cleared
 }
 
+function Get-RebootBudget {
+    param($State, [datetime]$Now = (Get-Date))
+    $cfg = $global:cfg
+    $list = @()
+    if ($State -and $State.PSObject.Properties.Name -contains 'RebootsUtc') {
+        foreach ($r in @($State.RebootsUtc)) {
+            if (-not $r) { continue }
+            try { $list += [datetime]::Parse([string]$r, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) } catch { }
+        }
+    }
+    $cutoff = $Now.AddHours(-24)
+    $recent = @($list | Where-Object { $_ -gt $cutoff } | Sort-Object)
+    $max = [int]$cfg.MaxRestartsPerDay
+    $cooldown = [double]$cfg.RebootCooldownMinutes
+    $lastGap = [double]::MaxValue
+    if ($recent.Count -gt 0) { $lastGap = ($Now - $recent[-1]).TotalMinutes }
+    return [pscustomobject]@{
+        Count24h = $recent.Count
+        Max = $max
+        LastUtc = $(if ($recent.Count -gt 0) { $recent[-1] } else { $null })
+        MinutesSinceLast = $lastGap
+        CooldownMinutes = $cooldown
+        BudgetExhausted = ($max -gt 0 -and $recent.Count -ge $max)
+        InCooldown = ($cooldown -gt 0 -and $lastGap -lt $cooldown)
+    }
+}
+
+function Get-RebootDecision {
+    param($State, [datetime]$Now = (Get-Date), [string[]]$BadNames = @())
+    $cfg = $global:cfg
+    $b = Get-RebootBudget -State $State -Now $Now
+    if ($b.BudgetExhausted) {
+        return [pscustomobject]@{ Allowed = $false; Reason = 'daily-budget'; Text = ('24 saat icinde ' + $b.Count24h + ' restart yapildi (sinir ' + $b.Max + '); otomatik restart durduruldu, elle mudahale gerek'); Budget = $b }
+    }
+    if ($b.InCooldown) {
+        return [pscustomobject]@{ Allowed = $false; Reason = 'cooldown'; Text = ('son restartan ' + [math]::Round($b.MinutesSinceLast) + ' dk oldu, bekleme suresi ' + $b.CooldownMinutes + ' dk'); Budget = $b }
+    }
+    $policy = [string]$cfg.RestartPolicy
+    if ($policy -eq 'never') { return [pscustomobject]@{ Allowed = $false; Reason = 'policy-never'; Text = 'RestartPolicy = never'; Budget = $b } }
+    if ($policy -eq 'blackout' -and -not (Test-InBlackout -At $Now)) {
+        return [pscustomobject]@{ Allowed = $false; Reason = 'outside-blackout'; Text = 'blackout penceresi disinda restart yapilmaz, sadece bilgilendirilir'; Budget = $b }
+    }
+    return [pscustomobject]@{ Allowed = $true; Reason = 'ok'; Text = ('siyaha girildi; 24 saatte ' + $b.Count24h + '/' + $b.Max + ' restart kullanildi'); Budget = $b }
+}
+
 function Invoke-RebootIfNeeded {
     param([bool]$AllOk)
     $cfg = $global:cfg
     $state = Get-State
-    if ($AllOk) { $state.ConsecutiveFailures = 0; Save-State $state; return }
+    if ($AllOk) {
+        $state.ConsecutiveFailures = 0
+        if ($state.LastHealthyUtc) {
+            try {
+                $lh = [datetime]::Parse([string]$state.LastHealthyUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+                if (((Get-Date) - $lh).TotalMinutes -ge [double]$cfg.HealthyMinutesToReset) {
+                    if (@($state.RebootsUtc).Count -gt 0) { Write-Log 'INFO' ('uzun sure saglikli kaldi, restart butcesi sifirlandi (' + [int]$cfg.HealthyMinutesToReset + ' dk)') }
+                    $state.RebootsUtc = @()
+                }
+            } catch { }
+        } else { $state.LastHealthyUtc = (Get-Date).ToString('o') }
+        $state.LastOkUtc = (Get-Date).ToString('o')
+        Save-State $state
+        return
+    }
     $bad = @($script:Results | Where-Object { -not $_.Ok -and -not $_.Skipped })
     $unregistered = @($bad | Where-Object { $_.Name -eq 'CRD servisi' -and $_.Detail -match 'host_id=YOK' }).Count -gt 0
     if ($unregistered -and $cfg.RebootSkipIfUnregistered) {
@@ -845,22 +907,40 @@ function Invoke-RebootIfNeeded {
         return
     }
     $badNames = ($bad | ForEach-Object { $_.Name }) -join ', '
-    $policy = [string]$cfg.RestartPolicy
-    $inBlackout = Test-InBlackout
-    if ($policy -eq 'never' -or ($policy -eq 'blackout' -and -not $inBlackout)) {
-        Write-Log 'INFO' ('yeniden baslatma yapilmayacak (politika=' + $policy + ', blackout=' + $inBlackout + '); kullaniciya bildiriliyor')
-        Send-UserNotification -Title 'Baglanti sorunu - karar sizin' -Text ('Uzaktan erisim onarilamadi (' + $state.ConsecutiveFailures + ' deneme). Sorun: ' + $badNames + '. Bilgisayarı istediginiz zaman yeniden baslatabilirsiniz; zorla kapatma yapilmadi.')
+    $decision = Get-RebootDecision -State $state -Now (Get-Date) -BadNames @($bad | ForEach-Object { $_.Name })
+    if (-not $decision.Allowed) {
+        if ($decision.Reason -eq 'outside-blackout' -or $decision.Reason -eq 'policy-never') {
+            Write-Log 'INFO' ('yeniden başlatma yapılmayacak (' + $decision.Text + '); kullanıcıya bildiriliyor')
+            Send-UserNotification -Title 'Bağlantı sorunu - karar sizin' -Text ('Uzaktan erişim onarılamadı (' + $state.ConsecutiveFailures + ' deneme). Sorun: ' + $badNames + '. Bilgisayarı istediğiniz zaman yeniden başlatabilirsiniz; zorla kapatma yapılmadı.')
+            $state.ConsecutiveFailures = 0
+            Save-State $state
+            return
+        }
+        Write-Log 'ALERT' ('yeniden başlatma DURDURULDU (devre kesici): ' + $decision.Text)
+        Send-UserNotification -Title 'Otomatik restart durduruldu' -Text ($decision.Text + '. Sorun: ' + $badNames + '. Elle müdahale gerekiyor; bütçe veya bekleme süresi dolunca yeniden değerlendirilecek.')
         $state.ConsecutiveFailures = 0
         Save-State $state
         return
     }
-    Send-Telegram ('[KRITIK] ' + $env:COMPUTERNAME + ' ' + $state.ConsecutiveFailures + ' kez onarilamadi, ' + $cfg.RebootDelaySeconds + ' sn sonra yeniden baslatiliyor')
+    Write-Log 'INFO' ('restart kararı: ' + $decision.Text)
+    Send-Telegram ('[KRİTİK] ' + $env:COMPUTERNAME + ' ' + $state.ConsecutiveFailures + ' kez onarılamadı, ' + $cfg.RebootDelaySeconds + ' sn sonra yeniden başlatılıyor')
     if (-not (Request-OfficeSave -TimeoutSeconds ([int]$cfg.OfficeSaveTimeoutSeconds))) {
-        Write-Log 'ALERT' 'yeniden baslatma iptal edildi: Word/Excel belgeleri kaydedilemedi (kayip olmamasi icin durduruldu)'
-        Send-Telegram ('[UYARI] ' + $env:COMPUTERNAME + ' yeniden baslatma iptal: kaydedilmemis Word/Excel belgesi var, once kaydedip kapatin')
+        Write-Log 'ALERT' 'yeniden başlatma iptal edildi: Word/Excel belgeleri kaydedilemedi (kayıp olmaması için durduruldu)'
+        Send-Telegram ('[UYARI] ' + $env:COMPUTERNAME + ' yeniden başlatma iptal: kaydedilmemiş Word/Excel belgesi var, önce kaydedip kapatın')
         return
     }
-    Write-Log 'ALERT' ('yeniden baslatma tetiklendi: ' + $cfg.RebootDelaySeconds + ' sn sonra')
+    $hist = @()
+    if ($state.PSObject.Properties.Name -contains 'RebootsUtc') { $hist = @($state.RebootsUtc) }
+    $cutoff = (Get-Date).AddHours(-24)
+    $kept = @()
+    foreach ($r in $hist) {
+        if (-not $r) { continue }
+        try { if ([datetime]::Parse([string]$r, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) -gt $cutoff) { $kept += [string]$r } } catch { }
+    }
+    $kept += (Get-Date).ToString('o')
+    $state.RebootsUtc = $kept
+    Save-State $state
+    Write-Log 'ALERT' ('yeniden başlatma tetiklendi: ' + $cfg.RebootDelaySeconds + ' sn sonra (24 saatte ' + $kept.Count + '/' + [int]$cfg.MaxRestartsPerDay + ' restart)')
     shutdown.exe /r /t $cfg.RebootDelaySeconds /c 'RemoteHostWatchdog: onarilamayan baglanti sorunu' 2>&1 | Out-Null
 }
 
@@ -985,7 +1065,7 @@ function Install-Watchdog {
     $prn = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $stg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName $TaskName -Action $act -Trigger @($trgStartup, $trgLogon, $trgRep) -Principal $prn -Settings $stg -Force | Out-Null
-    Write-Log 'INFO' ('zamanlanmis gorev kuruldu: ' + $TaskName + ' (acilista + oturum acilista + her ' + $IntervalMinutes + ' dk)')
+    Write-Log 'INFO' ('zamanlanmış görev kuruldu: ' + $TaskName + ' (acilista + oturum acilista + her ' + $IntervalMinutes + ' dk)')
     $saver = Join-Path (Split-Path -Parent $ScriptPath) 'Protect-OpenDocuments.ps1'
     if (Test-Path -LiteralPath $saver) {
     $officeTask = 'RemoteHostOfficeSaver'
@@ -1052,8 +1132,8 @@ if ($ForceReboot) {
     Write-Log 'ALERT' ('elle restart istendi (pano butonu), gecikmeli yeniden baslatma: ' + $cfg.RebootDelaySeconds + ' sn')
     Send-Telegram ('[BILDIRIM] ' + $env:COMPUTERNAME + ' elle restart istendi, ' + $cfg.RebootDelaySeconds + ' sn sonra yeniden baslatilacak')
     if (-not (Request-OfficeSave -TimeoutSeconds ([int]$cfg.OfficeSaveTimeoutSeconds))) {
-        Write-Log 'ALERT' 'elle restart iptal: kaydedilmemis belge var, once kaydedip kapatin'
-        Send-Telegram ('[UYARI] ' + $env:COMPUTERNAME + ' restart iptal: kaydedilmemis Word/Excel belgesi var')
+        Write-Log 'ALERT' 'elle restart iptal: kaydedilmemiş belge var, once kaydedip kapatin'
+        Send-Telegram ('[UYARI] ' + $env:COMPUTERNAME + ' restart iptal: kaydedilmemiş Word/Excel belgesi var')
         exit 1
     }
     shutdown.exe /r /t $cfg.RebootDelaySeconds /c 'RemoteHostWatchdog: kullanici restart istedi' 2>&1 | Out-Null

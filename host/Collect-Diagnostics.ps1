@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     Collect-Diagnostics - "uzak masaustu neden koptu" tehis paketi
     Hicbir ayari degistirmez; yalnizca okur ve tek bir rapor dosyasi yazar.
@@ -185,7 +185,7 @@ if ($gaps.Count -gt 0) {
     if ($wlanDisc.Count -gt 20) { Add-Suspect ('Wi-Fi 14 günde ' + $wlanDisc.Count + ' kez koptu; CRD her kopmada oturumu dusurur, adaptor guc modu ve yonlendirici DHCP suresi gozden gecirilmeli') 'orta' }
 }
 $ndr = Get-Events -Log 'System' -Ids @(27, 32, 10400, 10401, 4201, 4202) -Max 40
-if ($ndr.Count -gt 0) { Add-Suspect ('Ag adaptoru/link olayi: ' + $ndr.Count + ' adet') 'orta' }
+if ($ndr.Count -gt 0) { Add-Suspect ('Ağ adaptörü/link olayi: ' + $ndr.Count + ' adet') 'orta' }
 Event-Lines ($wlanDisc | Select-Object -Last 12 | Sort-Object TimeCreated -Descending)
 
 Add-Section '4b. Acik kalinca internet gidiyor / restart duzeliyor olcumu'

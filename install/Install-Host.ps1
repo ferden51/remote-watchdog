@@ -1,9 +1,9 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
-    Install-Host - UZAK BILGISAYAR kurulumu (fiziksel erisim gerekir)
+    Install-Host - UZAK BİLGİSAYAR kurulumu (fiziksel erisim gerekir)
 
     Sirasiyla yapar:
-      1) Tehis raporu uretir (okuma modunda, degisiklik yapmaz) - "kopma nedeni" icin
+      1) Teşhis raporu üretir (okuma modunda, degisiklik yapmaz) - "kopma nedeni" icin
       2) Host watchdog zamanlanmis gorevini kurar (admin, 5 dk'da bir, otomatik onarim + alarm)
       3) Belge koruyucu gorevini kurar (Word/Excel kaydetme-koruma)
       4) Tray kontrol panelini oturum acilinda baslatir
@@ -43,7 +43,7 @@ function Is-Admin {
 }
 
 Write-Host '=============================================='
-Write-Host ' RemoteWatchdog - UZAK BILGISAYAR KURULUMU'
+Write-Host ' RemoteWatchdog - UZAK BİLGİSAYAR KURULUMU'
 Write-Host (' Bilgisayar: ' + $env:COMPUTERNAME + ' | Kullanici: ' + $env:USERNAME)
 Write-Host '=============================================='
 
@@ -97,7 +97,7 @@ if ($TelegramToken) { $args += @('-TelegramToken', ('"' + $TelegramToken + '"'))
 if ($TelegramChatId) { $args += @('-TelegramChatId', ('"' + $TelegramChatId + '"')) }
 if ($KeepSleep) { $args += '-KeepSleep' }
 $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $args -Wait -PassThru -WindowStyle Hidden
-if ($p.ExitCode -eq 0) { Ok 'zamanlanmis gorev kuruldu (acilista + oturum acilista + her ' + $IntervalMinutes + ' dk)' } else { Warn ('kurulum donus kodu: ' + $p.ExitCode) }
+if ($p.ExitCode -eq 0) { Ok 'zamanlanmış görev kuruldu (acilista + oturum acilista + her ' + $IntervalMinutes + ' dk)' } else { Warn ('kurulum donus kodu: ' + $p.ExitCode) }
 
 $cfgPath = 'C:\ProgramData\RemoteWatchdog'
 if (Test-Path -LiteralPath $cfgPath) {
@@ -109,9 +109,9 @@ if (Test-Path -LiteralPath $cfgPath) {
 Start-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 5
 $task = Get-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue
-if ($task) { Ok ('gorev durumu: ' + $task.State) } else { Die 'gorev olusmadi' }
-if (Get-ScheduledTask -TaskName 'RemoteHostOfficeSaver' -ErrorAction SilentlyContinue) { Ok 'belge koruyucu gorevi kuruldu' } else { Warn 'belge koruyucu gorevi kurulmadi (belge kaydetme korumasi kapali)' }
-if (Get-Service -Name 'chromoting' -ErrorAction SilentlyContinue) { Warn 'CRD: cihaz yeniden kaydedilmemis gorunuyor -> asagidaki 5. adim zorunlu' }
+if ($task) { Ok ('görev durumu: ' + $task.State) } else { Die 'gorev olusmadi' }
+if (Get-ScheduledTask -TaskName 'RemoteHostOfficeSaver' -ErrorAction SilentlyContinue) { Ok 'belge koruyucu görevi kuruldu' } else { Warn 'belge koruyucu gorevi kurulmadi (belge kaydetme korumasi kapali)' }
+if (Get-Service -Name 'chromoting' -ErrorAction SilentlyContinue) { Warn 'CRD: cihaz yeniden kaydedilmemiş gorunuyor -> asagidaki 5. adim zorunlu' }
 
 Step '3) Belge koruyucu kontrolu'
 & powershell -NoProfile -ExecutionPolicy Bypass -File $DocsScript -Status | Out-String | Write-Host
@@ -121,7 +121,7 @@ if ($SkipTray) { Warn 'atlandi (-SkipTray)' }
 else {
     $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
     & powershell -NoProfile -ExecutionPolicy Bypass -File $TrayScript -Install | Out-Null
-    if (Get-ItemProperty -Path $runKey -Name 'RemoteWatchdogTray' -ErrorAction SilentlyContinue) { Ok 'tray oturum acilinda baslayacak' } else { Warn 'tray kaydi olusmadi (farkli yonetici hesabi ile calistirilmis olabilir)' }
+    if (Get-ItemProperty -Path $runKey -Name 'RemoteWatchdogTray' -ErrorAction SilentlyContinue) { Ok 'panel oturum açılışında başlayacak' } else { Warn 'tray kaydi olusmadi (farkli yonetici hesabi ile calistirilmis olabilir)' }
     $vbs = Join-Path (Split-Path -Parent $TrayScript) 'Start-Panel.vbs'
     if (Test-Path -LiteralPath $vbs) {
         Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $vbs + '"')
@@ -131,7 +131,7 @@ else {
     }
 }
 
-Step '5) Google Remote Desktop kaydi (ZORUNLU)'
+Step '5) Google Remote Desktop kaydı (ZORUNLU)'
 Write-Host '    1) Bu makinede Chrome ac:  https://remotedesktop.google.com/headless'
 Write-Host '    2) "Set up remote access" / "Uzaktan erisimi ayarla" -> bir ad ve PIN verir'
 Write-Host '    3) Kendi cihazinda https://remotedesktop.google.com -> Machines altindaki "+" -> ad + PIN'
@@ -145,4 +145,4 @@ Ok ('log: C:\ProgramData\RemoteWatchdog\host-watchdog.log')
 Ok 'durum: tray paneli veya  powershell -File "' + $HostScript + '" -Status'
 if (-not $TelegramToken) { Warn 'Telegram bildirimi kapali; ekranda uyari gorunur. Eklemek icin: Install-Host.ps1 -TelegramToken ... -TelegramChatId ...' }
 Write-Host ''
-Write-Host 'Kurulum tamamlandi.' -ForegroundColor Green
+Write-Host 'Kurulum tamamlandı.' -ForegroundColor Green

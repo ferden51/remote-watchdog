@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     RemoteClientWatchdog - YEREL (istemci) taraf
     Uzak makineye erisimi periyodik test eder, erisilemiyorsa Telegram/e-posta uyarisi gonderir,
@@ -137,7 +137,7 @@ function Test-RemoteTargets {
         $up = Test-TcpPort -HostName $h -Port $p -TimeoutMs 4000
         $sw.Stop()
         if (-not $up) { $all = $false }
-        $tag = if ($up) { 'ULASILABILIR' } else { 'ULASILAMIYOR' }
+        $tag = if ($up) { 'ULAŞILABİLİR' } else { 'ULAŞILAMIYOR' }
         Add-Result ($h + ':' + $p) $up $tag $(if ($up) { [string]$sw.ElapsedMilliseconds + ' ms' } else { '4 sn timeout' })
         [void]$results.Add([ordered]@{ target = ([string]$h + ':' + $p); ok = [bool]$up; ms = [int]$sw.ElapsedMilliseconds })
     }

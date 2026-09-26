@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     Protect-OpenDocuments - Kaydedilmemis belge riskine karsi kullanici oturumunda calisir.
 
@@ -129,8 +129,8 @@ function Invoke-Protect {
     $snap = Get-OfficeSnapshot
     Save-StateFile $snap
     if ($snap.SavedNow -gt 0) { Write-Log 'INFO' ('kaydedilmemiis ' + $snap.SavedNow + ' belge diske yazildi: ' + ($script:Saved -join ', ')) }
-    if ($snap.Unsaved -eq 0) { Write-Log 'INFO' ('Word=' + $(if ($snap.WordOpen) { 'acik' } else { 'kapali' }) + ', Excel=' + $(if ($snap.ExcelOpen) { 'acik' } else { 'kapali' }) + ', kaydedilmemis belge yok') }
-    else { Write-Log 'WARN' ('kaydedilmemis belge var (' + $snap.Unsaved + '): ' + ($snap.Names -join ', ') + $(if ($snap.Failed.Count) { ' | sorunlu: ' + (@($snap.Failed) -join '; ') } else { '' })) }
+    if ($snap.Unsaved -eq 0) { Write-Log 'INFO' ('Word=' + $(if ($snap.WordOpen) { 'acik' } else { 'kapali' }) + ', Excel=' + $(if ($snap.ExcelOpen) { 'acik' } else { 'kapali' }) + ', kaydedilmemiş belge yok') }
+    else { Write-Log 'WARN' ('kaydedilmemiş belge var (' + $snap.Unsaved + '): ' + ($snap.Names -join ', ') + $(if ($snap.Failed.Count) { ' | sorunlu: ' + (@($snap.Failed) -join '; ') } else { '' })) }
     return 0
 }
 
@@ -162,7 +162,7 @@ function Invoke-SaveAndClose {
 if ($Status) {
     $snap = Get-OfficeSnapshot
     Write-Host ('Word: ' + $(if ($snap.WordOpen) { 'acik' } else { 'kapali' }) + ' | Excel: ' + $(if ($snap.ExcelOpen) { 'acik' } else { 'kapali' }))
-    Write-Host ('kaydedilmemis: ' + $snap.Unsaved + ' | kayitli: ' + $snap.Saved)
+    Write-Host ('kaydedilmemiş: ' + $snap.Unsaved + ' | kayitli: ' + $snap.Saved)
     if ($snap.Names.Count) { Write-Host ('  ' + ($snap.Names -join ', ')) }
     if ($snap.Failed.Count) { Write-Host ('  sorunlu: ' + (@($snap.Failed) -join '; ')) }
     Write-Host ('reboot istegi bekliyor mu: ' + (Test-Path -LiteralPath $RequestFile))

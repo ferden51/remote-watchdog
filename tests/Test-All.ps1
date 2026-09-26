@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     Test-All - RemoteWatchdog fonksiyon testleri (okuma modunda, hicbir sey degistirmez)
 
@@ -159,6 +159,33 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok ('powercfg okunabildi (STANDBYIDLE=' + $pwr + ')') ($null -ne $pwr)
     $gc = Get-Config
     Ok 'Get-Config varsayilanlar donduruyor' (($gc.RestartPolicy -eq 'blackout') -and ($gc.RebootAfterFailedCycles -eq 3) -and ($gc.OfficeSaveBeforeReboot -eq $true))
+    Ok 'Get-Config devre kesici varsayilanlari' (($gc.MaxRestartsPerDay -eq 3) -and ($gc.RebootCooldownMinutes -eq 60) -and ($gc.HealthyMinutesToReset -eq 60))
+    foreach ($code in (Get-FnCode $Host_ @('Get-RebootBudget', 'Get-RebootDecision'))) { Invoke-Expression $code }
+    $now = [datetime]'2026-09-26T23:30:00'
+    $global:cfg = [pscustomobject]@{ MaxRestartsPerDay = 3; RebootCooldownMinutes = 60; RestartPolicy = 'always'; BlackoutEnabled = $true; BlackoutStart = 18; BlackoutEnd = 8; BlackoutNights = @('Pzt', 'Sal', 'Car', 'Per', 'Cum', 'Cmt', 'Paz'); BlackoutFullDays = @('Cmt', 'Paz'); HolidayMode = 'full'; ForceRestartAlways = $false; ForceRestartUntil = '' }
+    $st0 = [pscustomobject]@{ RebootsUtc = @() }
+    $d1 = Get-RebootDecision -State $st0 -Now $now
+    Ok ('restart karari: ilk seferinde izin verilmeli -> ' + $d1.Reason) ([bool]$d1.Allowed)
+    $st3 = [pscustomobject]@{ RebootsUtc = @('2026-09-26T18:00:00', '2026-09-26T20:00:00', '2026-09-26T22:00:00') }
+    $d2 = Get-RebootDecision -State $st3 -Now $now
+    Ok ('devre kesici: 24 saatte 3 restart sinirina ulasildi -> ' + $d2.Reason) (-not $d2.Allowed -and $d2.Reason -eq 'daily-budget')
+    $st1 = [pscustomobject]@{ RebootsUtc = @('2026-09-26T23:00:00') }
+    $d3 = Get-RebootDecision -State $st1 -Now $now
+    Ok ('devre kesici: 30 dk once restart yapildi, bekleme suresi gerekli -> ' + $d3.Reason) (-not $d3.Allowed -and $d3.Reason -eq 'cooldown')
+    $stOld = [pscustomobject]@{ RebootsUtc = @('2026-09-20T10:00:00', '2026-09-24T10:00:00') }
+    $d4 = Get-RebootDecision -State $stOld -Now $now
+    Ok ('devre kesici: 24 saatten eski kayitlar sayilmaz -> ' + $d4.Reason) ([bool]$d4.Allowed)
+    $global:cfg.RestartPolicy = 'never'
+    $d5 = Get-RebootDecision -State $st0 -Now $now
+    Ok 'devre kesici: RestartPolicy=never hicbir zaman restart etmez' (-not $d5.Allowed)
+    $global:cfg.RestartPolicy = 'blackout'
+    $gunduz = [datetime]'2026-09-28T12:00:00'
+    $d6 = Get-RebootDecision -State $st0 -Now $gunduz
+    Ok ('devre kesici: gunduz (blackout disi) restart olmaz -> ' + $d6.Reason) (-not $d6.Allowed -and $d6.Reason -eq 'outside-blackout')
+    $global:cfg.MaxRestartsPerDay = 0
+    $d7 = Get-RebootDecision -State $st3 -Now $now
+    Ok 'devre kesici: MaxRestartsPerDay=0 ile sinir kaldirilir' ([bool]$d7.Allowed)
+    $global:cfg.MaxRestartsPerDay = 3
     foreach ($code in (Get-FnCode $Host_ @('Get-PanelProcesses'))) { Invoke-Expression $code }
     $global:cfg = [pscustomobject]@{ PanelScriptName = 'RemoteWatchdogPanel.ps1' }
     $pp = @(Get-PanelProcesses)
@@ -242,16 +269,16 @@ if ($Section -eq 0 -or $Section -eq 3) {
         $rows = @(Get-Connections)
         Ok ('Get-Connections: ' + $rows.Count + ' satir dondu') ($rows.Count -ge 8)
         $names = @($rows | ForEach-Object { $_.Name })
-        foreach ($need in @('Internet erisimi', 'DNS cozumlemesi', 'CRD sinyal yolu', 'Google Remote Desktop kaydi', 'CRD canli baglantisi', 'Windows RDP')) {
+        foreach ($need in @('İnternet erişimi', 'DNS çözümlemesi', 'CRD sinyal yolu', 'Google Remote Desktop kaydı', 'CRD canlı bağlantısı', 'Windows RDP')) {
             Ok ('Get-Connections satir: ' + $need) ($names -contains $need)
         }
         $noMeasure = @($rows | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Measure) })
         Ok ('Get-Connections: her satirda olcum var (eksik=' + $noMeasure.Count + ')') ($noMeasure.Count -eq 0)
         $badBrush = @($rows | Where-Object { $null -eq $_.Brush -or $null -eq $_.StateFg })
         Ok 'Get-Connections: her satirda renkler var' ($badBrush.Count -eq 0)
-        $msRow = $rows | Where-Object { $_.Name -eq 'IP erisimi' } | Select-Object -First 1
+        $msRow = $rows | Where-Object { $_.Name -eq 'IP erişimi' } | Select-Object -First 1
         Ok ('Get-Connections: gecikme olcumu "' + $msRow.Measure + '"') ([string]$msRow.Measure -match '\d+ ms')
-        $crdRow = $rows | Where-Object { $_.Name -eq 'Google Remote Desktop kaydi' } | Select-Object -First 1
+        $crdRow = $rows | Where-Object { $_.Name -eq 'Google Remote Desktop kaydı' } | Select-Object -First 1
         Ok ('Get-Connections: CRD kaydi durumu "' + $crdRow.StateText + '"') ($crdRow.StateText -in @('KAYITLI', 'KAYITSIZ'))
         $act = @(Get-Actions)
         Ok ('Get-Actions: ' + $act.Count + ' madde') ($act.Count -ge 1)
@@ -269,7 +296,9 @@ if ($Section -eq 0 -or $Section -eq 3) {
         $installed = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -in @('RemoteHostWatchdog', 'RemoteClientWatchdog') })
         $hj3 = Get-Json (Join-Path $env:ProgramData 'RemoteWatchdog\last-run.json')
         $hostSaysInstalled = ($null -ne $hj3 -and [bool]$hj3.taskInstalled)
-        if ($installed.Count -gt 0 -or $hostSaysInstalled) { Ok ('rol tespiti kurulu host/istemciyi dogru tanidi: ' + $role.RoleText) ($role.Role -in @('host', 'client', 'both')) }
+        $hostFresh = $false
+        if ($hj3 -and $hj3.generated) { try { $hostFresh = (((Get-Date) - [datetime]::Parse([string]$hj3.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -lt 30) } catch { } }
+        if ($installed.Count -gt 0 -or $hostSaysInstalled -or $hostFresh) { Ok ('rol tespiti kurulu host/istemciyi dogru tanidi: ' + $role.RoleText) ($role.Role -in @('host', 'client', 'both')) }
         else { Ok ('rol tespiti: bu makinede host/istemci kurulu degil (beklenen: ' + $role.RoleText + ')') ($role.Role -eq 'manual' -or $role.Role -eq 'none') }
         Ok 'rol tespiti SYSTEM gorevini JSON uzerinden goruyor (yukseltilmis olmayan panelde de dogru)' ($role.Role -ne 'manual' -or -not $hostSaysInstalled)
     }

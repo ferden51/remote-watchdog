@@ -1,6 +1,6 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
-    Install-Client - KENDI BILGISAYARIN kurulumu (admin gerektirmez)
+    Install-Client - KENDI BİLGİSAYARIN kurulumu (admin gerektirmez)
 
     Yapar:
       1) Istemci watchdog zamanlanmis gorevini kurar (uzak makineye TCP erisim testi + kopma alarmi)
@@ -63,18 +63,18 @@ if ($TelegramToken) { $a += @('-TelegramToken', ('"' + $TelegramToken + '"')) }
 if ($TelegramChatId) { $a += @('-TelegramChatId', ('"' + $TelegramChatId + '"')) }
 if ($HeartbeatUrl) { $a += @('-HeartbeatUrl', ('"' + $HeartbeatUrl + '"')) }
 $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $a -Wait -PassThru -WindowStyle Hidden
-if ($p.ExitCode -eq 0) { Ok ('zamanlanmis gorev kuruldu (her ' + $IntervalMinutes + ' dk)') } else { Warn ('kurulum donus kodu: ' + $p.ExitCode) }
+if ($p.ExitCode -eq 0) { Ok ('zamanlanmış görev kuruldu (her ' + $IntervalMinutes + ' dk)') } else { Warn ('kurulum donus kodu: ' + $p.ExitCode) }
 Start-ScheduledTask -TaskName 'RemoteClientWatchdog' -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 3
 $task = Get-ScheduledTask -TaskName 'RemoteClientWatchdog' -ErrorAction SilentlyContinue
-if ($task) { Ok ('gorev durumu: ' + $task.State) } else { Warn 'gorev olusmadi' }
+if ($task) { Ok ('görev durumu: ' + $task.State) } else { Warn 'gorev olusmadi' }
 if ($Target) { Ok ('hedef: ' + $Target + ' (bu adresin TCP erisimi test edilecek)') } else { Warn 'hedef tanimli degil: sadece Google/CRD sinyal yolu test edilir' }
 
 Step '2) Tray kontrol paneli'
 if ($SkipTray) { Warn 'atlandi (-SkipTray)' }
 else {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $TrayScript -Install | Out-Null
-    if (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'RemoteWatchdogTray' -ErrorAction SilentlyContinue) { Ok 'tray oturum acilinda baslayacak' } else { Warn 'tray kaydi olusmadi' }
+    if (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'RemoteWatchdogTray' -ErrorAction SilentlyContinue) { Ok 'panel oturum açılışında başlayacak' } else { Warn 'tray kaydi olusmadi' }
     Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-STA', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $TrayScript + '"')) | Out-Null
     Ok 'tray baslatildi, panel acik'
 }
@@ -83,4 +83,4 @@ Step 'Ozet'
 Ok ('config: ' + (Join-Path $env:LOCALAPPDATA 'RemoteClientWatchdog\config.json'))
 Ok ('log: ' + (Join-Path $env:LOCALAPPDATA 'RemoteClientWatchdog\client-watchdog.log'))
 Write-Host ''
-Write-Host 'Kurulum tamamlandi.' -ForegroundColor Green
+Write-Host 'Kurulum tamamlandı.' -ForegroundColor Green

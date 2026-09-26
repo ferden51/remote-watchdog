@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     Enable-ConsoleAutoLogon - Watchdog reboot yaptiktan sonra makinenin kendi
     oturumunu acmasi icin otomatik konsol girisini acar. Yalnizca fiziksel erisimi

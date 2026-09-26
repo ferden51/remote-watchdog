@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     RemoteWatchdogPanel - RemoteWatchdog icin modern kontrol paneli (WPF, koyu tema)
 
@@ -125,11 +125,17 @@ function Get-RoleInfo {
     $clientData = [ordered]@{}
     if ($ClientConfig -and (Test-Path -LiteralPath $ClientConfig)) { $clientData = Read-ConfigFile $ClientConfig }
     $hostInstalled = $false
-    if ($hj -and $null -ne $hj.taskInstalled) { $hostInstalled = [bool]$hj.taskInstalled }
-    elseif ($null -ne $hj -and ((Get-Date) - [datetime]::Parse([string]$hj.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -lt 30) { $hostInstalled = $true }
-    else { $hostInstalled = [bool](Get-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue) }
+    if ($hj -and $hj.generated) {
+        try { $hostInstalled = (((Get-Date) - [datetime]::Parse([string]$hj.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -lt 30) } catch { }
+    }
+    if (-not $hostInstalled -and $hj -and $null -ne $hj.taskInstalled) { $hostInstalled = [bool]$hj.taskInstalled }
+    if (-not $hostInstalled) { $hostInstalled = [bool](Get-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue) }
     $clientTask = Get-ScheduledTask -TaskName 'RemoteClientWatchdog' -ErrorAction SilentlyContinue
-    $clientInstalled = ([bool]$clientTask) -or ($null -ne $cj) -or $clientData.Contains('Targets')
+    $clientFresh = $false
+    if ($cj -and $cj.generated) {
+        try { $clientFresh = (((Get-Date) - [datetime]::Parse([string]$cj.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -lt 30) } catch { }
+    }
+    $clientInstalled = ([bool]$clientTask) -or $clientFresh -or $clientData.Contains('Targets')
     $targets = @()
     if ($clientData.Contains('Targets')) { $targets = @($clientData['Targets']) }
     $remoteName = 'uzak makine'
@@ -159,7 +165,8 @@ function Get-Json {
 
 function Get-HostConfig {
     $cfg = [ordered]@{
-        IntervalMinutes = 5; RestartPolicy = 'blackout'; BlackoutEnabled = $true; BlackoutStart = 18; BlackoutEnd = 8
+        IntervalMinutes = 5;         RestartPolicy = 'blackout'; BlackoutEnabled = $true; BlackoutStart = 18; BlackoutEnd = 8
+        MaxRestartsPerDay = 3; RebootCooldownMinutes = 60; HealthyMinutesToReset = 60
         BlackoutFullDays = @('Cmt', 'Paz'); BlackoutNights = @('Pzt', 'Sal', 'Car', 'Per', 'Cum', 'Cmt', 'Paz')
         HolidayMode = 'full'; Holidays = @(); HolidaysFile = ''
         RebootAfterFailedCycles = 3; RebootDelaySeconds = 60; MinUptimeMinutes = 30; RebootSkipIfUnregistered = $true
@@ -234,25 +241,25 @@ function Get-Actions {
     }
     if (-not $hj.taskInstalled) { [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = 'Zamanlanmis gorev kurulu degil'; Detail = 'Kontrol sadece elle calistikca yapiliyor.'; Key = 'host'; Action = 'Kur' }) }
     if ($st.Age -and $st.Age.TotalMinutes -gt ([double]$cfg.IntervalMinutes * 3)) {
-        [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ('Watchdog donmuyor (' + [math]::Round($st.Age.TotalMinutes) + ' dk once)'); Detail = 'Gorev durmus olabilir veya makine uyuyor.'; Key = 'run'; Action = 'Simdi denetle' })
+        [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ('Watchdog donmuyor (' + [math]::Round($st.Age.TotalMinutes) + ' dk once)'); Detail = 'Gorev durmus olabilir veya makine uyuyor.'; Key = 'run'; Action = 'Şimdi denetle' })
     }
     foreach ($c in @($hj.checks)) {
         if ($c.ok -or $c.skipped) { continue }
         $key = 'run'
-        $act = 'Loglari ac'
-        if ($c.name -eq 'CRD servisi' -and [string]$c.detail -match 'host_id=YOK') { $key = 'crd'; $act = 'CRD sayfasi'; $lvl = 'bad' } else { $lvl = 'warn' }
-        if ($c.name -match 'Ag katmani') { $key = 'run'; $act = 'Ag onarimi' }
+        $act = 'Logları aç'
+        if ($c.name -eq 'CRD servisi' -and [string]$c.detail -match 'host_id=YOK') { $key = 'crd'; $act = 'CRD sayfası'; $lvl = 'bad' } else { $lvl = 'warn' }
+        if ($c.name -match 'Ag katmani') { $key = 'run'; $act = 'Ağ onarımı' }
         [void]$a.Add([pscustomobject]@{ Level = $lvl; Title = $c.name; Detail = [string]$c.detail; Key = $key; Action = $act })
     }
     $docsState = Join-Path $env:windir 'Temp\RemoteWatchdog-docs.json'
     if (Test-Path -LiteralPath $docsState) {
         try {
             $ds = Get-Content -LiteralPath $docsState -Raw -Encoding UTF8 | ConvertFrom-Json
-            if ([int]$ds.unsaved -gt 0) { [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ($ds.unsaved + ' kaydedilmemis belge'); Detail = (@($ds.names) -join ', '); Key = 'docs'; Action = 'Kaydet ve kapat' }) }
+            if ([int]$ds.unsaved -gt 0) { [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ($ds.unsaved + ' kaydedilmemiş belge'); Detail = (@($ds.names) -join ', '); Key = 'docs'; Action = 'Kaydet ve kapat' }) }
         } catch { }
     }
-    if ($hj.state -and [int]$hj.state.netResetPendingReboot -eq 1) { [void]$a.Add([pscustomobject]@{ Level = 'bad'; Title = 'winsock/IP reset uygulandi'; Detail = 'Etkisi icin makine yeniden baslatilmali.'; Key = 'reboot'; Action = 'Yeniden baslat' }) }
-    if ($hj.state -and [int]$hj.state.consecutiveFailures -gt 0) { [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ('Ardisik basarisiz deneme: ' + $hj.state.consecutiveFailures); Detail = 'Blackout saatlerinde otomatik restart yapilir, disinda sadece bilgilendirilir.'; Key = 'reboot'; Action = 'Yeniden baslat' }) }
+    if ($hj.state -and [int]$hj.state.netResetPendingReboot -eq 1) { [void]$a.Add([pscustomobject]@{ Level = 'bad'; Title = 'winsock/IP reset uygulandi'; Detail = 'Etkisi icin makine yeniden baslatilmali.'; Key = 'reboot'; Action = 'Yeniden başlat' }) }
+    if ($hj.state -and [int]$hj.state.consecutiveFailures -gt 0) { [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ('Ardisik basarisiz deneme: ' + $hj.state.consecutiveFailures); Detail = 'Blackout saatlerinde otomatik restart yapilir, disinda sadece bilgilendirilir.'; Key = 'reboot'; Action = 'Yeniden başlat' }) }
     if ($a.Count -eq 0) { [void]$a.Add([pscustomobject]@{ Level = 'ok'; Title = 'Bekleyen is yok'; Detail = 'Her sey yolunda.'; Key = ''; Action = '' }) }
     return $a
 }
@@ -514,8 +521,8 @@ $Xaml = @'
           </Border>
         </StackPanel>
         <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
-          <Button x:Name="BtnCheck" Content="Simdi denetle" Style="{StaticResource BtnAccent}" Margin="0,0,8,0"/>
-          <Button x:Name="BtnReboot" Content="Yeniden baslat" Style="{StaticResource BtnDanger}"/>
+          <Button x:Name="BtnCheck" Content="Şimdi denetle" Style="{StaticResource BtnAccent}" Margin="0,0,8,0"/>
+          <Button x:Name="BtnReboot" Content="Yeniden başlat" Style="{StaticResource BtnDanger}"/>
         </StackPanel>
       </Grid>
     </Border>
@@ -529,11 +536,11 @@ $Xaml = @'
         <Grid>
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <StackPanel Grid.Row="0">
-            <Button x:Name="NavConn" Content="Baglantilar" Style="{StaticResource Nav}" Tag="conn" Margin="0,0,0,4"/>
+            <Button x:Name="NavConn" Content="Bağlantılar" Style="{StaticResource Nav}" Tag="conn" Margin="0,0,0,4"/>
             <Button x:Name="NavOverview" Content="Genel durum" Style="{StaticResource Nav}" Tag="overview" Margin="0,0,0,4"/>
-            <Button x:Name="NavActions" Content="Bekleyen isler" Style="{StaticResource Nav}" Tag="actions" Margin="0,0,0,4"/>
+            <Button x:Name="NavActions" Content="Bekleyen işler" Style="{StaticResource Nav}" Tag="actions" Margin="0,0,0,4"/>
             <Button x:Name="NavSettings" Content="Ayarlar" Style="{StaticResource Nav}" Tag="settings" Margin="0,0,0,4"/>
-            <Button x:Name="NavLog" Content="Gunluk" Style="{StaticResource Nav}" Tag="log" Margin="0,0,0,4"/>
+            <Button x:Name="NavLog" Content="Günlük" Style="{StaticResource Nav}" Tag="log" Margin="0,0,0,4"/>
           </StackPanel>
           <StackPanel Grid.Row="2">
             <Border Style="{StaticResource CardStyle}" Padding="12,10">
@@ -543,7 +550,7 @@ $Xaml = @'
                 <TextBlock x:Name="TxtUptime" Text="Uptime: -" Style="{StaticResource Small}" Margin="0,4,0,0"/>
               </StackPanel>
             </Border>
-            <Button x:Name="BtnDiag" Content="Tehis raporu uret" Style="{StaticResource Btn}" Margin="0,10,0,0"/>
+            <Button x:Name="BtnDiag" Content="Teşhis raporu üret" Style="{StaticResource Btn}" Margin="0,10,0,0"/>
             <Button x:Name="BtnInstall" Content="Watchdog kur" Style="{StaticResource Btn}" Margin="0,8,0,0"/>
           </StackPanel>
         </Grid>
@@ -554,7 +561,7 @@ $Xaml = @'
         <!-- BAGLANTILAR -->
         <ScrollViewer x:Name="PageConn" VerticalScrollBarVisibility="Auto" Padding="22,20">
           <StackPanel>
-            <TextBlock Text="Baglantilar" Style="{StaticResource H1}" Margin="0,0,0,4"/>
+            <TextBlock Text="Bağlantılar" Style="{StaticResource H1}" Margin="0,0,0,4"/>
             <TextBlock x:Name="TxtConnSub" Text="" Style="{StaticResource Small}" Margin="0,0,0,16"/>
             <ItemsControl x:Name="ConnList"/>
           </StackPanel>
@@ -582,7 +589,7 @@ $Xaml = @'
         <!-- BEKLEYEN ISLER -->
         <ScrollViewer x:Name="PageActions" VerticalScrollBarVisibility="Auto" Padding="22,20" Visibility="Collapsed">
           <StackPanel>
-            <TextBlock Text="Bekleyen isler" Style="{StaticResource H1}" Margin="0,0,0,4"/>
+            <TextBlock Text="Bekleyen işler" Style="{StaticResource H1}" Margin="0,0,0,4"/>
             <TextBlock x:Name="TxtActionsSub" Text="" Style="{StaticResource Small}" Margin="0,0,0,16"/>
             <ItemsControl x:Name="ActionList"/>
             <Border Style="{StaticResource CardStyle}" Background="#1A1512" BorderBrush="#4A3410">
@@ -603,7 +610,7 @@ $Xaml = @'
             <TextBlock Text="Kaydettiginizde config.json guncellenir; bir sonraki denetimde gecerli olur." Style="{StaticResource Small}" Margin="0,0,0,16"/>
             <StackPanel x:Name="SettingsPanel"/>
             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-              <Button x:Name="BtnSave" Content="Ayarlari kaydet" Style="{StaticResource BtnAccent}" Margin="0,0,10,0"/>
+              <Button x:Name="BtnSave" Content="Ayarları kaydet" Style="{StaticResource BtnAccent}" Margin="0,0,10,0"/>
               <Button x:Name="BtnReload" Content="Formu yenile" Style="{StaticResource Btn}"/>
               <TextBlock x:Name="TxtSaved" Text="" Style="{StaticResource Small}" VerticalAlignment="Center" Margin="14,0,0,0" Foreground="{StaticResource Ok}"/>
             </StackPanel>
@@ -614,10 +621,10 @@ $Xaml = @'
         <Grid x:Name="PageLog" Visibility="Collapsed" Margin="22,20">
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
           <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,12">
-            <TextBlock Text="Gunluk" Style="{StaticResource H1}" Margin="0,0,16,0" VerticalAlignment="Center"/>
+            <TextBlock Text="Günlük" Style="{StaticResource H1}" Margin="0,0,16,0" VerticalAlignment="Center"/>
             <Button x:Name="BtnLogRefresh" Content="Yenile" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
             <Button x:Name="BtnLogCopy" Content="Kopyala" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
-            <Button x:Name="BtnLogOpen" Content="Dosyayi ac" Style="{StaticResource Btn}"/>
+            <Button x:Name="BtnLogOpen" Content="Dosyayı aç" Style="{StaticResource Btn}"/>
           </StackPanel>
           <Border Grid.Row="1" Style="{StaticResource CardStyle}" Background="#0C0E11">
             <TextBox x:Name="TxtLog" Background="Transparent" Foreground="#C9D1D9" BorderThickness="0"
@@ -704,7 +711,7 @@ function Get-Connections {
     }
 
     if (-not $hj) {
-        Add-Conn 'Watchdog' 'hic calismadi' 'none' 'BILINMIYOR' 'last-run.json yok' 'host' 'Kur'
+        Add-Conn 'Watchdog' 'hic calismadi' 'none' 'BİLİNMİYOR' 'last-run.json yok' 'host' 'Kur'
         return $rows
     }
 
@@ -718,22 +725,22 @@ function Get-Connections {
 
     if ($inet) {
         $lvl = if ($inet.ok) { 'ok' } else { 'bad' }
-        Add-Conn 'Internet erisimi' 'genel cikis (HTTPS 204)' $lvl $(if ($inet.ok) { 'BAGLI' } else { 'YOK' }) ('https ' + [string]$mt['google204ms'] + ' ms, mtalk ' + [string]$mt['mtalk443ms'] + ' ms') 'run' 'Yeniden denetir'
+        Add-Conn 'İnternet erişimi' 'genel çıkış (HTTPS 204)' $lvl $(if ($inet.ok) { 'BAGLI' } else { 'YOK' }) ('https ' + [string]$mt['google204ms'] + ' ms, mtalk ' + [string]$mt['mtalk443ms'] + ' ms') 'run' 'Yeniden denetle'
     }
     if ($mt.ContainsKey('ip443state')) {
         $lvl = if ($mt['ip443state'] -eq 'acik') { 'ok' } else { 'bad' }
-        Add-Conn 'IP erisimi' '1.1.1.1:443 (DNS bayagi degil)' $lvl $(if ($lvl -eq 'ok') { 'BAGLI' } else { 'YOK' }) ([string]$mt['ip443'] + ' ms')
+        Add-Conn 'IP erişimi' '1.1.1.1:443 (DNS bağığı değil)' $lvl $(if ($lvl -eq 'ok') { 'BAGLI' } else { 'YOK' }) ([string]$mt['ip443'] + ' ms')
     }
     if ($mt.ContainsKey('dnsstate')) {
         $lvl = if ($mt['dnsstate'] -eq 'cozuldu') { 'ok' } else { 'bad' }
-        Add-Conn 'DNS cozumlemesi' 'remotedesktop.google.com' $lvl $(if ($lvl -eq 'ok') { 'COZULDU' } else { 'HATA' }) ([string]$mt['dnsms'] + ' ms')
+        Add-Conn 'DNS çözümlemesi' 'remotedesktop.google.com' $lvl $(if ($lvl -eq 'ok') { 'ÇÖZÜLDÜ' } else { 'HATA' }) ([string]$mt['dnsms'] + ' ms')
     }
     if ($mt.ContainsKey('signalstate')) {
         $lvl = if ($mt['signalstate'] -eq 'acik') { 'ok' } else { 'bad' }
         Add-Conn 'CRD sinyal yolu' 'mtalk.google.com:443' $lvl $(if ($lvl -eq 'ok') { 'BAGLI' } else { 'KAPALI' }) ([string]$mt['signalms'] + ' ms')
     }
     if ($mt.ContainsKey('link')) {
-        Add-Conn 'Ag adaptoru' ([string]$mt['link']) 'none' 'BILGI' ('DHCP=' + $(if ($mt['dhcp']) { 'acik' } else { 'kapali' }) + ', TIME_WAIT=' + [string]$mt['timewait'])
+        Add-Conn 'Ağ adaptörü' ([string]$mt['link']) 'none' 'BİLGİ' ('DHCP=' + $(if ($mt['dhcp']) { 'acik' } else { 'kapali' }) + ', TIME_WAIT=' + [string]$mt['timewait'])
     }
 
     $crd = $byName['CRD servisi']
@@ -742,10 +749,10 @@ function Get-Connections {
         if ($crd.metrics) { foreach ($k in $crd.metrics.PSObject.Properties.Name) { $m[$k] = $crd.metrics.$k } }
         $registered = ($m['hostId'] -eq 'var')
         $lvl = if (-not $registered) { 'bad' } elseif ($crd.ok) { 'ok' } else { 'warn' }
-        Add-Conn 'Google Remote Desktop kaydi' 'cihaz Google hesabinda kayitli mi' $lvl $(if ($registered) { 'KAYITLI' } else { 'KAYITSIZ' }) ('host_id=' + $(if ($registered) { 'var' } else { 'YOK' })) 'crd' 'CRD sayfasi'
+        Add-Conn 'Google Remote Desktop kaydı' 'cihaz Google hesabında kayıtlı mı' $lvl $(if ($registered) { 'KAYITLI' } else { 'KAYITSIZ' }) ('host_id=' + $(if ($registered) { 'var' } else { 'YOK' })) 'crd' 'CRD sayfası'
         $gc = [int]($(if ($m.ContainsKey('googleBaglanti')) { $m['googleBaglanti'] } else { 0 }))
         $lvl2 = if ($gc -gt 0) { 'ok' } elseif ($registered) { 'warn' } else { 'none' }
-        Add-Conn 'CRD canli baglantisi' 'daemonin Google baglantisi' $lvl2 $(if ($gc -gt 0) { 'BAGLI' } else { 'YOK' }) ('baglanti=' + $gc + ', servis=' + [string]$m['servis'] + ', yas=' + [string]$m['yasSaat'] + 'sa') 'run' 'Yeniden denetir'
+        Add-Conn 'CRD canlı bağlantısı' 'CRD daemon Google bağlantısı' $lvl2 $(if ($gc -gt 0) { 'BAGLI' } else { 'YOK' }) ('baglanti=' + $gc + ', servis=' + [string]$m['servis'] + ', yas=' + [string]$m['yasSaat'] + 'sa') 'run' 'Yeniden denetle'
     }
 
     $rdp = $byName['Windows RDP']
@@ -753,25 +760,25 @@ function Get-Connections {
         $lvl = if ($rdp.ok) { 'ok' } else { 'bad' }
         $fw = 0
         if ([string]$rdp.detail -match 'firewall kapali=(\d+)') { $fw = [int]$matches[1] }
-        Add-Conn 'Windows RDP' '3389 + firewall' $lvl $(if ($rdp.ok) { 'HAZIR' } else { 'KAPALI' }) ('firewall kapali kural=' + $fw) 'log' 'Loglari ac'
+        Add-Conn 'Windows RDP' '3389 + firewall' $lvl $(if ($rdp.ok) { 'HAZIR' } else { 'KAPALI' }) ('firewall kapali kural=' + $fw) 'log' 'Logları aç'
     }
 
     $tun = $byName['VS Code Tunnel']
     if ($tun) {
-        Add-Conn 'VS Code Tunnel' 'vscode.dev/tunels' $(if ($tun.ok) { 'ok' } else { 'warn' }) $(if ($tun.ok) { 'CALISIYOR' } else { 'KAPALI' }) ([string]$tun.detail) 'log' 'Loglari ac'
+        Add-Conn 'VS Code Tunnel' 'vscode.dev/tunels' $(if ($tun.ok) { 'ok' } else { 'warn' }) $(if ($tun.ok) { 'ÇALIŞIYOR' } else { 'KAPALI' }) ([string]$tun.detail) 'log' 'Logları aç'
     }
 
     $cfg = Get-HostConfig
     if ($cfg.HeartbeatUrl) {
-        Add-Conn 'Disi heartbeat' 'healthchecks.io ping' 'ok' 'TANIMLI' ([string]$cfg.HeartbeatUrl) 'log' 'Loglari ac'
+        Add-Conn 'Dışı heartbeat' 'healthchecks.io ping' 'ok' 'TANIMLI' ([string]$cfg.HeartbeatUrl) 'log' 'Logları aç'
     } else {
-        Add-Conn 'Disi heartbeat' 'healthchecks.io ping' 'none' 'KAPALI' 'alarm kurulmamis' 'settings' 'Ayarlar'
+        Add-Conn 'Dışı heartbeat' 'healthchecks.io ping' 'none' 'KAPALI' 'alarm kurulmamış' 'settings' 'Ayarlar'
     }
 
     $cfg = Get-HostConfig
     $panelChk = $byName['Kontrol paneli']
     if ($panelChk) {
-        Add-Conn 'Kontrol paneli' 'panel sureci (restart sonrasi oturumda)' $(if ($panelChk.ok) { 'ok' } else { 'warn' }) $(if ($panelChk.ok) { 'CALISIYOR' } else { 'KAPALI' }) ([string]$panelChk.detail) 'panelstart' 'Paneli baslat'
+        Add-Conn 'Kontrol paneli' 'panel süreci (restart sonrası oturumda)' $(if ($panelChk.ok) { 'ok' } else { 'warn' }) $(if ($panelChk.ok) { 'ÇALIŞIYOR' } else { 'KAPALI' }) ([string]$panelChk.detail) 'panelstart' 'Paneli başlat'
     }
 
     $role = Get-RoleInfo
@@ -785,14 +792,14 @@ function Get-Connections {
                 $lvl = $(if ($cc.ok) { 'ok' } else { 'bad' })
                 $msTxt = ''
                 if ([string]$cc.detail -match '(\d+) ms') { $msTxt = 'gecikme ' + $matches[1] + ' ms' }
-                Add-Conn $role.RemoteName $tname $lvl $(if ($cc.ok) { 'ULASILABILIR' } else { 'ULASILAMIYOR' }) $(if ($msTxt) { $msTxt } else { [string]$cc.detail }) 'log' 'Loglari ac'
+                Add-Conn $role.RemoteName $tname $lvl $(if ($cc.ok) { 'ULAŞILABİLİR' } else { 'ULAŞILAMIYOR' }) $(if ($msTxt) { $msTxt } else { [string]$cc.detail }) 'log' 'Logları aç'
             }
-            if (-not $found) { Add-Conn $role.RemoteName $tname 'warn' 'BILINMIYOR' 'istemci bir tur calismadi' 'run' 'Simdi denetle' }
+            if (-not $found) { Add-Conn $role.RemoteName $tname 'warn' 'BİLİNMİYOR' 'istemci bir tur calismadi' 'run' 'Şimdi denetle' }
         }
         $cjLvl = $(if ($cj -and $cj.ok) { 'ok' } else { 'bad' })
-        Add-Conn 'Istemci kontrol hatti' $(if ($role.HostTask) { 'bu makine (istemci + host)' } else { 'bu makine (istemci)' }) $cjLvl $(if ($cj -and $cj.ok) { 'TAMAM' } else { 'SORUN' }) $(if ($cj) { [string]$cj.summary } else { 'istemci calismadi' }) 'log' 'Loglari ac'
+        Add-Conn 'İstemci kontrol hattı' $(if ($role.HostTask) { 'bu makine (istemci + host)' } else { 'bu makine (istemci)' }) $cjLvl $(if ($cj -and $cj.ok) { 'TAMAM' } else { 'SORUN' }) $(if ($cj) { [string]$cj.summary } else { 'istemci çalışmadı' }) 'log' 'Logları aç'
     } elseif ($cj) {
-        Add-Conn 'Istemci kontrol hatti' 'bu makine (host + istemci)' $(if ($cj.ok) { 'ok' } else { 'warn' }) $(if ($cj.ok) { 'TAMAM' } else { 'EK BILGI' }) ([string]$cj.summary) 'log' 'Loglari ac'
+        Add-Conn 'İstemci kontrol hattı' 'bu makine (host + istemci)' $(if ($cj.ok) { 'ok' } else { 'warn' }) $(if ($cj.ok) { 'TAMAM' } else { 'EK BİLGİ' }) ([string]$cj.summary) 'log' 'Logları aç'
     }
     return $rows
 }
@@ -803,7 +810,7 @@ function Update-Connections {
     $okc = 0; $badc = 0; $info = 0
     foreach ($r in $rows) {
         $items += $r
-        if ($r.StateText -in @('BILGI', 'BILINMIYOR')) { $info++ }
+        if ($r.StateText -in @('BİLGİ', 'BİLİNMİYOR')) { $info++ }
         elseif ($r.StateText -in @('YOK', 'KAPALI', 'KAYITSIZ', 'HATA')) { $badc++ }
         else { $okc++ }
     }
@@ -935,26 +942,29 @@ function Update-Log {
 
 $script:Defs = @(
     @{ Sec = 'ZAMANLAMA'; Type = 'section' }
-    @{ Sec = 'Zamanlama'; Key = 'IntervalMinutes'; Title = 'Kontrol araligi (dakika)'; Type = 'int' }
-    @{ Sec = 'Zamanlama'; Key = 'AlertRepeatHours'; Title = 'Ayni alarm icin tekrar araligi (saat)'; Type = 'int' }
-    @{ Sec = 'Zamanlama'; Key = 'NotifyRepeatHours'; Title = 'Kullanici bilgilendirme tekrar araligi (saat)'; Type = 'int' }
+    @{ Sec = 'Zamanlama'; Key = 'IntervalMinutes'; Title = 'Kontrol aralığı (dakika)'; Type = 'int' }
+    @{ Sec = 'Zamanlama'; Key = 'AlertRepeatHours'; Title = 'Aynı alarm için tekrar aralığı (saat)'; Type = 'int' }
+    @{ Sec = 'Zamanlama'; Key = 'NotifyRepeatHours'; Title = 'Kullanıcı bilgilendirme tekrar aralığı (saat)'; Type = 'int' }
 
     @{ Sec = 'RESTART POLITIKASI'; Type = 'section' }
-    @{ Sec = 'Restart'; Key = 'RestartPolicy'; Title = 'Restart politikasi'; Type = 'enum'; Options = @('blackout', 'always', 'never') }
-    @{ Sec = 'Restart'; Key = 'BlackoutEnabled'; Title = 'Blackout penceresi (disinda sadece bilgilendirilir)'; Type = 'bool' }
-    @{ Sec = 'Restart'; Key = 'BlackoutStart'; Title = 'Blackout baslangic saati'; Type = 'int' }
-    @{ Sec = 'Restart'; Key = 'BlackoutEnd'; Title = 'Blackout bitis saati (geceye sarar)'; Type = 'int' }
-    @{ Sec = 'Restart'; Key = 'BlackoutFullDays'; Title = 'Tam gun blackout (hafta sonu)'; Type = 'days' }
+    @{ Sec = 'Restart'; Key = 'RestartPolicy'; Title = 'Restart politikası'; Type = 'enum'; Options = @('blackout', 'always', 'never') }
+    @{ Sec = 'Restart'; Key = 'BlackoutEnabled'; Title = 'Blackout penceresi (dışında sadece bilgilendirilir)'; Type = 'bool' }
+    @{ Sec = 'Restart'; Key = 'BlackoutStart'; Title = 'Blackout başlangıç saati'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'BlackoutEnd'; Title = 'Blackout bitiş saati (geceye sarar)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'BlackoutFullDays'; Title = 'Tam gün blackout (hafta sonu)'; Type = 'days' }
     @{ Sec = 'Restart'; Key = 'BlackoutNights'; Title = 'Blackout geceleri'; Type = 'days' }
-    @{ Sec = 'Restart'; Key = 'RebootAfterFailedCycles'; Title = 'Kac basarisiz denemeden sonra restart'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'RebootAfterFailedCycles'; Title = 'Kaç başarısız denemeden sonra restart'; Type = 'int' }
     @{ Sec = 'Restart'; Key = 'RebootDelaySeconds'; Title = 'Restart gecikmesi (saniye)'; Type = 'int' }
-    @{ Sec = 'Restart'; Key = 'MinUptimeMinutes'; Title = 'Minimum uptime (dk, yeni acilan makine icin bekle)'; Type = 'int' }
-    @{ Sec = 'Restart'; Key = 'RebootSkipIfUnregistered'; Title = 'CRD kayitsizken restart etme'; Type = 'bool' }
+    @{ Sec = 'Restart'; Key = 'MaxRestartsPerDay'; Title = '24 saatte en fazla restart (0 = sınırsız)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'RebootCooldownMinutes'; Title = 'İki restart arası bekleme (dakika)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'HealthyMinutesToReset'; Title = 'Bu kadar sağlıklı kalınca bütçe sıfırlansın (dk)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'MinUptimeMinutes'; Title = 'Minimum uptime (dk, yeni açılan makine için bekle)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'RebootSkipIfUnregistered'; Title = 'CRD kayıtsızken restart etme'; Type = 'bool' }
     @{ Sec = 'Restart'; Key = 'ForceRestartAlways'; Title = 'DAIMA zorla kapat (saat fark etmez)'; Type = 'bool' }
     @{ Sec = 'Restart'; Key = 'ForceRestartUntil'; Title = 'Daima zorla kapat bitis zamani'; Type = 'datetime' }
 
     @{ Sec = 'OTOMATIK ONARIM'; Type = 'section' }
-    @{ Sec = 'Onarim'; Key = 'FixNetwork'; Title = 'Ag onarimini uygula'; Type = 'bool' }
+    @{ Sec = 'Onarim'; Key = 'FixNetwork'; Title = 'Ağ onarımıni uygula'; Type = 'bool' }
     @{ Sec = 'Onarim'; Key = 'NetMaxRepairRung'; Title = 'Ag onarim kademesi (1-5)'; Type = 'int' }
     @{ Sec = 'Onarim'; Key = 'FixRdp'; Title = 'RDP ayarlarini onar (firewall + servis)'; Type = 'bool' }
     @{ Sec = 'Onarim'; Key = 'FixCrd'; Title = 'CRD servisini onar'; Type = 'bool' }
@@ -971,12 +981,12 @@ $script:Defs = @(
 
     @{ Sec = 'SISTEM VE BELGE KORUMA'; Type = 'section' }
     @{ Sec = 'Sistem'; Key = 'ServerMode'; Title = 'Sunucu modu (uyku/hibernasyon/adaptor gucu kapatilir)'; Type = 'bool' }
-    @{ Sec = 'Sistem'; Key = 'DisableFastStartup'; Title = 'Fast Startup kapansin'; Type = 'bool' }
+    @{ Sec = 'Sistem'; Key = 'DisableFastStartup'; Title = 'Fast Startup kapansın'; Type = 'bool' }
     @{ Sec = 'Sistem'; Key = 'DisableHibernation'; Title = 'Hibernasyonu tamamen kapat (powercfg /h off)'; Type = 'bool' }
     @{ Sec = 'Sistem'; Key = 'OfficeSaveBeforeReboot'; Title = 'Restart oncesi Word/Excel kaydedilsin'; Type = 'bool' }
     @{ Sec = 'Sistem'; Key = 'OfficeSaveTimeoutSeconds'; Title = 'Belge kaydetme bekleme suresi (sn)'; Type = 'int' }
-    @{ Sec = 'Sistem'; Key = 'OfficeAbortRebootIfStillOpen'; Title = 'Uygulama kapanmazsa restart yapilmasin'; Type = 'bool' }
-    @{ Sec = 'Sistem'; Key = 'OfficeAbortRebootIfUnsaved'; Title = 'Kaydedilmemis belge varsa restart yapilmasin'; Type = 'bool' }
+    @{ Sec = 'Sistem'; Key = 'OfficeAbortRebootIfStillOpen'; Title = 'Uygulama kapanmazsa restart yapılmasın'; Type = 'bool' }
+    @{ Sec = 'Sistem'; Key = 'OfficeAbortRebootIfUnsaved'; Title = 'kaydedilmemiş belge varsa restart yapılmasın'; Type = 'bool' }
 
     @{ Sec = 'BILDIRIM'; Type = 'section' }
     @{ Sec = 'Bildirim'; Key = 'TelegramToken'; Title = 'Telegram bot token'; Type = 'text' }
@@ -985,23 +995,23 @@ $script:Defs = @(
 
     @{ Sec = 'TATIL'; Type = 'section' }
     @{ Sec = 'Tatil'; Key = 'HolidayMode'; Title = 'Tatil modu (full = tam blackout)'; Type = 'enum'; Options = @('full', 'default', 'none') }
-    @{ Sec = 'Tatil'; Key = 'Holidays'; Title = 'Tatiller (her satir YYYY-AA-GG)'; Type = 'lines' }
+    @{ Sec = 'Tatil'; Key = 'Holidays'; Title = 'Tatiller (her satır YYYY-AA-GG)'; Type = 'lines' }
     @{ Sec = 'Tatil'; Key = 'HolidaysFile'; Title = 'Tatil dosyasi (bos birakilirsa betik yanindaki holidays.txt)'; Type = 'text' }
 
-    @{ Sec = 'ISTEMCI (BU BILGISAYAR)'; Type = 'section' }
-    @{ Sec = 'Istemci'; Key = 'RemoteName'; Title = 'Uzak makine adi (panelde bu ad kullanilir)'; Type = 'text'; Target = 'client' }
-    @{ Sec = 'Istemci'; Key = 'Targets'; Title = 'Uzak hedefler (her satir ip:port)'; Type = 'lines'; Target = 'client' }
-    @{ Sec = 'Istemci'; Key = 'RdpFile'; Title = 'RDP dosyasi (.rdp)'; Type = 'text'; Target = 'client' }
-    @{ Sec = 'Istemci'; Key = 'BrowserUrl'; Title = 'Tarayici adresi (CRD)'; Type = 'text'; Target = 'client' }
-    @{ Sec = 'Istemci'; Key = 'LaunchOnRecover'; Title = 'Baglanti duzelince otomatik ac'; Type = 'bool'; Target = 'client' }
-    @{ Sec = 'Istemci'; Key = 'KeepAliveMinutes'; Title = 'Oturumu canli tutma araligi (dk, 0 = kapali)'; Type = 'int'; Target = 'client' }
+    @{ Sec = 'ISTEMCI (BU BİLGİSAYAR)'; Type = 'section' }
+    @{ Sec = 'Istemci'; Key = 'RemoteName'; Title = 'Uzak makine adı (panelde bu ad kullanılır)'; Type = 'text'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'Targets'; Title = 'Uzak hedefler (her satır ip:port)'; Type = 'lines'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'RdpFile'; Title = 'RDP dosyası (.rdp)'; Type = 'text'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'BrowserUrl'; Title = 'Tarayıcı adresi (CRD)'; Type = 'text'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'LaunchOnRecover'; Title = 'Bağlantı düzelince otomatik aç'; Type = 'bool'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'KeepAliveMinutes'; Title = 'Oturumu canlı tutma aralığı (dk, 0 = kapalı)'; Type = 'int'; Target = 'client' }
     @{ Sec = 'Istemci'; Key = 'TelegramToken'; Title = 'Telegram bot token (istemci)'; Type = 'text'; Target = 'client' }
     @{ Sec = 'Istemci'; Key = 'TelegramChatId'; Title = 'Telegram chat id (istemci)'; Type = 'text'; Target = 'client' }
     @{ Sec = 'Istemci'; Key = 'HeartbeatUrl'; Title = 'Healthchecks ping adresi (istemci)'; Type = 'text'; Target = 'client' }
 
     @{ Sec = 'PANEL'; Type = 'section' }
-    @{ Sec = 'Panel'; Key = 'PanelRepair'; Title = 'Panel kapanirsa watchdog yeniden baslatsin'; Type = 'bool' }
-    @{ Sec = 'Panel'; Key = 'PanelScriptName'; Title = 'Panel betigi dosya adi'; Type = 'text' }
+    @{ Sec = 'Panel'; Key = 'PanelRepair'; Title = 'Panel kapanırsa watchdog yeniden başlatsın'; Type = 'bool' }
+    @{ Sec = 'Panel'; Key = 'PanelScriptName'; Title = 'Panel betiği dosya adı'; Type = 'text' }
 
     @{ Sec = 'ISLEMLER'; Type = 'section' }
     @{ Sec = 'Islem'; Type = 'actions' }
@@ -1222,19 +1232,19 @@ function Add-ActionBar {
         return $b
     }
     $b1 = & $mk 'Watchdog kur' 'install'
-    $b2 = & $mk 'Watchdog kaldir' 'uninstall'
+    $b2 = & $mk 'Watchdog kaldır' 'uninstall'
     $b3 = & $mk 'Zamanlanmis gorevi durdur' 'stoptask'
     $b4 = & $mk 'Gorevi hemen calistir' 'runtask'
-    $b5 = & $mk 'Tehis raporu uret' 'diag'
+    $b5 = & $mk 'Teşhis raporu üret' 'diag'
     $r1.Children.Add($b1); $r1.Children.Add($b2); $r1.Children.Add($b3); $r1.Children.Add($b4); $r1.Children.Add($b5)
     $p.Children.Add($r1)
     $r2 = New-Object System.Windows.Controls.StackPanel
     $r2.Orientation = 'Horizontal'
     $r2.Margin = New-Object System.Windows.Thickness(0, 0, 0, 8)
-    $b6 = & $mk 'Telegram test mesaji' 'testalert'
-    $b7 = & $mk 'Sayaclari sifirla' 'resetstate'
-    $b8 = & $mk 'Loglari temizle' 'clearlog'
-    $b9 = & $mk 'config.json ac' 'openconfig'
+    $b6 = & $mk 'Telegram test mesajı' 'testalert'
+    $b7 = & $mk 'Sayaçları sıfırla' 'resetstate'
+    $b8 = & $mk 'Logları temizle' 'clearlog'
+    $b9 = & $mk 'config.json aç' 'openconfig'
     $b10 = & $mk 'Simdi zorla kapat + restart' 'forcereboot' -Danger
     $r2.Children.Add($b6); $r2.Children.Add($b7); $r2.Children.Add($b8); $r2.Children.Add($b9); $r2.Children.Add($b10)
     $p.Children.Add($r2)
@@ -1257,7 +1267,7 @@ function Invoke-SettingsAction {
         }
         'stoptask' { Disable-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue | Out-Null; Write-Host 'gorev durduruldu' }
         'runtask' { Start-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue; Start-Sleep 5; Update-Connections; Update-Overview }
-        'diag' { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaustune yazildi.', 'RemoteWatchdog') | Out-Null }
+        'diag' { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaüstüne yazıldı.', 'RemoteWatchdog') | Out-Null }
         'testalert' {
             $cfg = Get-HostConfig
             $msg = 'RemoteWatchdog test bildirimi - ' + $env:COMPUTERNAME + ' - ' + (Get-Date).ToString('HH:mm:ss')
@@ -1405,7 +1415,7 @@ function Refresh-Icon {
                 $bad = @($st.Host.checks | Where-Object { -not $_.ok } | ForEach-Object { $_.name }) -join ', '
                 Show-Balloon 'Uzak makine sorunlu' $bad 'Warning' -Critical:(-not $wasHealthy)
             } else {
-                Show-Balloon 'Uzak makine ayakta' 'Tum kontroller tamam.' 'Info'
+                Show-Balloon 'Uzak makine ayakta' 'Tüm kontroller tamam.' 'Info'
             }
         }
     }
@@ -1479,7 +1489,7 @@ function Invoke-TrayAction {
             Set-BalloonMode -Mode $next
             $mi = @($script:TrayItems | Where-Object { $_.Tag -eq 'balloon' })[0]
             if ($mi) { $mi.Text = 'Bildirimler (' + $next + ')' }
-            Show-Balloon -Title 'Bildirim modu' -Text ('Yeni mod: ' + $next + $(if ($next -eq 'critical') { ' (sadece kritik)' } elseif ($next -eq 'all') { ' (her durum degisimi)' } else { ' (hicbiri)' })) -Icon 'Info' -Critical
+            Show-Balloon -Title 'Bildirim modu' -Text ('Yeni mod: ' + $next + $(if ($next -eq 'critical') { ' (sadece kritik)' } elseif ($next -eq 'all') { ' (her durum değişimi)' } else { ' (hiçbiri)' })) -Icon 'Info' -Critical
         }
         'log' {
             $d = Split-Path -Parent $HostLog
@@ -1487,7 +1497,7 @@ function Invoke-TrayAction {
         }
         'web' { Start-Process 'https://remotedesktop.google.com' }
         'install' { Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null }
-        'diag' { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaustune yazildi.', 'RemoteWatchdog') | Out-Null }
+        'diag' { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaüstüne yazıldı.', 'RemoteWatchdog') | Out-Null }
         'quit' {
             $r = [System.Windows.MessageBox]::Show('Panel kapatilsin mi? Zamanlanmis watchdog gorevi calismaya devam eder.', 'RemoteWatchdog', 'YesNo', 'Question')
             if ($r -eq 'Yes') { $script:ExitRequested = $true; $script:Win.Close(); $script:Icon.Visible = $false; $script:Icon.Dispose() }
@@ -1499,19 +1509,19 @@ function Invoke-TrayAction {
 function New-TrayIcon {
     $ctx = New-Object System.Windows.Forms.ContextMenuStrip
     $items = @(
-        @{ t = 'Kontrol panelini ac'; k = 'panel' }
-        @{ t = 'Simdi denetle'; k = 'check' }
+        @{ t = 'Kontrol panelini aç'; k = 'panel' }
+        @{ t = 'Şimdi denetle'; k = 'check' }
         @{ t = '-'; k = '' }
         @{ t = 'Sessiz mod'; k = 'silent' }
         @{ t = 'Bildirimler (kritik)'; k = 'balloon' }
-        @{ t = 'Paneli ac / gizle'; k = 'toggle' }
-        @{ t = 'Log klasorunu ac'; k = 'log' }
+        @{ t = 'Paneli aç / gizle'; k = 'toggle' }
+        @{ t = 'Log klasörünü aç'; k = 'log' }
         @{ t = 'Google Remote Desktop'; k = 'web' }
         @{ t = '-'; k = '' }
         @{ t = 'Watchdog kur'; k = 'install' }
-        @{ t = 'Tehis raporu uret'; k = 'diag' }
+        @{ t = 'Teşhis raporu üret'; k = 'diag' }
         @{ t = '-'; k = '' }
-        @{ t = 'Cikis'; k = 'quit' }
+        @{ t = 'Çıkış'; k = 'quit' }
     )
     foreach ($spec in $items) {
         $mi = $ctx.Items.Add([string]$spec.t)
@@ -1551,7 +1561,7 @@ function Wire-UI {
     (El $w 'BtnCheck').Add_Click({ Invoke-Script -Path $HostScript; Invoke-Script -Path $ClientScript; Start-Sleep 3; Update-Overview; Update-Actions })
     (El $w 'BtnDiag').Add_Click({
             $r = [System.Windows.MessageBox]::Show('Collect-Diagnostics calisacak (okuma modunda, ~40 sn). Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Question')
-            if ($r -eq 'Yes') { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaustune yazildi.', 'RemoteWatchdog') | Out-Null }
+            if ($r -eq 'Yes') { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaüstüne yazıldı.', 'RemoteWatchdog') | Out-Null }
         })
     (El $w 'BtnInstall').Add_Click({ Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null })
     (El $w 'BtnReboot').Add_Click({
