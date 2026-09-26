@@ -27,6 +27,7 @@ param(
     [string]$RemoveHoliday = '',
     [switch]$ListHolidays,
     [switch]$Json,
+    [switch]$NoJson,
     [switch]$ForceReboot
 )
 
@@ -449,6 +450,13 @@ function Test-CrdService {
     }
     if (-not $registered) { $ok = $false; $detail += ' -> cihaz Google listesinde gorunmez' }
     $m = [ordered]@{ servis = [string]$svc.Status; startType = [string]$svc.StartType; hostId = $(if ($registered) { 'var' } else { 'yok' }); googleBaglanti = $conns; daemon = $daemon.Count; yasSaat = [math]::Round($ageH, 1) }
+    if (-not $registered) {
+        $chrome = (Test-Path 'C:\Program Files\Google\Chrome\Application\chrome.exe') -or (Test-Path 'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe')
+        $repair = 'Cihaz Google hesabina kayitli degil (host.json yok) ve bu yuzden CRD servisi calisamaz. Tek seferlik kurulum: bu makinede once Google Chrome kurun, sonra https://remotedesktop.google.com/headless adresinde "Set up remote access" deyip alinan PIN ile kendi cihazinizdan "+" ile ekleyin. Tarayicida acik olan Google oturumu bu kaydi olusturmaz.'
+        if (-not $chrome) { $repair = 'Once Google Chrome kurulu degil (CRD host buna bagli), ardindan https://remotedesktop.google.com/headless -> "Set up remote access" ile cihazi kaydedin. Tarayicida acik olan Google oturumu bu kaydi olusturmaz.' }
+        $m['chromeInstalled'] = $chrome
+        $m['setupRequired'] = $true
+    }
     Add-Result 'CRD servisi' $ok $detail ($repair -join '; ') $false $m
 }
 
@@ -960,6 +968,8 @@ function Write-JsonStatus {
     $cfg = $global:cfg
     $state = Get-State
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $taskKnown = $true
+    if (-not $task -and -not (Test-Admin)) { $taskKnown = $false }
     $checks = @()
     foreach ($r in $script:Results) {
         $checks += [ordered]@{ name = $r.Name; ok = [bool]$r.Ok; skipped = [bool]$r.Skipped; detail = $r.Detail; repair = $r.Repair; metrics = $(if ($r.Metrics) { $r.Metrics } else { @{} }) }
@@ -974,7 +984,8 @@ function Write-JsonStatus {
         summary = $Summary
         uptimeMinutes = (Get-UptimeMinutes)
         publicIp = $script:PublicIp
-        taskInstalled = [bool]$task
+        taskInstalled = $(if ($task) { $true } elseif ($taskKnown) { $false } else { 'unknown' })
+        taskVisible = $taskKnown
         taskState = $(if ($task) { [string]$task.State } else { 'yok' })
         inBlackout = (Test-InBlackout)
         isHoliday = (Test-IsHoliday)
@@ -1003,10 +1014,12 @@ function Write-JsonStatus {
         }
     }
     $json = $obj | ConvertTo-Json -Depth 6
-    try {
-        if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
-        Set-Content -LiteralPath (Join-Path $BaseDir 'last-run.json') -Value $json -Encoding UTF8
-    } catch { }
+    if (-not $NoJson) {
+        try {
+            if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
+            Set-Content -LiteralPath (Join-Path $BaseDir 'last-run.json') -Value $json -Encoding UTF8
+        } catch { }
+    }
     if ($Json) { Write-Output $json }
     return $json
 }

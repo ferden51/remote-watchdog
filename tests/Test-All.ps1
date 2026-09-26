@@ -333,7 +333,7 @@ if ($Section -eq 0 -or $Section -eq 4) {
 if ($Section -eq 0 -or $Section -eq 5) {
     Head '5) Uctan uca: watchdog -Check -Json -> last-run.json -> panel satirlari'
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $Host_ -Check | Out-Null
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $Host_ -Check -NoJson | Out-Null
     $sw.Stop()
     Write-Host ('  (watchdog -Check ' + [math]::Round($sw.Elapsed.TotalSeconds, 1) + ' sn)')
     $j = Get-Json (Join-Path $env:ProgramData 'RemoteWatchdog\last-run.json')

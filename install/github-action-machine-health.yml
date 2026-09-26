@@ -1,0 +1,77 @@
+name: Machine Health (uzak makine kontrolu)
+
+# Bu dosyayi istediginiz reponun .github\workflows\ klasorune kopyalayin.
+# Uzak makineyi GitHub Actions ile disaridan kontrol eder: makine yanit vermezse
+# Telegram'a mesaj gonderir ve is akisi hata olarak isaretlenir (GitHub size e-posta gonderir).
+# Ucretsizdir, healthchecks.io gibi ucuncu bir hesap gerektirmez.
+#
+# Ayarlar (Settings > Secrets and variables > Actions > New repository secret):
+#   HEALTH_HOST    = uzak makinenin IP veya DNS adi            (ornek: 100.64.1.5 veya makine.no-ip.org)
+#   HEALTH_PORT    = kontrol edilecek port                    (ornek: 3389, ya da 443)
+#   TELEGRAM_TOKEN = bot token (istege bagli, bos birakilabilir)
+#   TELEGRAM_CHAT_ID = chat id (istege bagli)
+#
+# Not: CGNAT arkasindaki bir makineye dogrudan TCP ile ulasilamaz. O durumda HEALTH_PORT
+# yerine internete acik bir adres kullanin ya da Tailscale gibi bir VPN kurun.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Uzak makineye TCP kontrolu
+        id: probe
+        env:
+          HEALTH_HOST: ${{ secrets.HEALTH_HOST }}
+          HEALTH_PORT: ${{ secrets.HEALTH_PORT || '3389' }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -u
+          if [ -z "${HEALTH_HOST}" ]; then
+            echo "::warning::HEALTH_HOST ayarli degil, kontrol atlandi"
+            exit 0
+          fi
+          if timeout 10 bash -c "</dev/tcp/${HEALTH_HOST}/${HEALTH_PORT}" 2>/dev/null; then
+            echo "OK: ${HEALTH_HOST}:${HEALTH_PORT} yanit verdi"
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "HATA: ${HEALTH_HOST}:${HEALTH_PORT} yanit vermedi"
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Telegram ile bilgilendir
+        if: steps.probe.outputs.reachable == 'false'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          HEALTH_HOST: ${{ secrets.HEALTH_HOST }}
+          HEALTH_PORT: ${{ secrets.HEALTH_PORT || '3389' }}
+        run: |
+          set -u
+          msg="[RemoteWatchdog] Uzak makine yanit vermiyor: ${HEALTH_HOST}:${HEALTH_PORT} - ${GITHUB_RUN_ID}"
+          if [ -n "${TELEGRAM_TOKEN}" ] && [ -n "${TELEGRAM_CHAT_ID}" ]; then
+            curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text=${msg}" > /dev/null || true
+          fi
+          echo "${msg}"
+          echo "::error::uzak makine erisilemiyor"
+          exit 1
+
+      - name: Telegram ile toparlanma bildirimi
+        if: steps.probe.outputs.reachable == 'true'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          HEALTH_HOST: ${{ secrets.HEALTH_HOST }}
+        run: |
+          set -u
+          if [ "${RECOVERED:-0}" = "1" ]; then exit 0; fi
+          echo "uzak makine erisilebilir: ${HEALTH_HOST}"
