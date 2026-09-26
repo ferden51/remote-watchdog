@@ -277,7 +277,16 @@ if ($Section -eq 0 -or $Section -eq 3) {
         $badBrush = @($rows | Where-Object { $null -eq $_.Brush -or $null -eq $_.StateFg })
         Ok 'Get-Connections: her satirda renkler var' ($badBrush.Count -eq 0)
         $msRow = $rows | Where-Object { $_.Name -eq 'IP erişimi' } | Select-Object -First 1
-        Ok ('Get-Connections: gecikme olcumu "' + $msRow.Measure + '"') ([string]$msRow.Measure -match '\d+ ms')
+        Ok ('Get-Connections: gecikme ölçümü "' + $msRow.Measure + '"') ([string]$msRow.Measure -match '\d+ ms')
+        foreach ($code in (Get-FnCode $Panel @('Get-HelpTopics'))) { Invoke-Expression $code }
+        $topics = @(Get-HelpTopics)
+        Ok ('ayarlar yardım balonları: ' + $topics.Count + ' konu') ($topics.Count -ge 8)
+        $noText = @($topics | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Text) -or ([string]$_.Text).Length -lt 20 })
+        Ok 'ayarlar yardım balonlarının tümünde açıklayıcı metin var' ($noText.Count -eq 0)
+        $noTitle = @($topics | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Title) })
+        Ok 'ayarlar yardım balonlarının tümünde başlık var' ($noTitle.Count -eq 0)
+        $hasBudget = @($topics | Where-Object { ([string]$_.Text) -match 'MaxRestartsPerDay|RebootCooldown' })
+        Ok 'devre kesici ayarı yardım konularında anlatılıyor' ($hasBudget.Count -ge 1)
         $crdRow = $rows | Where-Object { $_.Name -eq 'Google Remote Desktop kaydı' } | Select-Object -First 1
         Ok ('Get-Connections: CRD kaydi durumu "' + $crdRow.StateText + '"') ($crdRow.StateText -in @('KAYITLI', 'KAYITSIZ'))
         $act = @(Get-Actions)

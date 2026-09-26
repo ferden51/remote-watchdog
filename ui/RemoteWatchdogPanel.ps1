@@ -638,6 +638,48 @@ $Xaml = @'
 </Window>
 '@
 
+function Get-HelpTopics {
+    return @(
+        [pscustomobject]@{ Title = 'Ayar yardımı 1/10 - Kontrol aralığı'; Text = 'Watchdog bu aralıkla bağlantıları kontrol eder. Varsayılan 5 dakika. Uzaktaki makine için 5 dk yeterlidir; çok kısa aralık gereksiz log ve trafik üretir.' }
+        [pscustomobject]@{ Title = 'Ayar yardımı 2/10 - Restart politikası'; Text = 'blackout = sadece tanımlı saatlerde restart eder. always = her koşulda. never = hiçbir zaman otomatik restart yapmaz, yalnızca bilgilendirir. Önerilen: blackout.' }
+        [pscustomobject]@{ Title = 'Ayar yardımı 3/10 - Blackout penceresi'; Text = 'Bu saatlerde program kendi kararıyla yeniden başlatabilir. Günüp saatleri 18:00, bitiş 8:00 girilirse gece yarısına sarar. Dışındaki saatlerde zorla kapatma olmaz, sadece bilgilendirme yapılır.' }
+        [pscustomobject]@{ Title = 'Ayar yardımı 4/10 - Tam gün blackout'; Text = 'Cumartesi ve Pazar gibi günlerin tamamı. Bir günü kaldırmak için o günün düğmesini kapatın. Boş bırakılırsa hafta sonu da mesai gibi korunur.' }
+        [pscustomobject]@{ Title = 'Ayar yardımı 5/10 - Tatil modu'; Text = 'full = resmi/dini tatiller tam gün blackout olur. default = normal saat kuralı uygulanır. none = tatiller yok sayılır. Tatil listesine her satır YYYY-AA-GG biçiminde gün ekleyin.' }
+        [pscustomobject]@{ Title = 'Ayar yardımı 6/10 - Devre kesici'; Text = 'Sonsuz restart döngüsüne karşı iki koruma var: 24 saatte en fazla MaxRestartsPerDay (varsayılan 3) kez restart edilir ve iki restart arasında RebootCooldownMinutes (varsayılan 60) dakika beklenir. Sınıra ulaşılınca otomatik restart durur, ekranda ve Telegram''da uyarı gider. Makine bu sayede saatlerce açılıp kapanmaz.' }
+        [pscustomobject]@{ Title = 'Ayar yardımı 7/10 - Sunucu modu'; Text = 'Açık: uyku, hibernasyon ve Fast Startup kapatılır, ağ adaptörü uykuya girmez. Dizüstü kullanıyorsanız kapatın (kurulumda -KeepSleep). Kapalıyken bu kontrol atlanır, zorla restart baskısı oluşmaz.' }
+        [pscustomobject]@{ Title = 'Ayar yardımı 8/10 - Belge koruma'; Text = 'Word/Excel belgeleri 2 dakikada bir otomatik kaydedilir. Restart öncesi kaydedilip kapatılır. Kaydedilemeyen belge varsa restart iptal edilir. "Daima zorla kapatma" bu korumayı baypaslar.' }
+        [pscustomobject]@{ Title = 'Ayar yardımı 9/10 - Ağ onarımı'; Text = 'Ağ bozulursa sırayla DNS, DHCP, adaptör/sürücü ve winsock onarımı uygulanır. Kademe 5 gerektiğinde restart önerilir. 4. kademe adaptörü sıfırlar; uzak erişiminiz tamamen kesilebilir.' }
+        [pscustomobject]@{ Title = 'Ayar yardımı 10/10 - Bildirimler'; Text = 'Telegram token ve chat id girerseniz sorunlar telefonunuza düşer. Healthchecks.io adresi eklenirse dışarıdan "hâlâ çalışıyor mu" takibi yapılır. Tepsi bildirimleri varsayılan olarak yalnızca kritik olayları gösterir.' }
+    )
+}
+
+function Start-HelpTour {
+    param([switch]$Restart)
+    $topics = @(Get-HelpTopics)
+    if ($topics.Count -eq 0) { return 0 }
+    if (-not $Restart -and $script:HelpIndex -ge 0) { return $script:HelpIndex }
+    $script:HelpTopics = $topics
+    $script:HelpIndex = 0
+    if ($script:HelpTimer) { try { $script:HelpTimer.Stop() } catch { } }
+    $script:HelpTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:HelpTimer.Interval = [TimeSpan]::FromSeconds(9)
+    $script:HelpTimer.Add_Tick({
+            if ($null -eq $script:HelpTopics -or $script:HelpIndex -ge $script:HelpTopics.Count) {
+                try { $script:HelpTimer.Stop() } catch { }
+                $script:HelpIndex = -1
+                New-ItemProperty -Path $RunKey -Name ($RunName + 'Help') -Value (Get-Date).ToString('yyyy-MM-dd') -PropertyType String -Force -ErrorAction SilentlyContinue | Out-Null
+                Write-Trace 'ayarlar yardım turu tamamlandi'
+                return
+            }
+            $t = $script:HelpTopics[$script:HelpIndex]
+            $script:HelpIndex = $script:HelpIndex + 1
+            Show-Balloon -Title $t.Title -Text $t.Text -Icon 'Info' -Always
+        })
+    $script:HelpTimer.Start()
+    Write-Trace ('ayarlar yardım turu başladı: ' + $topics.Count + ' konu')
+    return 0
+}
+
 function New-Toggle {
     param([string]$Label = '', [bool]$On)
     $b = New-Object System.Windows.Controls.Button
@@ -1422,12 +1464,14 @@ function Refresh-Icon {
 }
 
 function Show-Balloon {
-    param([string]$Title, [string]$Text, [System.Windows.Forms.ToolTipIcon]$Icon = 'Info', [switch]$Force, [switch]$Critical)
+    param([string]$Title, [string]$Text, [System.Windows.Forms.ToolTipIcon]$Icon = 'Info', [switch]$Force, [switch]$Critical, [switch]$Always)
     $mode = $script:BalloonMode
     if ($NoBalloon) { return }
-    if ($mode -eq 'off') { return }
-    if ($mode -eq 'critical' -and -not $Critical) { return }
-    if ($script:Silent -and -not $Force) { return }
+    if (-not $Always) {
+        if ($mode -eq 'off') { return }
+        if ($mode -eq 'critical' -and -not $Critical) { return }
+        if ($script:Silent -and -not $Force) { return }
+    }
     try {
         $script:Icon.BalloonTipTitle = $Title
         $script:Icon.BalloonTipText = $Text
@@ -1484,6 +1528,7 @@ function Invoke-TrayAction {
         'toggle' { if ($script:Win.IsVisible) { $script:Win.Hide() } else { $script:Win.Show(); $script:Win.Activate() } }
         'check' { Invoke-Script -Path $HostScript; Invoke-Script -Path $ClientScript; Start-Sleep 4; Update-Connections; Update-Overview; Show-Page 'conn' }
         'silent' { Set-SilentMode -Toggle | Out-Null }
+        'help' { Start-HelpTour -Restart | Out-Null; Show-Balloon -Title 'Ayar yardımı' -Text 'Ayarlar hakkında bilgiler sırayla gösterilecek (10 konu). Kapatmak için balonu tıklayıp geçebilirsiniz.' -Icon 'Info' -Always }
         'balloon' {
             $next = switch ($script:BalloonMode) { 'critical' { 'all' } 'all' { 'off' } default { 'critical' } }
             Set-BalloonMode -Mode $next
@@ -1516,6 +1561,7 @@ function New-TrayIcon {
         @{ t = 'Bildirimler (kritik)'; k = 'balloon' }
         @{ t = 'Paneli aç / gizle'; k = 'toggle' }
         @{ t = 'Log klasörünü aç'; k = 'log' }
+        @{ t = 'Ayarlar hakkında (bilgi balonları)'; k = 'help' }
         @{ t = 'Google Remote Desktop'; k = 'web' }
         @{ t = '-'; k = '' }
         @{ t = 'Watchdog kur'; k = 'install' }
@@ -1603,6 +1649,19 @@ function Wire-UI {
             Write-Trace 'goster istegi islendi (pencere one getirildi)'
         })
     $script:ShowTimer.Start()
+    $script:HelpTimer = $null
+    $script:HelpIndex = -1
+    $script:HelpTopics = $null
+    $helpSeen = (Get-ItemProperty -Path $RunKey -Name ($RunName + 'Help') -ErrorAction SilentlyContinue).($RunName + 'Help')
+    if ($helpSeen -ne (Get-Date -Format 'yyyy-MM-dd')) {
+        $script:FirstRunTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:FirstRunTimer.Interval = [TimeSpan]::FromSeconds(25)
+        $script:FirstRunTimer.Add_Tick({
+                $script:FirstRunTimer.Stop()
+                Start-HelpTour | Out-Null
+            })
+        $script:FirstRunTimer.Start()
+    }
 }
 
 if ($Install) {
