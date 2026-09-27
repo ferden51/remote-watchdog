@@ -23,7 +23,8 @@ param(
     [string]$PreviewPage = 'conn',
     [string]$PreviewPath = '',
     [switch]$ShowWindow,
-    [switch]$ClickTest
+    [switch]$ClickTest,
+    [switch]$RepairTest
 )
 
 $ErrorActionPreference = 'Continue'
@@ -73,6 +74,21 @@ $script:IntervalCacheMin = 0
 $script:IntervalCacheSrc = ''
 $script:IntervalCacheUntil = [datetime]::MinValue
 $script:ConnSummary = @{ Ok = 0; Bad = 0; Info = 0; LastRun = $null }
+# --- Canli ag onarim izleme (basliktaki "Agi / interneti onar" dugmesi) ---
+$script:RepairRunning = $false
+$script:RepairSawDone = $false
+$script:RepairShown = @{}
+$script:RepairStart = $null
+$script:RepairLiveText = ''
+$script:RepairStatusText = ''
+$script:RepairWin = $null
+$script:RepairTimer = $null
+$script:RepairLiveBox = $null
+$script:RepairStatusBox = $null
+$script:RepairElapsedBox = $null
+$script:RepairRequestPath = ''
+$script:RepairWatch = $false
+$script:RepairTickCount = 0
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
@@ -803,44 +819,275 @@ function Get-RepairReport {
     return ($lines -join "`n")
 }
 
-function Invoke-NetworkRepair {
-    <#  Ag onarimini ister. SYSTEM gorevi varsa dosya istegi ile tetikler (UAC yok), yoksa dogrudan calistirir. #>
-    param([int]$Rung = 0)
-    $btn = $script:Win.FindName('BtnRepairNet')
-    $top = $script:Win.FindName('TxtSettingsStatus')
-    $say = 'Ağ onarımı isteniyor...'
-    if ($top) { $top.Text = $say; $top.Foreground = Bx 'Warn' }
-    if ($btn) { $btn.Content = 'Onarılıyor...'; $btn.IsEnabled = $false }
-    $req = [ordered]@{ rung = $Rung; requestedBy = $env:USERNAME; at = (Get-Date).ToString('o') }
-    $sentToTask = $false
-    try {
-        $task = Get-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue
-        if (-not $task) { $task = Get-ScheduledTask -TaskName 'RemoteHostPanel' -ErrorAction SilentlyContinue }
-        if ($task) {
-            $dir = Split-Path -Parent $HostJson
-            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-            Write-RwJson -Path (Join-Path $dir 'repair-request.json') -Object $req
-            Start-ScheduledTask -TaskName ([string]$task.TaskName) -ErrorAction Stop
-            $sentToTask = $true
-        }
-    } catch { Write-Trace ('onarim göreve gönderilemedi: ' + $_.Exception.Message) }
-    if (-not $sentToTask) {
-        $args = @('-RepairNetwork')
-        if ($Rung -gt 0) { $args += @('-Rung', [string]$Rung) }
-        Invoke-Script -Path $HostScript -ScriptArgs $args -Wait
+function Format-RepairLogLine {
+    <#  Gunluk satirini panel gorunumune cevirir: zaman damgasi atilir, seviye etiketi korunur. #>
+    param([string]$Line)
+    $t = [string]$Line
+    $t = ($t -replace '^\s*\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+', '').Trim()
+    return $t
+}
+
+function Read-RepairLiveLines {
+    <#  Host gunlugundeki yeni onarim satirlarini dondurur (tekrar edenleri atar). #>
+    $out = @()
+    if (-not $script:RepairShown) { return $out }
+    if (-not (Test-Path -LiteralPath $HostLog)) { return $out }
+    foreach ($l in @(Get-Content -LiteralPath $HostLog -Tail 80 -ErrorAction SilentlyContinue)) {
+        $raw = [string]$l
+        if ($raw -notmatch 'elle ag onarimi basladi|ag saglikli, hicbir kademe|kademe \d+(/\d+)? (basliyor|uygulandi|sonrasi)|ag onarimi bitti') { continue }
+        if ($script:RepairShown.ContainsKey($raw)) { continue }
+        $script:RepairShown[$raw] = $true
+        if ($raw -match 'ag onarimi bitti') { $script:RepairSawDone = $true }
+        $out += (Format-RepairLogLine $raw)
     }
-    Start-Sleep -Seconds 2
+    return $out
+}
+
+function Set-RepairLiveText {
+    param([string]$Text, [string]$Color = 'Text', [bool]$Bold = $false)
+    if (-not $script:RepairWin) { return }
+    try {
+        if ($script:RepairLiveBox) { $script:RepairLiveBox.Text = $Text; $script:RepairLiveBox.ScrollToEnd() }
+        if ($script:RepairStatusBox) {
+            $script:RepairStatusBox.Text = $script:RepairStatusText
+            $script:RepairStatusBox.Foreground = Bx $Color
+            $script:RepairStatusBox.FontWeight = $(if ($Bold) { 'Bold' } else { 'Normal' })
+        }
+        if ($script:RepairElapsedBox) { $script:RepairElapsedBox.Text = ('geçen: ' + [int]((Get-Date) - $script:RepairStart).TotalSeconds + ' sn') }
+    } catch { }
+}
+
+function Wait-Dispatcher {
+    <#  Test icin: arayuz döngüsünü belirtilen sure boyunca isletir (timer'lar calissin). #>
+    param([int]$Ms = 500)
+    $f = New-Object System.Windows.Threading.DispatcherFrame
+    $t = New-Object System.Windows.Threading.DispatcherTimer
+    $t.Interval = [TimeSpan]::FromMilliseconds($Ms)
+    $t.Add_Tick({ $f.Continue = $false })
+    $t.Start()
+    [System.Windows.Threading.Dispatcher]::PushFrame($f)
+    $t.Stop()
+}
+
+function Show-RepairWindow {
+    <#  Canli onarim penceresi: adimlar anlik gunlukten okunup gosterilir. #>
+    if ($script:RepairWin) {
+        try { $script:RepairWin.Activate() | Out-Null } catch { }
+        return
+    }
+    $w = New-Object System.Windows.Window
+    $w.Title = 'Ağ / interneti onarımı'
+    $w.Width = 620
+    $w.Height = 400
+    $w.MinWidth = 460
+    $w.WindowStartupLocation = 'CenterScreen'
+    $w.Background = Bx '#15181D'
+    $w.Foreground = Bx 'Text'
+    $w.FontFamily = 'Segoe UI'
+    $sp = New-Object System.Windows.Controls.StackPanel
+    $sp.Margin = New-Object System.Windows.Thickness(18, 16, 18, 12)
+
+    $h1 = New-Object System.Windows.Controls.TextBlock
+    $h1.Text = 'Ağ / interneti onarımı'
+    $h1.FontSize = 17
+    $h1.FontWeight = 'Bold'
+    $h1.Foreground = Bx 'Text'
+    $h1.Margin = New-Object System.Windows.Thickness(0, 0, 0, 2)
+    [void]$sp.Children.Add($h1)
+
+    $h2 = New-Object System.Windows.Controls.TextBlock
+    $h2.Name = 'TxtRepairStatus'
+    $h2.Text = [string]$script:RepairStatusText
+    $h2.Foreground = Bx 'Warn'
+    $h2.FontSize = 13
+    $h2.TextWrapping = 'Wrap'
+    $h2.Margin = New-Object System.Windows.Thickness(0, 0, 0, 10)
+    [void]$sp.Children.Add($h2)
+
+    $h3 = New-Object System.Windows.Controls.TextBlock
+    $h3.Text = 'Yapılan işlemler (canlı)'
+    $h3.FontSize = 12
+    $h3.Foreground = Bx 'Muted'
+    $h3.Margin = New-Object System.Windows.Thickness(0, 0, 0, 4)
+    [void]$sp.Children.Add($h3)
+
+    $tb = New-Object System.Windows.Controls.TextBox
+    $tb.Name = 'TxtRepairLive'
+    $tb.IsReadOnly = $true
+    $tb.IsReadOnlyCaretVisible = $true
+    $tb.AcceptsReturn = $true
+    $tb.TextWrapping = 'Wrap'
+    $tb.VerticalScrollBarVisibility = 'Auto'
+    $tb.Background = Bx '#0C0F13'
+    $tb.Foreground = Bx 'Text'
+    $tb.BorderThickness = New-Object System.Windows.Thickness(1)
+    $tb.FontFamily = 'Consolas'
+    $tb.FontSize = 12
+    $tb.Text = [string]$script:RepairLiveText
+    $tb.Height = 200
+    [void]$sp.Children.Add($tb)
+
+    $row = New-Object System.Windows.Controls.Grid
+    $row.Margin = New-Object System.Windows.Thickness(0, 10, 0, 0)
+    $col1 = New-Object System.Windows.Controls.ColumnDefinition
+    $col1.Width = New-Object System.Windows.GridLength(1, 'Star')
+    $col2 = New-Object System.Windows.Controls.ColumnDefinition
+    $col2.Width = [System.Windows.GridLength]::new([System.Windows.GridUnitType]::Auto)
+    [void]$row.ColumnDefinitions.Add($col1)
+    [void]$row.ColumnDefinitions.Add($col2)
+
+    $el = New-Object System.Windows.Controls.TextBlock
+    $el.Name = 'TxtRepairElapsed'
+    $el.VerticalAlignment = 'Center'
+    $el.Foreground = Bx 'Muted'
+    $el.FontSize = 12
+    $el.Text = 'geçen: 0 sn'
+    [System.Windows.Controls.Grid]::SetColumn($el, 0)
+    [void]$row.Children.Add($el)
+
+    $close = New-Object System.Windows.Controls.Button
+    $close.Name = 'BtnRepairClose'
+    $close.Content = 'Kapat'
+    $close.Padding = New-Object System.Windows.Thickness(12, 4, 12, 4)
+    $close.Margin = New-Object System.Windows.Thickness(8, 0, 0, 0)
+    $close.Background = Bx '#21252B'
+    $close.Foreground = Bx 'Text'
+    $close.BorderBrush = Bx 'Line'
+    $close.ToolTip = 'Pencereyi kapat. Onarım çalışıyorsa arka planda sürer, bitince balon çıkar.'
+    [System.Windows.Controls.Grid]::SetColumn($close, 1)
+    [void]$row.Children.Add($close)
+    [void]$sp.Children.Add($row)
+
+    $hint = New-Object System.Windows.Controls.TextBlock
+    $hint.Text = 'Adımlar sistem günlüğünden anlık okunur: DNS → DHCP → adaptör → servis/sürücü → winsock/IP. Onarım SYSTEM görevi üzerinden çalışır (UAC çıkmaz).'
+    $hint.Foreground = Bx 'Muted'
+    $hint.FontSize = 11
+    $hint.TextWrapping = 'Wrap'
+    $hint.Margin = New-Object System.Windows.Thickness(0, 8, 0, 0)
+    [void]$sp.Children.Add($hint)
+
+    $w.Content = $sp
+    $script:RepairWin = $w
+    $script:RepairLiveBox = $tb
+    $script:RepairStatusBox = $h2
+    $script:RepairElapsedBox = $el
+    $close.add_Click({ Close-RepairWindow })
+    $w.Show()
+    return $w
+}
+
+function Close-RepairWindow {
+    <#  Pencereyi kapatir; onarim arka planda surerse balonla biter. #>
+    $w = $script:RepairWin
+    $script:RepairWin = $null
+    $script:RepairLiveBox = $null
+    $script:RepairStatusBox = $null
+    $script:RepairElapsedBox = $null
+    if ($w) { try { $w.Close() } catch { } }
+}
+
+function Complete-NetworkRepairLive {
+    <#  Onarim bitti: ozeti hem pencereye hem ayarlar sayfasina yazar. #>
+    param([string]$Reason = '')
+    if ($script:RepairTimer) { try { $script:RepairTimer.Stop() } catch { } }
+    $script:RepairRunning = $false
+    Write-Trace ('ag onarimi izi tamam: tick=' + $script:RepairTickCount + ' satir=' + @(($script:RepairLiveText -split "`r`n") | Where-Object { $_ -match '\S' }).Count)
+    $el = [int]((Get-Date) - $script:RepairStart).TotalSeconds
     Update-Connections
     Update-Overview
     $report = Get-RepairReport
-    if ($top) {
-        $top.Text = $report
-        $top.Foreground = $(if ($report -match 'BAŞARILI') { Bx 'Ok' } else { Bx 'Warn' })
-    }
     $ok = ($report -match 'BAŞARILI')
-    Show-Balloon -Title 'Ağ onarımı' -Text $report -Icon $(if ($ok) { 'Info' } else { 'Warning' }) -Critical
+    $script:RepairStatusText = $(if ($Reason) { $Reason } elseif ($ok) { ('Bitti: BAŞARILI (' + $el + ' sn)') } else { ('Bitti: KISMİ / BAŞARISIZ (' + $el + ' sn)') })
+    Set-RepairLiveText -Text ([string]$script:RepairLiveText) -Color $(if ($ok) { 'Ok' } else { 'Warn' }) -Bold $true
+    $btn = $script:Win.FindName('BtnRepairNet')
     if ($btn) { $btn.Content = 'Ağı / interneti onar'; $btn.IsEnabled = $true }
+    $top = $script:Win.FindName('TxtSettingsStatus')
+    if ($top) { $top.Text = $report; $top.Foreground = $(if ($ok) { Bx 'Ok' } else { Bx 'Warn' }) }
+    Show-Balloon -Title 'Ağ onarımı' -Text $report -Icon $(if ($ok) { 'Info' } else { 'Warning' }) -Critical
     if ($script:Page -eq 'log') { Update-Log }
+    Write-Trace ('ag onarimi izi tamam: ' + $script:RepairStatusText)
+}
+
+function Update-RepairLive {
+    <#  700 ms'lik sayac: yeni gunluk satirlarini pencereye yazar, bitis satirini bekler. #>
+    if (-not $script:RepairRunning) { return }
+    $script:RepairTickCount = [int]$script:RepairTickCount + 1
+    $new = @(Read-RepairLiveLines)
+    foreach ($n in $new) { $script:RepairLiveText += [string]$n + "`r`n" }
+    $el = [int]((Get-Date) - $script:RepairStart).TotalSeconds
+    if ($script:RepairLiveText.Length -eq 0) {
+        $queued = ($script:RepairRequestPath -and (Test-Path -LiteralPath $script:RepairRequestPath))
+        if ($queued -and $script:RepairWatch) {
+            $script:RepairStatusText = 'İstek kaydedildi. Sistem izleyicisi 60 sn içinde onarımı başlatacak; kademeler burada canlı görünecek.'
+        } elseif ($queued) {
+            $script:RepairStatusText = 'İstek kaydedildi. Görev bir sonraki kontrolde işleyecek (aralık kadar bekleyebilir; "Watchdog kur" ile 60 sn izleyici eklenir).'
+        } else {
+            $script:RepairStatusText = 'Onarım isteği gönderildi, sistem günlüğü bekleniyor...'
+        }
+    } else {
+        $script:RepairStatusText = 'Çalışıyor... (kademeler sırayla uygulanıyor)'
+    }
+    Set-RepairLiveText -Text ([string]$script:RepairLiveText) -Color 'Warn'
+    if ($script:RepairSawDone) { Complete-NetworkRepairLive }
+    elseif ($el -gt 420) { Complete-NetworkRepairLive 'Zaman aşımı: 7 dk içinde başlamadı. Görev kapalıysa "Watchdog kur" ile yeniden kur.' }
+}
+
+function Invoke-NetworkRepair {
+    <#  Ag onarimini ister ve adimlari canli gosterir. SYSTEM gorevi varsa dosya istegi ile tetikler (UAC yok), yoksa dogrudan calistirir. #>
+    param([int]$Rung = 0)
+    if ($script:RepairRunning) { Show-RepairWindow | Out-Null; return }
+    $btn = $script:Win.FindName('BtnRepairNet')
+    $top = $script:Win.FindName('TxtSettingsStatus')
+    if ($top) { $top.Text = 'Ağ onarımı isteniyor...'; $top.Foreground = Bx 'Warn' }
+    if ($btn) { $btn.Content = 'Onarılıyor...'; $btn.IsEnabled = $false }
+    $script:RepairRunning = $true
+    $script:RepairSawDone = $false
+    $script:RepairShown = @{}
+    if (Test-Path -LiteralPath $HostLog) {
+        foreach ($l0 in @(Get-Content -LiteralPath $HostLog -Tail 80 -ErrorAction SilentlyContinue)) { $script:RepairShown[[string]$l0] = $true }
+    }
+    $script:RepairStart = Get-Date
+    $script:RepairRequestPath = Join-Path (Split-Path -Parent $HostJson) 'repair-request.json'
+    $hj0 = Get-Json $HostJson
+    $script:RepairWatch = ($hj0 -and ([int]($hj0.host | ForEach-Object { $_.repairWatch }) -eq 1))
+    $script:RepairLiveText = ''
+    $script:RepairStatusText = 'Onarım isteği gönderiliyor...'
+    Show-RepairWindow | Out-Null
+    $req = [ordered]@{ rung = $Rung; requestedBy = $env:USERNAME; at = (Get-Date).ToString('o') }
+    $sentToTask = $false
+    $taskUsed = ''
+    try {
+        $dir = Split-Path -Parent $HostJson
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        Write-RwJson -Path (Join-Path $dir 'repair-request.json') -Object $req
+        # 1) tercih: tetikleyicisiz on-demand gorev (her an baslar, beklemez)
+        $rt = Get-ScheduledTask -TaskName 'RemoteHostRepair' -ErrorAction SilentlyContinue
+        if ($rt) {
+            Start-ScheduledTask -TaskName 'RemoteHostRepair' -ErrorAction Stop
+            $sentToTask = $true
+            $taskUsed = 'RemoteHostRepair'
+        } else {
+            # 2) yoksa ana gorev; calisirken baslatilamaz (IgnoreNew), en cok 1 aralik beklenir
+            $task = Get-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue
+            if (-not $task) { $task = Get-ScheduledTask -TaskName 'RemoteHostPanel' -ErrorAction SilentlyContinue }
+            if ($task) {
+                Start-ScheduledTask -TaskName ([string]$task.TaskName) -ErrorAction Stop
+                $sentToTask = $true
+                $taskUsed = [string]$task.TaskName
+            }
+        }
+    } catch { Write-Trace ('onarim göreve gönderilemedi: ' + $_.Exception.Message) }
+    if (-not $sentToTask) {
+        $sargs = @('-RepairNetwork')
+        if ($Rung -gt 0) { $sargs += @('-Rung', [string]$Rung) }
+        Invoke-Script -Path $HostScript -ScriptArgs $sargs
+    }
+    Write-Trace ('ag onarimi baslatildi (gorev: ' + $taskUsed + ', sistem: ' + $sentToTask + ') - canli iz açildi')
+    if (-not $script:RepairTimer) { $script:RepairTimer = New-Object System.Windows.Threading.DispatcherTimer }
+    $script:RepairTimer.Interval = [TimeSpan]::FromMilliseconds(700)
+    $script:RepairTimer.Stop()
+    $script:RepairTimer.Add_Tick({ Update-RepairLive })
+    $script:RepairTimer.Start()
 }
 
 function New-Toggle {
@@ -2275,6 +2522,68 @@ if ($SelfTest) {
             if ($after -eq $before) { Write-Host 'SELFTEST UYARI: sessiz mod degismedi!' -ForegroundColor Red } else { Write-Host 'Sessiz mod calisiyor' -ForegroundColor Green }
         } catch { Write-Host ('Sessiz mod testi hata: ' + $_.Exception.Message) -ForegroundColor Red }
     } else { Write-Host 'Sessiz mod menusu bulunamadi!' -ForegroundColor Red }
+
+    if ($RepairTest) {
+        $script:RepairTestLast = ''
+        $script:RepairTickCount = 0
+        try {
+            Write-Host '--- CANLI AG ONARIM IZI TESTI (gercek onarim calisir; ag sagliysa kademe uygulanmaz) ---'
+            $rb = El $w 'BtnRepairNet'
+            if (-not $rb) {
+                Write-Host 'SELFTEST UYARI: BtnRepairNet bulunamadi!' -ForegroundColor Red
+            } else {
+                $rb.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+                $deadline = (Get-Date).AddSeconds(200)
+                $sawWin = $false
+                while ((Get-Date) -lt $deadline) {
+                    Wait-Dispatcher -Ms 500
+                    if ($script:RepairWin -and -not $sawWin) {
+                        $sawWin = $true
+                        Write-Host ('Canli pencere acildi: baslik="' + $script:RepairWin.Title + '" | canli metin kutusu=' + [bool]$script:RepairLiveBox)
+                    }
+                    $tbx = $script:RepairLiveBox
+                    if ($tbx) {
+                        $t = [string]$tbx.Text
+                        if ($t -and $t -ne $script:RepairTestLast) {
+                            $script:RepairTestLast = $t
+                            Write-Host ('  canli: ' + (@($t -split "`r`n" | Where-Object { $_ -match '\S' })[-1]))
+                        }
+                    }
+                    if (-not $script:RepairRunning) { break }
+                }
+                $txt = ''
+                $stat = ''
+                if ($script:RepairWin) {
+                    if ($script:RepairLiveBox) { $txt = [string]$script:RepairLiveBox.Text }
+                    if ($script:RepairStatusBox) { $stat = [string]$script:RepairStatusBox.Text }
+                }
+                $lc = @($txt -split "`r`n" | Where-Object { $_ -match '\S' }).Count
+                Write-Host ('Canli iz sonucu: pencere=' + $sawWin + ' | satir=' + $lc + ' | durum="' + $stat + '"')
+                foreach ($l in @($txt -split "`r`n")) { if ($l -match '\S') { Write-Host ('   iz | ' + $l) } }
+                if ($PreviewPath -and $script:RepairWin) {
+                    try {
+                        $rp = [System.IO.Path]::ChangeExtension($PreviewPath, '.repair.png')
+                        $script:RepairWin.UpdateLayout()
+                        Wait-Dispatcher -Ms 300
+                        $r2 = New-Object System.Windows.Media.Imaging.RenderTargetBitmap(640, 420, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
+                        $r2.Render($script:RepairWin.Content)
+                        $e2 = New-Object System.Windows.Media.Imaging.PngBitmapEncoder
+                        $e2.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($r2))
+                        $f2 = [System.IO.File]::Create($rp)
+                        $e2.Save($f2)
+                        $f2.Close()
+                        Write-Host ('Canli onarim penceresi onizlemesi yazildi: ' + $rp)
+                    } catch { Write-Host ('Onizleme hatasi: ' + $_.Exception.Message) }
+                }
+                if (-not $sawWin) { Write-Host 'SELFTEST UYARI: canli onarim penceresi acilmadi!' -ForegroundColor Red }
+                elseif ($lc -lt 2) { Write-Host 'SELFTEST UYARI: canli izde satir gorunmuyor!' -ForegroundColor Red }
+                elseif ($txt -notmatch 'elle ag onarimi basladi') { Write-Host 'SELFTEST UYARI: canli izde baslangic satiri yok!' -ForegroundColor Red }
+                elseif ($txt -notmatch 'ag onarimi bitti') { Write-Host 'SELFTEST UYARI: canli izde bitis satiri yok (zaman asimi?)!' -ForegroundColor Red }
+                else { Write-Host 'Canli ag onarim izi dogrulandi (baslangic + bitis satirlari ekranda)' -ForegroundColor Green }
+                Close-RepairWindow
+            }
+        } catch { Write-Host ('Canli onarim izi testi hata: ' + $_.Exception.Message) -ForegroundColor Red }
+    }
 
     try {
         $w.Show()

@@ -77,12 +77,26 @@ yenilenir (buton ve sayaç geçen süreyi gösterir).
 
 Üst çubuktaki **"Ağı / interneti onar"** düğmesi ağ kademelerini sırayla dener: önce sağlık testi (DNS, HTTPS,
 IP) yapılır; her şey yolundaysa hiçbir kademe uygulanmaz (sadece "ağ sağlıklı" raporu yazılır). Sorun varsa
-sırayla **DNS önbelleğini temizle → DHCP yenile → ağ adaptörünü yeniden başlat → winsock/IP sıfırla**
-kademeleri uygulanır; gerekirse makine yeniden başlatma istenir. Ağ sağlığı geri gelmezse kademe artar, her
-denemede `lastRepair` alanına hangi kademenin uygulandığı ve ne sonuç verdiği yazılır (Durum sekmesinde
-"ağ onarım kademesi"). Düğme, görevi **SYSTEM'de çalışan zamanlanmış görev üzerinden** tetikler
-(`C:\ProgramData\RemoteWatchdog\repair-request.json` dosyasını yazar, görevi elle başlatır), bu yüzden
-panel normal kullanıcı da olsa **UAC penceresi çıkmaz**.
+sırayla **DNS önbelleğini temizle → DHCP yenile → ağ adaptörünü yeniden başlat → servis/sürücü →
+winsock/IP sıfırla** kademeleri uygulanır; gerekirse makine yeniden başlatma istenir. Ağ sağlığı geri
+gelmezse kademe artar, her denemede `lastRepair` alanına hangi kademenin uygulandığı ve ne sonuç verdiği
+yazılır (Durum sekmesinde "ağ onarım kademesi"). Düğmeye basınca **"Ağ / interneti onarımı" penceresi**
+açılır ve sistem günlüğünden okunan satırlar **canlı** olarak akar (`[WARN] elle ag onarimi basladi…`,
+`[INFO] kademe 1/4 basliyor: …`, `kademe 1 uygulandi: …`, `ag onarimi bitti: basarili=…, kademe=…, sure=… sn`),
+bitince başlık yeşil `Bitti: BAŞARILI` olur ve balon gider. Penceredeki *Kapat* onarımı iptal etmez.
+
+Onarım **SYSTEM'de** çalışır, panel normal kullanıcı da olsa **UAC penceresi çıkmaz**: panel isteği
+`C:\ProgramData\RemoteWatchdog\repair-request.json` dosyasına yazar, sistemdeki iki görevden biri devreye girer:
+
+| Görev | Tetikleyici | Ne yapar |
+|---|---|---|
+| `RemoteHostRepair` | sadece panel (tetikleyicisiz) | Anında başlar; **panel yönetici/SYSTEM ise** doğrudan bunu çalıştırır |
+| `RemoteHostRepairWatch` | her 60 sn | `repair-request.json` varsa onarımı uygular, yoksa ~1 sn'de çıkar. Panel SYSTEM görevini adıyla başlatamadığı için asıl yol budur |
+
+Bu iki görev `RemoteHostWatchdog.ps1 -Install` ile kurulur (`-Uninstall` ile kaldırılır). Ana görevde
+`MultipleInstances=IgnoreNew` olduğundan dolayı 5 dakikalık kontrol görevi, çalışırken elle
+başlatılamaz; o yüzden onarım için ayrı görevler vardır. `last-run.json` içindeki `repairWatch: 1`
+alanı, 60 sn'lik izleyicinin kurulu olduğunu gösterir.
 
 Panelde dört sekme:
 

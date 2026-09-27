@@ -30,6 +30,7 @@ param(
     [switch]$NoJson,
     [switch]$ForceReboot,
     [switch]$RepairNetwork,
+    [switch]$RepairWatch,
     [int]$Rung = 0
 )
 
@@ -287,6 +288,19 @@ function Get-NetworkHealth {
     return [pscustomobject]$h
 }
 
+function Get-RepairRungName {
+    <#  Onarim kademesinin adlari (panel canli izinde gosterir). #>
+    param([int]$Rung)
+    switch ($Rung) {
+        1 { return 'DNS onbellegi temizleme + Dnscache servisi yeniden baslatma' }
+        2 { return 'DHCP lease yenileme (release/renew)' }
+        3 { return 'Wi-Fi yeniden baglanma + adaptor kapat/ac' }
+        4 { return 'Dhcp/NlaSvc servisleri + surucu yeniden baslatma' }
+        5 { return 'winsock/IP reset (yeniden baslatma gerekir)' }
+        default { return 'bilinmeyen kademe' }
+    }
+}
+
 function Invoke-NetworkRepair {
     param([int]$Rung)
     $cfg = $global:cfg
@@ -341,15 +355,19 @@ function Invoke-NetworkRepairFlow {
     $rungs = @()
     $healthy = Test-NetworkHealthy
     Write-Log 'WARN' ('elle ag onarimi basladi: ' + $Reason + ' (saatlim: ' + $healthy + ')')
-    if (-not $healthy) {
+    if ($healthy) {
+        Write-Log 'INFO' 'ag saglikli, hicbir kademe uygulanmadi'
+    } else {
         for ($r = 1; $r -le $MaxRung; $r++) {
+            Write-Log 'INFO' ('kademe ' + $r + '/' + $MaxRung + ' basliyor: ' + (Get-RepairRungName $r))
             $steps = @(Invoke-NetworkRepair -Rung $r)
             $rungs += $r
             $applied += $steps
-            Write-Log 'INFO' ('kademe ' + $r + ' uygulandi: ' + ($steps -join '; '))
+            Write-Log 'INFO' ('kademe ' + $r + ' uygulandi: ' + $(if ($steps.Count) { $steps -join '; ' } else { 'islem yok' }))
             Start-Sleep -Seconds 3
             $healthy = Test-NetworkHealthy
-            if ($healthy) { break }
+            if ($healthy) { Write-Log 'INFO' ('kademe ' + $r + ' sonrasi ag saglikli, onarim durduruldu'); break }
+            Write-Log 'WARN' ('kademe ' + $r + ' sonrasi hâlâ sorun var, devam ediliyor')
         }
     }
     $sw.Stop()
@@ -385,6 +403,11 @@ function Read-RepairRequest {
     $who = 'panel'
     if ($req -and $req.PSObject.Properties.Name -contains 'requestedBy') { $who = [string]$req.requestedBy }
     return [pscustomobject]@{ Rung = $rung; RequestedBy = $who; At = (Get-Date).ToString('o') }
+}
+
+function Test-RepairRequestPending {
+    <#  Panelin biraktigi onarim istegi dosyasi var mi (bu calisma icinde mi geldi)? #>
+    return (Test-Path -LiteralPath (Join-Path $BaseDir 'repair-request.json'))
 }
 
 function Test-NetworkLayer {
@@ -1090,6 +1113,7 @@ function Write-JsonStatus {
         uptimeMinutes = (Get-UptimeMinutes)
         publicIp = $script:PublicIp
         lastRepair = $lastRepair
+        repairWatch = $(if (Get-ScheduledTask -TaskName 'RemoteHostRepairWatch' -ErrorAction SilentlyContinue) { 1 } else { 0 })
         taskInstalled = $(if ($task) { $true } elseif ($taskKnown) { $false } else { 'unknown' })
         taskVisible = $taskKnown
         taskState = $(if ($task) { [string]$task.State } else { 'yok' })
@@ -1139,6 +1163,14 @@ function Invoke-Watchdog {
     Test-ServerPower
     Test-Tunnel
     Test-ServiceRecovery
+    # Onarim istegi bu calisma sirasinda gelmisse (panelden tiklandi) beklemeden uygula
+    if (Test-RepairRequestPending) {
+        $req2 = Read-RepairRequest
+        if ($req2) {
+            $null = Invoke-NetworkRepairFlow -MaxRung $req2.Rung -Reason ('panel istedi (' + $req2.RequestedBy + ')')
+            Test-NetworkLayer
+        }
+    }
     $badCount = Show-Results
     $allOk = ($badCount -eq 0)
     $summary = @($script:Results | ForEach-Object { $_.Name + '=' + $(if ($_.Skipped) { 'SKIP' } elseif ($_.Ok) { 'OK' } else { 'FAIL' }) }) -join '; '
@@ -1180,6 +1212,23 @@ function Install-Watchdog {
     $stg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName $TaskName -Action $act -Trigger @($trgStartup, $trgLogon, $trgRep) -Principal $prn -Settings $stg -Force | Out-Null
     Write-Log 'INFO' ('zamanlanmış görev kuruldu: ' + $TaskName + ' (acilista + oturum acilista + her ' + $IntervalMinutes + ' dk)')
+    # Panelden "Agi / interneti onar" icin ayri, tetikleyicisiz (on-demand) gorev.
+    # Ana gorev MultipleInstances=IgnoreNew oldugu icin calisirken baslatilamiyor; bu gorev her zaman aninda baslar.
+    try {
+        $rAct = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -RepairNetwork')
+        $rPrn = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $rStg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::FromMinutes(20)) -Hidden
+        Register-ScheduledTask -TaskName 'RemoteHostRepair' -Action $rAct -Principal $rPrn -Settings $rStg -Force | Out-Null
+        Write-Log 'INFO' '-panel onarim gorevi kuruldu: RemoteHostRepair (SYSTEM, sadece panelden tetiklenir, beklemez)'
+    } catch { Write-Log 'WARN' ('panel onarim gorevi kurulamadi: ' + $_.Exception.Message) }
+    # Normal kullanici SYSTEM gorevlerini adıyla baslatamaz; bu yuzden istek dosyasi 60 sn'de bir kontrol edilir.
+    try {
+        $wAct = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -RepairWatch')
+        $wTrg = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Seconds 60)
+        $wStg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::FromMinutes(5)) -Hidden
+        Register-ScheduledTask -TaskName 'RemoteHostRepairWatch' -Action $wAct -Trigger $wTrg -Principal $rPrn -Settings $wStg -Force | Out-Null
+        Write-Log 'INFO' 'panel onarim izleyicisi kuruldu: RemoteHostRepairWatch (SYSTEM, her 60 sn; istek yoksa aninda cikar)'
+    } catch { Write-Log 'WARN' ('panel onarim izleyicisi kurulamadi: ' + $_.Exception.Message) }
     $saver = Join-Path (Split-Path -Parent $ScriptPath) 'Protect-OpenDocuments.ps1'
     if (Test-Path -LiteralPath $saver) {
     $officeTask = 'RemoteHostOfficeSaver'
@@ -1206,6 +1255,8 @@ function Uninstall-Watchdog {
     if (-not (Test-Admin)) { Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ScriptPath + '"'), '-Uninstall'); return }
     Write-Log 'WARN' ('Uninstall-Watchdog CALISTIRILDI (PID ' + $PID + ') - zamanlanmis gorevler kaldiriliyor')
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false; Write-Host ('Zamanlanmis gorev kaldirildi: ' + $TaskName) }
+    if (Get-ScheduledTask -TaskName 'RemoteHostRepair' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostRepair' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostRepair' }
+    if (Get-ScheduledTask -TaskName 'RemoteHostRepairWatch' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostRepairWatch' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostRepairWatch' }
     if (Get-ScheduledTask -TaskName 'RemoteHostOfficeSaver' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostOfficeSaver' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostOfficeSaver' }
     Write-Host ('Config/loglar korundu: ' + $BaseDir)
 }
@@ -1237,6 +1288,20 @@ if ($ListHolidays) {
     exit 0
 }
 if ($Install) { Install-Watchdog; exit 0 }
+if ($RepairWatch) {
+    # Hafif izleyici: her 60 sn bir kez calisir. Istek dosyasi yoksa aninda cikar (gunluk/JSON dokunulmaz).
+    $wReq = Read-RepairRequest
+    if (-not $wReq) { exit 0 }
+    $global:cfg = Get-Config
+    Write-Log 'INFO' ('panel onarim istegi alindi (60 sn izleyici) -> isteme: ' + $wReq.RequestedBy)
+    $null = Invoke-NetworkRepairFlow -MaxRung $wReq.Rung -Reason ('panel istedi (' + $wReq.RequestedBy + ')')
+    $wH = Get-NetworkHealth
+    $wBad = 0
+    if (-not ($wH.Ip -and $wH.Dns -and $wH.Https)) { $wBad = 1 }
+    $null = Write-JsonStatus -AllOk ($wBad -eq 0) -Summary ('ag onarimi (izleyici): basarili=' + $script:LastRepair.ok) -BadCount $wBad
+    Send-Telegram ('[BILDIRIM] ' + $env:COMPUTERNAME + ' ag onarimi bitti (izleyici): basarili=' + $script:LastRepair.ok)
+    exit 0
+}
 if ($ForceReboot) {
     $global:cfg = Get-Config
     $state = Get-State
