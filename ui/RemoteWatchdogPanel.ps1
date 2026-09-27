@@ -191,42 +191,46 @@ function Write-Trace {
 }
 
 function Get-RoleInfo {
-    if ((Get-Date) -lt $script:RoleCacheUntil) { return $script:RoleCache }
-    $hj = Get-Json $HostJson
-    $cj = Get-Json $ClientJson
-    $clientData = [ordered]@{}
-    if ($ClientConfig -and (Test-Path -LiteralPath $ClientConfig)) { $clientData = Read-ConfigFile $ClientConfig }
-    $hostInstalled = $false
-    if ($hj -and $hj.generated) {
-        try { $hostInstalled = (((Get-Date) - [datetime]::Parse([string]$hj.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -lt 30) } catch { }
+    try {
+        if ((Get-Date) -lt $script:RoleCacheUntil) { return $script:RoleCache }
+        $hj = Get-Json $HostJson
+        $cj = Get-Json $ClientJson
+        $clientData = [ordered]@{}
+        if ($ClientConfig -and (Test-Path -LiteralPath $ClientConfig)) { $clientData = Read-ConfigFile $ClientConfig }
+        $hostInstalled = $false
+        if ($hj -and $hj.generated) {
+            try { $hostInstalled = (((Get-Date) - [datetime]::Parse([string]$hj.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -lt 30) } catch { }
+        }
+        if (-not $hostInstalled -and $hj -and $null -ne $hj.taskInstalled) { $hostInstalled = [bool]$hj.taskInstalled }
+        if (-not $hostInstalled) { $hostInstalled = [bool](Get-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue) }
+        $clientTask = Get-ScheduledTask -TaskName 'RemoteClientWatchdog' -ErrorAction SilentlyContinue
+        $clientFresh = $false
+        if ($cj -and $cj.generated) {
+            try { $clientFresh = (((Get-Date) - [datetime]::Parse([string]$cj.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -lt 30) } catch { }
+        }
+        $clientInstalled = ([bool]$clientTask) -or $clientFresh -or $clientData.Contains('Targets')
+        $targets = @()
+        if ($clientData.Contains('Targets')) { $targets = @($clientData['Targets']) }
+        $remoteName = 'uzak makine'
+        if ($clientData.Contains('RemoteName') -and $clientData['RemoteName']) { $remoteName = [string]$clientData['RemoteName'] }
+        $role = 'none'
+        if ($hostInstalled -and $clientInstalled) { $role = 'both' }
+        elseif ($hostInstalled) { $role = 'host' }
+        elseif ($clientInstalled) { $role = 'client' }
+        else { $role = 'manual' }
+        $text = switch ($role) { 'host' { 'UZAK HOST' } 'client' { 'ISTEMCI' } 'both' { 'HOST + ISTEMCI' } default { 'KURULU DEGIL' } }
+        $tip = switch ($role) {
+            'host' { 'Bu makine uzaktan erisilen host. CRD, RDP ve ag burada izleniyor; zorla kapatma bu makinede uygulanir.' }
+            'client' { 'Bu makine uzak makineye baglanan istemci. Hedef: ' + $remoteName + ' | ' + (@($targets) -join ', ') + ' | Restart bu makineye uygulanmaz, uzak makine kendi politikasina gore karar verir.' }
+            'both' { 'Bu makine hem host hem istemci olarak calisiyor.' }
+            default { 'Ne host ne istemci gorevi kurulu. Install-Host.ps1 veya Install-Client.ps1 calistirin.' }
+        }
+        $script:RoleCache = [pscustomobject]@{ Role = $role; RoleText = $text; Tip = $tip; HostTask = $hostInstalled; ClientTask = $clientInstalled; Targets = $targets; RemoteName = $remoteName }
+        $script:RoleCacheUntil = (Get-Date).AddMinutes(5)
+        return $script:RoleCache
+    } catch {
+        return [pscustomobject]@{ Role = 'none'; RoleText = 'KURULU DEGIL'; Tip = 'Rol bilgisi alinamadi.'; HostTask = $false; ClientTask = $false; Targets = @(); RemoteName = 'uzak makine' }
     }
-    if (-not $hostInstalled -and $hj -and $null -ne $hj.taskInstalled) { $hostInstalled = [bool]$hj.taskInstalled }
-    if (-not $hostInstalled) { $hostInstalled = [bool](Get-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue) }
-    $clientTask = Get-ScheduledTask -TaskName 'RemoteClientWatchdog' -ErrorAction SilentlyContinue
-    $clientFresh = $false
-    if ($cj -and $cj.generated) {
-        try { $clientFresh = (((Get-Date) - [datetime]::Parse([string]$cj.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -lt 30) } catch { }
-    }
-    $clientInstalled = ([bool]$clientTask) -or $clientFresh -or $clientData.Contains('Targets')
-    $targets = @()
-    if ($clientData.Contains('Targets')) { $targets = @($clientData['Targets']) }
-    $remoteName = 'uzak makine'
-    if ($clientData.Contains('RemoteName') -and $clientData['RemoteName']) { $remoteName = [string]$clientData['RemoteName'] }
-    $role = 'none'
-    if ($hostInstalled -and $clientInstalled) { $role = 'both' }
-    elseif ($hostInstalled) { $role = 'host' }
-    elseif ($clientInstalled) { $role = 'client' }
-    else { $role = 'manual' }
-    $text = switch ($role) { 'host' { 'UZAK HOST' } 'client' { 'ISTEMCI' } 'both' { 'HOST + ISTEMCI' } default { 'KURULU DEGIL' } }
-    $tip = switch ($role) {
-        'host' { 'Bu makine uzaktan erisilen host. CRD, RDP ve ag burada izleniyor; zorla kapatma bu makinede uygulanir.' }
-        'client' { 'Bu makine uzak makineye baglanan istemci. Hedef: ' + $remoteName + ' | ' + (@($targets) -join ', ') + ' | Restart bu makineye uygulanmaz, uzak makine kendi politikasina gore karar verir.' }
-        'both' { 'Bu makine hem host hem istemci olarak calisiyor.' }
-        default { 'Ne host ne istemci gorevi kurulu. Install-Host.ps1 veya Install-Client.ps1 calistirin.' }
-    }
-    $script:RoleCache = [pscustomobject]@{ Role = $role; RoleText = $text; Tip = $tip; HostTask = $hostInstalled; ClientTask = $clientInstalled; Targets = $targets; RemoteName = $remoteName }
-    $script:RoleCacheUntil = (Get-Date).AddMinutes(5)
-    return $script:RoleCache
 }
 
 function Get-Json {
@@ -825,117 +829,123 @@ function New-Combo {
 }
 
 function Get-Connections {
-    $st = Get-StatusInfo
-    $hj = $st.Host
-    $cj = $st.Client
-    $rows = New-Object System.Collections.ArrayList
-    $col = @{ ok = $script:C.Ok; warn = $script:C.Warn; bad = $script:C.Bad; none = $script:C.Muted }
-    $fg = @{ ok = '#0B1220'; warn = '#1A1206'; bad = '#1A0B0B'; none = '#0F1114' }
+    try {
+        $st = Get-StatusInfo
+        $hj = $st.Host
+        $cj = $st.Client
+        $rows = New-Object System.Collections.ArrayList
+        $col = @{ ok = $script:C.Ok; warn = $script:C.Warn; bad = $script:C.Bad; none = $script:C.Muted }
+        $fg = @{ ok = '#0B1220'; warn = '#1A1206'; bad = '#1A0B0B'; none = '#0F1114' }
 
-    function Add-Conn {
-        param([string]$Name, [string]$Sub, [string]$Level, [string]$StateText, [string]$Measure, [string]$Key = '', [string]$Action = '')
-        $lvl = $Level
-        [void]$rows.Add([pscustomobject]@{
-                Name = $Name; Sub = $Sub; StateText = $StateText; Measure = $Measure; Key = $Key; Action = $Action
-                Brush = Bx $col[$lvl]; PillBg = Bx $col[$lvl]; StateFg = Bx $fg[$lvl]
-            })
-    }
+        function Add-Conn {
+            param([string]$Name, [string]$Sub, [string]$Level, [string]$StateText, [string]$Measure, [string]$Key = '', [string]$Action = '')
+            $lvl = $Level
+            [void]$rows.Add([pscustomobject]@{
+                    Name = $Name; Sub = $Sub; StateText = $StateText; Measure = $Measure; Key = $Key; Action = $Action
+                    Brush = Bx $col[$lvl]; PillBg = Bx $col[$lvl]; StateFg = Bx $fg[$lvl]
+                })
+        }
 
-    if (-not $hj) {
-        Add-Conn 'Watchdog' 'hic calismadi' 'none' 'BİLİNMİYOR' 'last-run.json yok' 'host' 'Kur'
+        if (-not $hj) {
+            Add-Conn 'Watchdog' 'hic calismadi' 'none' 'BİLİNMİYOR' 'last-run.json yok' 'host' 'Kur'
+            return $rows
+        }
+
+        $byName = @{}
+        foreach ($c in @($hj.checks)) { $byName[[string]$c.name] = $c }
+        $mt = @{}
+        $nw = $byName['Ag katmani']
+        if ($nw -and $nw.metrics) { foreach ($k in $nw.metrics.PSObject.Properties.Name) { $mt[$k] = $nw.metrics.$k } }
+        $inet = $byName['Internet']
+        if ($inet -and $inet.metrics) { foreach ($k in $inet.metrics.PSObject.Properties.Name) { $mt[$k] = $inet.metrics.$k } }
+
+        if ($inet) {
+            $lvl = if ($inet.ok) { 'ok' } else { 'bad' }
+            Add-Conn 'İnternet erişimi' 'genel çıkış (HTTPS 204)' $lvl $(if ($inet.ok) { 'BAGLI' } else { 'YOK' }) ('https ' + [string]$mt['google204ms'] + ' ms, mtalk ' + [string]$mt['mtalk443ms'] + ' ms') 'run' 'Yeniden denetle'
+        }
+        if ($mt.ContainsKey('ip443state')) {
+            $lvl = if ($mt['ip443state'] -eq 'acik') { 'ok' } else { 'bad' }
+            Add-Conn 'IP erişimi' '1.1.1.1:443 (DNS bağığı değil)' $lvl $(if ($lvl -eq 'ok') { 'BAGLI' } else { 'YOK' }) ([string]$mt['ip443'] + ' ms')
+        }
+        if ($mt.ContainsKey('dnsstate')) {
+            $lvl = if ($mt['dnsstate'] -eq 'cozuldu') { 'ok' } else { 'bad' }
+            Add-Conn 'DNS çözümlemesi' 'remotedesktop.google.com' $lvl $(if ($lvl -eq 'ok') { 'ÇÖZÜLDÜ' } else { 'HATA' }) ([string]$mt['dnsms'] + ' ms')
+        }
+        if ($mt.ContainsKey('signalstate')) {
+            $lvl = if ($mt['signalstate'] -eq 'acik') { 'ok' } else { 'bad' }
+            Add-Conn 'CRD sinyal yolu' 'mtalk.google.com:443' $lvl $(if ($lvl -eq 'ok') { 'BAGLI' } else { 'KAPALI' }) ([string]$mt['signalms'] + ' ms')
+        }
+        if ($mt.ContainsKey('link')) {
+            Add-Conn 'Ağ adaptörü' ([string]$mt['link']) 'none' 'BİLGİ' ('DHCP=' + $(if ($mt['dhcp']) { 'acik' } else { 'kapali' }) + ', TIME_WAIT=' + [string]$mt['timewait'])
+        }
+
+        $crd = $byName['CRD servisi']
+        if ($crd) {
+            $m = @{}
+            if ($crd.metrics) { foreach ($k in $crd.metrics.PSObject.Properties.Name) { $m[$k] = $crd.metrics.$k } }
+            $registered = ($m['hostId'] -eq 'var')
+            $lvl = if (-not $registered) { 'bad' } elseif ($crd.ok) { 'ok' } else { 'warn' }
+            Add-Conn 'Google Remote Desktop kaydı' 'cihaz Google hesabında kayıtlı mı' $lvl $(if ($registered) { 'KAYITLI' } else { 'KAYITSIZ' }) ('host_id=' + $(if ($registered) { 'var' } else { 'YOK' })) 'crd' 'CRD sayfası'
+            $gc = [int]($(if ($m.ContainsKey('googleBaglanti')) { $m['googleBaglanti'] } else { 0 }))
+            $lvl2 = if ($gc -gt 0) { 'ok' } elseif ($registered) { 'warn' } else { 'none' }
+            Add-Conn 'CRD canlı bağlantısı' 'CRD daemon Google bağlantısı' $lvl2 $(if ($gc -gt 0) { 'BAGLI' } else { 'YOK' }) ('baglanti=' + $gc + ', servis=' + [string]$m['servis'] + ', yas=' + [string]$m['yasSaat'] + 'sa') 'run' 'Yeniden denetle'
+        }
+
+        $rdp = $byName['Windows RDP']
+        if ($rdp) {
+            $lvl = if ($rdp.ok) { 'ok' } else { 'bad' }
+            $fw = 0
+            if ([string]$rdp.detail -match 'firewall kapali=(\d+)') { $fw = [int]$matches[1] }
+            Add-Conn 'Windows RDP' '3389 + firewall' $lvl $(if ($rdp.ok) { 'HAZIR' } else { 'KAPALI' }) ('firewall kapali kural=' + $fw) 'log' 'Logları aç'
+        }
+
+        $tun = $byName['VS Code Tunnel']
+        if ($tun) {
+            $tunLvl = if ($tun.skipped -or $tun.ok) { 'ok' } else { 'warn' }
+            $tunState = if ($tun.skipped) { 'İZLENMİYOR' } elseif ($tun.ok) { 'ÇALIŞIYOR' } else { 'KAPALI' }
+            Add-Conn 'VS Code Tunnel' 'vscode.dev/tunels' $tunLvl $tunState ([string]$tun.detail) 'log' 'Logları aç'
+        }
+
+        $cfg = Get-HostConfig
+        if ($cfg.HeartbeatUrl) {
+            Add-Conn 'Dış izleme (heartbeat)' 'healthchecks.io ping adresi' 'ok' 'TANIMLI' ([string]$cfg.HeartbeatUrl) 'log' 'Logları aç'
+        } else {
+            $hbMsg = 'Kurulmadı. Makine sessizce kapanırsa dışarıdan fark edilmez. Seçenek 1: healthchecks.io ücretsiz hesabı açın, ping adresini Ayarlar > Bildirim > Healthchecks alanına yazın. Seçenek 2 (üçüncü hesap gerekmez): install\github-action-machine-health.yml dosyasını bir repoya .github\workflows altına kopyalayın; GitHub 15 dakikada bir kontrol eder, erişilemezse e-posta ve Telegram ile haber verir.'
+            Add-Conn 'Dış izleme (heartbeat)' 'healthchecks.io veya GitHub Actions' 'none' 'KAPALI - kurun' $hbMsg 'settings' 'Ayarlar'
+        }
+
+        $cfg = Get-HostConfig
+        $panelChk = $byName['Kontrol paneli']
+        if ($panelChk) {
+            Add-Conn 'Kontrol paneli' 'panel süreci (restart sonrası oturumda)' $(if ($panelChk.ok) { 'ok' } else { 'warn' }) $(if ($panelChk.ok) { 'ÇALIŞIYOR' } else { 'KAPALI' }) ([string]$panelChk.detail) 'panelstart' 'Paneli başlat'
+        }
+
+        $role = Get-RoleInfo
+        if ($role.ClientTask) {
+            foreach ($t in @($role.Targets)) {
+                $tname = [string]$t
+                $found = $false
+                foreach ($cc in @($cj.checks)) {
+                    if ([string]$cc.name -ne $tname) { continue }
+                    $found = $true
+                    $lvl = $(if ($cc.ok) { 'ok' } else { 'bad' })
+                    $msTxt = ''
+                    if ([string]$cc.detail -match '(\d+) ms') { $msTxt = 'gecikme ' + $matches[1] + ' ms' }
+                    Add-Conn $role.RemoteName $tname $lvl $(if ($cc.ok) { 'ULAŞILABİLİR' } else { 'ULAŞILAMIYOR' }) $(if ($msTxt) { $msTxt } else { [string]$cc.detail }) 'log' 'Logları aç'
+                }
+                if (-not $found) { Add-Conn $role.RemoteName $tname 'warn' 'BİLİNMİYOR' 'istemci bir tur calismadi' 'run' 'Şimdi denetle' }
+            }
+            $cjLvl = $(if ($cj -and $cj.ok) { 'ok' } else { 'bad' })
+            Add-Conn 'İstemci kontrol hattı' $(if ($role.HostTask) { 'bu makine (istemci + host)' } else { 'bu makine (istemci)' }) $cjLvl $(if ($cj -and $cj.ok) { 'TAMAM' } else { 'SORUN' }) $(if ($cj) { [string]$cj.summary } else { 'istemci çalışmadı' }) 'log' 'Logları aç'
+        } elseif ($cj) {
+            Add-Conn 'İstemci kontrol hattı' 'bu makine (host + istemci)' $(if ($cj.ok) { 'ok' } else { 'warn' }) $(if ($cj.ok) { 'TAMAM' } else { 'EK BİLGİ' }) ([string]$cj.summary) 'log' 'Logları aç'
+        }
+        return $rows
+    } catch {
+        $rows = New-Object System.Collections.ArrayList
+        [void]$rows.Add([pscustomobject]@{ Name = 'Hata'; Sub = 'baglanti listesi'; StateText = 'HATA'; Measure = $_.Exception.Message; Key = ''; Action = ''; Brush = Bx 'Bad'; PillBg = Bx 'Bad'; StateFg = Bx '#1A0B0B' })
         return $rows
     }
-
-    $byName = @{}
-    foreach ($c in @($hj.checks)) { $byName[[string]$c.name] = $c }
-    $mt = @{}
-    $nw = $byName['Ag katmani']
-    if ($nw -and $nw.metrics) { foreach ($k in $nw.metrics.PSObject.Properties.Name) { $mt[$k] = $nw.metrics.$k } }
-    $inet = $byName['Internet']
-    if ($inet -and $inet.metrics) { foreach ($k in $inet.metrics.PSObject.Properties.Name) { $mt[$k] = $inet.metrics.$k } }
-
-    if ($inet) {
-        $lvl = if ($inet.ok) { 'ok' } else { 'bad' }
-        Add-Conn 'İnternet erişimi' 'genel çıkış (HTTPS 204)' $lvl $(if ($inet.ok) { 'BAGLI' } else { 'YOK' }) ('https ' + [string]$mt['google204ms'] + ' ms, mtalk ' + [string]$mt['mtalk443ms'] + ' ms') 'run' 'Yeniden denetle'
-    }
-    if ($mt.ContainsKey('ip443state')) {
-        $lvl = if ($mt['ip443state'] -eq 'acik') { 'ok' } else { 'bad' }
-        Add-Conn 'IP erişimi' '1.1.1.1:443 (DNS bağığı değil)' $lvl $(if ($lvl -eq 'ok') { 'BAGLI' } else { 'YOK' }) ([string]$mt['ip443'] + ' ms')
-    }
-    if ($mt.ContainsKey('dnsstate')) {
-        $lvl = if ($mt['dnsstate'] -eq 'cozuldu') { 'ok' } else { 'bad' }
-        Add-Conn 'DNS çözümlemesi' 'remotedesktop.google.com' $lvl $(if ($lvl -eq 'ok') { 'ÇÖZÜLDÜ' } else { 'HATA' }) ([string]$mt['dnsms'] + ' ms')
-    }
-    if ($mt.ContainsKey('signalstate')) {
-        $lvl = if ($mt['signalstate'] -eq 'acik') { 'ok' } else { 'bad' }
-        Add-Conn 'CRD sinyal yolu' 'mtalk.google.com:443' $lvl $(if ($lvl -eq 'ok') { 'BAGLI' } else { 'KAPALI' }) ([string]$mt['signalms'] + ' ms')
-    }
-    if ($mt.ContainsKey('link')) {
-        Add-Conn 'Ağ adaptörü' ([string]$mt['link']) 'none' 'BİLGİ' ('DHCP=' + $(if ($mt['dhcp']) { 'acik' } else { 'kapali' }) + ', TIME_WAIT=' + [string]$mt['timewait'])
-    }
-
-    $crd = $byName['CRD servisi']
-    if ($crd) {
-        $m = @{}
-        if ($crd.metrics) { foreach ($k in $crd.metrics.PSObject.Properties.Name) { $m[$k] = $crd.metrics.$k } }
-        $registered = ($m['hostId'] -eq 'var')
-        $lvl = if (-not $registered) { 'bad' } elseif ($crd.ok) { 'ok' } else { 'warn' }
-        Add-Conn 'Google Remote Desktop kaydı' 'cihaz Google hesabında kayıtlı mı' $lvl $(if ($registered) { 'KAYITLI' } else { 'KAYITSIZ' }) ('host_id=' + $(if ($registered) { 'var' } else { 'YOK' })) 'crd' 'CRD sayfası'
-        $gc = [int]($(if ($m.ContainsKey('googleBaglanti')) { $m['googleBaglanti'] } else { 0 }))
-        $lvl2 = if ($gc -gt 0) { 'ok' } elseif ($registered) { 'warn' } else { 'none' }
-        Add-Conn 'CRD canlı bağlantısı' 'CRD daemon Google bağlantısı' $lvl2 $(if ($gc -gt 0) { 'BAGLI' } else { 'YOK' }) ('baglanti=' + $gc + ', servis=' + [string]$m['servis'] + ', yas=' + [string]$m['yasSaat'] + 'sa') 'run' 'Yeniden denetle'
-    }
-
-    $rdp = $byName['Windows RDP']
-    if ($rdp) {
-        $lvl = if ($rdp.ok) { 'ok' } else { 'bad' }
-        $fw = 0
-        if ([string]$rdp.detail -match 'firewall kapali=(\d+)') { $fw = [int]$matches[1] }
-        Add-Conn 'Windows RDP' '3389 + firewall' $lvl $(if ($rdp.ok) { 'HAZIR' } else { 'KAPALI' }) ('firewall kapali kural=' + $fw) 'log' 'Logları aç'
-    }
-
-    $tun = $byName['VS Code Tunnel']
-    if ($tun) {
-        $tunLvl = if ($tun.skipped -or $tun.ok) { 'ok' } else { 'warn' }
-        $tunState = if ($tun.skipped) { 'İZLENMİYOR' } elseif ($tun.ok) { 'ÇALIŞIYOR' } else { 'KAPALI' }
-        Add-Conn 'VS Code Tunnel' 'vscode.dev/tunels' $tunLvl $tunState ([string]$tun.detail) 'log' 'Logları aç'
-    }
-
-    $cfg = Get-HostConfig
-    if ($cfg.HeartbeatUrl) {
-        Add-Conn 'Dış izleme (heartbeat)' 'healthchecks.io ping adresi' 'ok' 'TANIMLI' ([string]$cfg.HeartbeatUrl) 'log' 'Logları aç'
-    } else {
-        $hbMsg = 'Kurulmadı. Makine sessizce kapanırsa dışarıdan fark edilmez. Seçenek 1: healthchecks.io ücretsiz hesabı açın, ping adresini Ayarlar > Bildirim > Healthchecks alanına yazın. Seçenek 2 (üçüncü hesap gerekmez): install\github-action-machine-health.yml dosyasını bir repoya .github\workflows altına kopyalayın; GitHub 15 dakikada bir kontrol eder, erişilemezse e-posta ve Telegram ile haber verir.'
-        Add-Conn 'Dış izleme (heartbeat)' 'healthchecks.io veya GitHub Actions' 'none' 'KAPALI - kurun' $hbMsg 'settings' 'Ayarlar'
-    }
-
-    $cfg = Get-HostConfig
-    $panelChk = $byName['Kontrol paneli']
-    if ($panelChk) {
-        Add-Conn 'Kontrol paneli' 'panel süreci (restart sonrası oturumda)' $(if ($panelChk.ok) { 'ok' } else { 'warn' }) $(if ($panelChk.ok) { 'ÇALIŞIYOR' } else { 'KAPALI' }) ([string]$panelChk.detail) 'panelstart' 'Paneli başlat'
-    }
-
-    $role = Get-RoleInfo
-    if ($role.ClientTask) {
-        foreach ($t in @($role.Targets)) {
-            $tname = [string]$t
-            $found = $false
-            foreach ($cc in @($cj.checks)) {
-                if ([string]$cc.name -ne $tname) { continue }
-                $found = $true
-                $lvl = $(if ($cc.ok) { 'ok' } else { 'bad' })
-                $msTxt = ''
-                if ([string]$cc.detail -match '(\d+) ms') { $msTxt = 'gecikme ' + $matches[1] + ' ms' }
-                Add-Conn $role.RemoteName $tname $lvl $(if ($cc.ok) { 'ULAŞILABİLİR' } else { 'ULAŞILAMIYOR' }) $(if ($msTxt) { $msTxt } else { [string]$cc.detail }) 'log' 'Logları aç'
-            }
-            if (-not $found) { Add-Conn $role.RemoteName $tname 'warn' 'BİLİNMİYOR' 'istemci bir tur calismadi' 'run' 'Şimdi denetle' }
-        }
-        $cjLvl = $(if ($cj -and $cj.ok) { 'ok' } else { 'bad' })
-        Add-Conn 'İstemci kontrol hattı' $(if ($role.HostTask) { 'bu makine (istemci + host)' } else { 'bu makine (istemci)' }) $cjLvl $(if ($cj -and $cj.ok) { 'TAMAM' } else { 'SORUN' }) $(if ($cj) { [string]$cj.summary } else { 'istemci çalışmadı' }) 'log' 'Logları aç'
-    } elseif ($cj) {
-        Add-Conn 'İstemci kontrol hattı' 'bu makine (host + istemci)' $(if ($cj.ok) { 'ok' } else { 'warn' }) $(if ($cj.ok) { 'TAMAM' } else { 'EK BİLGİ' }) ([string]$cj.summary) 'log' 'Logları aç'
-    }
-    return $rows
 }
 
 function Format-ConnSubLine {
@@ -967,67 +977,71 @@ function Update-ConnSub {
 }
 
 function Update-Connections {
-    $rows = Get-Connections
-    $items = @()
-    $okc = 0; $badc = 0; $info = 0
-    foreach ($r in $rows) {
-        $items += $r
-        if ($r.StateText -in @('BİLGİ', 'BİLİNMİYOR')) { $info++ }
-        elseif ($r.StateText -in @('YOK', 'KAPALI', 'KAYITSIZ', 'HATA')) { $badc++ }
-        else { $okc++ }
-    }
-    $cl = El $script:Win 'ConnList'
-    $cl.ItemsSource = $items
-    $cl.ItemTemplate = $script:Win.Resources['ConnRow']
-    $nx = Get-NextCheck
-    $script:ConnSummary = @{ Ok = $okc; Bad = $badc; Info = $info; LastRun = $(if ($nx.Known) { $nx.Last } else { $null }) }
-    Update-ConnSub $nx
+    try {
+        $rows = Get-Connections
+        $items = @()
+        $okc = 0; $badc = 0; $info = 0
+        foreach ($r in $rows) {
+            $items += $r
+            if ($r.StateText -in @('BİLGİ', 'BİLİNMİYOR')) { $info++ }
+            elseif ($r.StateText -in @('YOK', 'KAPALI', 'KAYITSIZ', 'HATA')) { $badc++ }
+            else { $okc++ }
+        }
+        $cl = El $script:Win 'ConnList'
+        $cl.ItemsSource = $items
+        $cl.ItemTemplate = $script:Win.Resources['ConnRow']
+        $nx = Get-NextCheck
+        $script:ConnSummary = @{ Ok = $okc; Bad = $badc; Info = $info; LastRun = $(if ($nx.Known) { $nx.Last } else { $null }) }
+        Update-ConnSub $nx
+    } catch { Write-Trace ('baglanti yenileme hatasi: ' + $_.Exception.Message) }
 }
 
 function Update-Countdown {
-    $w = $script:Win
-    if (-not $w) { return }
-    $txt = El $w 'TxtNext'
-    if (-not $txt) { return }
-    $badge = El $w 'NextBadge'
-    $btn = El $w 'BtnCheck'
-    if ($script:CheckBusy) {
-        $el = [int]((Get-Date) - $script:CheckBusySince).TotalSeconds
-        $txt.Text = 'Denetleniyor: ' + $el + ' sn'
-        $txt.Foreground = Bx 'Accent'
-        if ($badge) { $badge.ToolTip = 'Elle denetleme suruyor (' + $el + ' sn). Bitince baglantilar, genel durum ve bekleyen isler yenilenir.' }
-        if ($btn) { $btn.Content = 'Denetleniyor... ' + $el + ' sn' }
-        Update-ConnSub $null
-        return
-    }
-    if ($btn -and ([string]$btn.Content) -ne 'Şimdi denetle') { $btn.Content = 'Şimdi denetle' }
-    $n = Get-NextCheck
-    $aralik = ([math]::Round([double]$n.IntervalMinutes, 1)).ToString()
-    if (-not $n.Known) {
-        $txt.Text = 'Otomatik: -'
-        $txt.Foreground = Bx 'Muted'
-        if ($badge) { $badge.ToolTip = 'Sonraki otomatik denetim bilinmiyor: last-run.json yok. Ayarlar sayfasindan "Watchdog kur" ile baslatin.' }
-    } elseif ($n.RemainingSeconds -gt 0) {
-        $txt.Text = 'Otomatik: ' + (Format-ShortSpan $n.RemainingSeconds) + ' (' + [int][math]::Ceiling($n.RemainingSeconds) + ' sn)'
-        $txt.Foreground = Bx 'Muted'
-        if ($badge) { $badge.ToolTip = 'Sonraki otomatik denetim: ' + $n.Next.ToString('HH:mm:ss') + '  (' + [int][math]::Ceiling($n.RemainingSeconds) + ' sn sonra)' + "`r`n" + 'Aralik: ' + $aralik + ' dk (' + $n.IntervalSource + ')   |   son kontrol: ' + $n.Last.ToString('HH:mm:ss') + '  (' + (Format-ShortSpan $n.AgeSeconds) + ' once, kaynak: ' + $n.Source + ')' }
-    } elseif ($n.OverdueSeconds -le [math]::Max(90.0, ([double]$n.IntervalMinutes * 30.0))) {
-        $txt.Text = 'Otomatik: bekleniyor (' + [int][math]::Ceiling($n.OverdueSeconds) + ' sn)'
-        $txt.Foreground = Bx 'Info'
-        if ($badge) { $badge.ToolTip = 'Denetim zamani geldi (' + [int][math]::Ceiling($n.OverdueSeconds) + ' sn once): zamanlanmis gorev birazdan calisir. Son kontrol: ' + $n.Last.ToString('HH:mm:ss') + '   |   aralik: ' + $aralik + ' dk (' + $n.IntervalSource + ')' }
-    } else {
-        $txt.Text = 'Otomatik: gecikti (' + (Format-ShortSpan $n.AgeSeconds) + ')'
-        $txt.Foreground = Bx 'Warn'
-        $hj = Get-Json $HostJson
-        if ($badge) { $badge.ToolTip = 'Zamanlanmis gorev calismiyor olabilir: son kontrol ' + $n.Last.ToString('HH:mm:ss') + ' (' + (Format-ShortSpan $n.AgeSeconds) + ' once), beklenen aralik ' + $aralik + ' dk (' + $n.IntervalSource + '). Gorev durumu: ' + $(if ($hj) { [string]$hj.taskState } else { 'bilinmiyor' }) + '. Cozum: "Şimdi denetle" ile elle calistirin.' }
-    }
-    Update-ConnSub $n
+    try {
+        $w = $script:Win
+        if (-not $w) { return }
+        $txt = El $w 'TxtNext'
+        if (-not $txt) { return }
+        $badge = El $w 'NextBadge'
+        $btn = El $w 'BtnCheck'
+        if ($script:CheckBusy) {
+            $el = [int]((Get-Date) - $script:CheckBusySince).TotalSeconds
+            $txt.Text = 'Denetleniyor: ' + $el + ' sn'
+            $txt.Foreground = Bx 'Accent'
+            if ($badge) { $badge.ToolTip = 'Elle denetleme suruyor (' + $el + ' sn). Bitince baglantilar, genel durum ve bekleyen isler yenilenir.' }
+            if ($btn) { $btn.Content = 'Denetleniyor... ' + $el + ' sn' }
+            Update-ConnSub $null
+            return
+        }
+        if ($btn -and ([string]$btn.Content) -ne 'Şimdi denetle') { $btn.Content = 'Şimdi denetle' }
+        $n = Get-NextCheck
+        $aralik = ([math]::Round([double]$n.IntervalMinutes, 1)).ToString()
+        if (-not $n.Known) {
+            $txt.Text = 'Otomatik: -'
+            $txt.Foreground = Bx 'Muted'
+            if ($badge) { $badge.ToolTip = 'Sonraki otomatik denetim bilinmiyor: last-run.json yok. Ayarlar sayfasindan "Watchdog kur" ile baslatin.' }
+        } elseif ($n.RemainingSeconds -gt 0) {
+            $txt.Text = 'Otomatik: ' + (Format-ShortSpan $n.RemainingSeconds) + ' (' + [int][math]::Ceiling($n.RemainingSeconds) + ' sn)'
+            $txt.Foreground = Bx 'Muted'
+            if ($badge) { $badge.ToolTip = 'Sonraki otomatik denetim: ' + $n.Next.ToString('HH:mm:ss') + '  (' + [int][math]::Ceiling($n.RemainingSeconds) + ' sn sonra)' + "`r`n" + 'Aralik: ' + $aralik + ' dk (' + $n.IntervalSource + ')   |   son kontrol: ' + $n.Last.ToString('HH:mm:ss') + '  (' + (Format-ShortSpan $n.AgeSeconds) + ' once, kaynak: ' + $n.Source + ')' }
+        } elseif ($n.OverdueSeconds -le [math]::Max(90.0, ([double]$n.IntervalMinutes * 30.0))) {
+            $txt.Text = 'Otomatik: bekleniyor (' + [int][math]::Ceiling($n.OverdueSeconds) + ' sn)'
+            $txt.Foreground = Bx 'Info'
+            if ($badge) { $badge.ToolTip = 'Denetim zamani geldi (' + [int][math]::Ceiling($n.OverdueSeconds) + ' sn once): zamanlanmis gorev birazdan calisir. Son kontrol: ' + $n.Last.ToString('HH:mm:ss') + '   |   aralik: ' + $aralik + ' dk (' + $n.IntervalSource + ')' }
+        } else {
+            $txt.Text = 'Otomatik: gecikti (' + (Format-ShortSpan $n.AgeSeconds) + ')'
+            $txt.Foreground = Bx 'Warn'
+            $hj = Get-Json $HostJson
+            if ($badge) { $badge.ToolTip = 'Zamanlanmis gorev calismiyor olabilir: son kontrol ' + $n.Last.ToString('HH:mm:ss') + ' (' + (Format-ShortSpan $n.AgeSeconds) + ' once), beklenen aralik ' + $aralik + ' dk (' + $n.IntervalSource + '). Gorev durumu: ' + $(if ($hj) { [string]$hj.taskState } else { 'bilinmiyor' }) + '. Cozum: "Şimdi denetle" ile elle calistirin.' }
+        }
+        Update-ConnSub $n
+    } catch { Write-Trace ('sayac yenileme hatasi: ' + $_.Exception.Message) }
 }
 
 function Invoke-ConnAction {
     param([string]$Key)
     switch ($Key) {
-        'host' { Invoke-Script -Path $HostScript -Args @('-Install') }
+        'host' { Invoke-Script -Path $HostScript -Args @('-Install'); Start-Sleep 5; Update-Connections; Update-Overview; Update-Actions; Update-ActionBarColors }
         'run' { Start-ManualCheck }
         'crd' { Start-Process 'https://remotedesktop.google.com/headless' }
         'docs' { Invoke-Script -Path $HostDocs -Args @('-Force') -Wait }
@@ -1077,6 +1091,7 @@ function Complete-ManualCheck {
     Update-Connections
     Update-Overview
     Update-Actions
+    Update-ActionBarColors
     if ($script:Page -eq 'log') { Update-Log }
     Refresh-Icon
     Update-Countdown
@@ -1099,95 +1114,186 @@ function Show-Page {
 }
 
 function Update-Overview {
-    $st = Get-StatusInfo
-    $hj = $st.Host
-    $cj = $st.Client
-    $color = if ($null -eq $hj -and $null -eq $cj) { $script:C.Muted } elseif ($st.Bad -gt 0) { $script:C.Bad } else { $script:C.Ok }
-    (El $script:Win 'StatusDot').Fill = Bx $color
-    (El $script:Win 'Pill').Background = Bx '#1D2733'
-    $pill = El $script:Win 'TxtPill'
-    $pill.Foreground = Bx $color
-    $pill.Text = $(if ($null -eq $hj -and $null -eq $cj) { 'VERI YOK' } elseif ($st.Bad -gt 0) { ([string]$st.Bad + ' SORUN') } else { 'AYAKTA' })
-    $last = 'kontrol yok'
-    if ($st.Age) { $last = 'son kontrol ' + [math]::Round($st.Age.TotalMinutes) + ' dk once' }
-    $role = Get-RoleInfo
-    (El $script:Win 'TxtSubtitle').Text = $role.RoleText + '  |  ' + $env:COMPUTERNAME + '  |  ' + $last
-    (El $script:Win 'TxtRole').Text = $role.RoleText
-    (El $script:Win 'TxtRole').Foreground = $(switch ($role.Role) { 'host' { Bx 'Ok' } 'client' { Bx 'Info' } 'both' { Bx 'Accent' } default { Bx 'Warn' } })
-    (El $script:Win 'RoleBadge').ToolTip = $role.Tip
-    (El $script:Win 'TxtOverviewSub').Text = $(if ($role.ClientTask -and -not $role.HostTask) { 'Izlenen uzak makine: ' + $role.RemoteName + '  (' + (@($role.Targets) -join ', ') + ')' } elseif ($hj) { [string]$hj.summary } else { 'Watchdog hic calismadi. "Watchdog kur" ile baslat.' })
+    try {
+        $st = Get-StatusInfo
+        $hj = $st.Host
+        $cj = $st.Client
+        $color = if ($null -eq $hj -and $null -eq $cj) { $script:C.Muted } elseif ($st.Bad -gt 0) { $script:C.Bad } else { $script:C.Ok }
+        (El $script:Win 'StatusDot').Fill = Bx $color
+        (El $script:Win 'Pill').Background = Bx '#1D2733'
+        $pill = El $script:Win 'TxtPill'
+        $pill.Foreground = Bx $color
+        $pill.Text = $(if ($null -eq $hj -and $null -eq $cj) { 'VERI YOK' } elseif ($st.Bad -gt 0) { ([string]$st.Bad + ' SORUN') } else { 'AYAKTA' })
+        $last = 'kontrol yok'
+        if ($st.Age) { $last = 'son kontrol ' + [math]::Round($st.Age.TotalMinutes) + ' dk once' }
+        $role = Get-RoleInfo
+        (El $script:Win 'TxtSubtitle').Text = $role.RoleText + '  |  ' + $env:COMPUTERNAME + '  |  ' + $last
+        (El $script:Win 'TxtRole').Text = $role.RoleText
+        (El $script:Win 'TxtRole').Foreground = $(switch ($role.Role) { 'host' { Bx 'Ok' } 'client' { Bx 'Info' } 'both' { Bx 'Accent' } default { Bx 'Warn' } })
+        (El $script:Win 'RoleBadge').ToolTip = $role.Tip
+        (El $script:Win 'TxtOverviewSub').Text = $(if ($role.ClientTask -and -not $role.HostTask) { 'Izlenen uzak makine: ' + $role.RemoteName + '  (' + (@($role.Targets) -join ', ') + ')' } elseif ($hj) { [string]$hj.summary } else { 'Watchdog hic calismadi. "Watchdog kur" ile baslat.' })
 
-    $cards = New-Object System.Collections.ArrayList
-    $labels = @{
-        'Internet' = 'İnternet erişimi'
-        'Ag katmani' = 'Ağ katmanı (IP/DNS/HTTPS)'
-        'CRD servisi' = 'Google Remote Desktop (CRD)'
-        'Guc/uyku ayarlari' = 'Güç ve uyku ayarları'
-        'Kontrol paneli' = 'Kontrol paneli'
-    }
-    $hints = @{
-        'CRD servisi' = 'Kırmızıysa bu cihaz Google hesabına kayıtlı değil (host.json yok). Kayıt, bağlandığınız cihazdaki eklentiden değil, bu makinede tarayıcıdan yapılır: remotedesktop.google.com/headless -> "Set up remote access" (Brave veya Chrome; seçenek çıkmazsa Chrome kurun). Sonra kendi cihazınızda Machines -> + ile ad ve PIN girin.'
-    }
-    if ($hj) {
-        foreach ($c in @($hj.checks)) {
-            $col = if ($c.skipped) { 'Muted' } elseif ($c.ok) { 'Ok' } else { 'Bad' }
-            $nm = [string]$c.name
-            if ($labels.ContainsKey($nm)) { $nm = $labels[$nm] }
-            $rp = [string]$c.repair
-            if ($hints.ContainsKey([string]$c.name)) { $rp = $hints[[string]$c.name] }
-            [void]$cards.Add([pscustomobject]@{ Title = $nm; Detail = [string]$c.detail; Repair = $rp; Brush = Bx $col })
+        $cards = New-Object System.Collections.ArrayList
+        $labels = @{
+            'Internet' = 'İnternet erişimi'
+            'Ag katmani' = 'Ağ katmanı (IP/DNS/HTTPS)'
+            'CRD servisi' = 'Google Remote Desktop (CRD)'
+            'Guc/uyku ayarlari' = 'Güç ve uyku ayarları'
+            'Kontrol paneli' = 'Kontrol paneli'
         }
-    }
-    if ($cj) {
-        foreach ($c in @($cj.checks)) {
-            $col = if ($c.ok) { 'Ok' } else { 'Bad' }
-            $nm = [string]$c.name
-            if ($labels.ContainsKey($nm)) { $nm = $labels[$nm] }
-            [void]$cards.Add([pscustomobject]@{ Title = ($nm + ' (istemci)'); Detail = [string]$c.detail; Repair = ''; Brush = Bx $col })
+        $hints = @{
+            'CRD servisi' = 'Kırmızıysa bu cihaz Google hesabına kayıtlı değil (host.json yok). Kayıt, bağlandığınız cihazdaki eklentiden değil, bu makinede tarayıcıdan yapılır: remotedesktop.google.com/headless -> "Set up remote access" (Brave veya Chrome; seçenek çıkmazsa Chrome kurun). Sonra kendi cihazınızda Machines -> + ile ad ve PIN girin.'
         }
-    }
-    $ic = El $script:Win 'Cards'
-    $ic.ItemsSource = $cards
-    $ic.ItemTemplate = $script:Win.Resources['StatusCard']
+        if ($hj) {
+            foreach ($c in @($hj.checks)) {
+                $col = if ($c.skipped) { 'Muted' } elseif ($c.ok) { 'Ok' } else { 'Bad' }
+                $nm = [string]$c.name
+                if ($labels.ContainsKey($nm)) { $nm = $labels[$nm] }
+                $rp = [string]$c.repair
+                if ($hints.ContainsKey([string]$c.name)) { $rp = $hints[[string]$c.name] }
+                [void]$cards.Add([pscustomobject]@{ Title = $nm; Detail = [string]$c.detail; Repair = $rp; Brush = Bx $col })
+            }
+        }
+        if ($cj) {
+            foreach ($c in @($cj.checks)) {
+                $col = if ($c.ok) { 'Ok' } else { 'Bad' }
+                $nm = [string]$c.name
+                if ($labels.ContainsKey($nm)) { $nm = $labels[$nm] }
+                [void]$cards.Add([pscustomobject]@{ Title = ($nm + ' (istemci)'); Detail = [string]$c.detail; Repair = ''; Brush = Bx $col })
+            }
+        }
+        $ic = El $script:Win 'Cards'
+        $ic.ItemsSource = $cards
+        $ic.ItemTemplate = $script:Win.Resources['StatusCard']
 
-    $env = New-Object System.Collections.ArrayList
-    if ($hj) {
-        [void]$env.Add('son kontrol    : ' + $hj.generated)
-        [void]$env.Add('uptime         : ' + [math]::Round([double]$hj.uptimeMinutes / 60, 1) + ' saat')
-        [void]$env.Add('kamu IP        : ' + $(if ($hj.publicIp) { $hj.publicIp } else { '?' }))
-        [void]$env.Add('gorev           : ' + $hj.taskState + $(if ($hj.taskInstalled) { '' } else { '  (kurulu degil)' }))
-        [void]$env.Add('blackout        : ' + $(if ($hj.inBlackout) { 'AKTIF - zorla kapatma izinli' } else { 'kapali - sadece bilgilendirme' }))
-        [void]$env.Add('tatil           : ' + $(if ($hj.isHoliday) { 'evet' } else { 'hayir' }) + '  (mod: ' + $hj.config.holidayMode + ')')
-        [void]$env.Add('restart         : ' + $hj.config.restartPolicy + '  |  blackout ' + $hj.config.blackoutStart + ':00-' + $hj.config.blackoutEnd + ':00  |  tam gun: ' + ((@($hj.config.blackoutFullDays)) -join ','))
-        [void]$env.Add('daima zorla     : ' + $(if ($hj.config.forceRestartAlways) { 'ACIK' } else { 'kapali' }) + $(if ($hj.config.forceRestartUntil) { '  (' + $hj.config.forceRestartUntil + ')' } else { '' }))
-        [void]$env.Add('ardisik hata    : ' + $hj.state.consecutiveFailures + '  |  ag onarim kademesi: ' + $hj.state.netRepairRung)
-        [void]$env.Add('tatil listesi   : ' + ((@($hj.config.holidays)) -join ', '))
-        $nx = Get-NextCheck
-        if ($nx.Known) { [void]$env.Add('sonraki kontrol : ' + $nx.Next.ToString('HH:mm:ss') + '  (kalan ' + [int][math]::Ceiling($nx.RemainingSeconds) + ' sn, aralik ' + ([math]::Round([double]$nx.IntervalMinutes, 1)) + ' dk - ' + $nx.IntervalSource + ')') }
-        else { [void]$env.Add('sonraki kontrol : bilinmiyor (last-run.json yok)') }
-    } else { [void]$env.Add('last-run.json bulunamadi: ' + $HostJson) }
-    (El $script:Win 'TxtEnv').Text = ($env -join "`n")
+        $env = New-Object System.Collections.ArrayList
+        if ($hj) {
+            [void]$env.Add('son kontrol    : ' + $hj.generated)
+            [void]$env.Add('uptime         : ' + [math]::Round([double]$hj.uptimeMinutes / 60, 1) + ' saat')
+            [void]$env.Add('kamu IP        : ' + $(if ($hj.publicIp) { $hj.publicIp } else { '?' }))
+            [void]$env.Add('gorev           : ' + $hj.taskState + $(if ($hj.taskInstalled) { '' } else { '  (kurulu degil)' }))
+            [void]$env.Add('blackout        : ' + $(if ($hj.inBlackout) { 'AKTIF - zorla kapatma izinli' } else { 'kapali - sadece bilgilendirme' }))
+            [void]$env.Add('tatil           : ' + $(if ($hj.isHoliday) { 'evet' } else { 'hayir' }) + '  (mod: ' + $hj.config.holidayMode + ')')
+            [void]$env.Add('restart         : ' + $hj.config.restartPolicy + '  |  blackout ' + $hj.config.blackoutStart + ':00-' + $hj.config.blackoutEnd + ':00  |  tam gun: ' + ((@($hj.config.blackoutFullDays)) -join ','))
+            [void]$env.Add('daima zorla     : ' + $(if ($hj.config.forceRestartAlways) { 'ACIK' } else { 'kapali' }) + $(if ($hj.config.forceRestartUntil) { '  (' + $hj.config.forceRestartUntil + ')' } else { '' }))
+            [void]$env.Add('ardisik hata    : ' + $hj.state.consecutiveFailures + '  |  ag onarim kademesi: ' + $hj.state.netRepairRung)
+            [void]$env.Add('tatil listesi   : ' + ((@($hj.config.holidays)) -join ', '))
+            $nx = Get-NextCheck
+            if ($nx.Known) { [void]$env.Add('sonraki kontrol : ' + $nx.Next.ToString('HH:mm:ss') + '  (kalan ' + [int][math]::Ceiling($nx.RemainingSeconds) + ' sn, aralik ' + ([math]::Round([double]$nx.IntervalMinutes, 1)) + ' dk - ' + $nx.IntervalSource + ')') }
+            else { [void]$env.Add('sonraki kontrol : bilinmiyor (last-run.json yok)') }
+        } else { [void]$env.Add('last-run.json bulunamadi: ' + $HostJson) }
+        (El $script:Win 'TxtEnv').Text = ($env -join "`n")
 
-    (El $script:Win 'TxtBlackout').Text = $(if ($hj -and $hj.inBlackout) { 'Blackout: AKTIF' } else { 'Blackout: kapali' })
-    (El $script:Win 'TxtTaskState').Text = 'Gorev: ' + $(if ($hj) { $hj.taskState } else { 'yok' })
-    $up = '-'
-    if ($hj) { $up = ([math]::Round(([double]$hj.uptimeMinutes) / 60.0, 1)).ToString() + ' sa' }
-    (El $script:Win 'TxtUptime').Text = 'Uptime: ' + $up
+        (El $script:Win 'TxtBlackout').Text = $(if ($hj -and $hj.inBlackout) { 'Blackout: AKTIF' } else { 'Blackout: kapali' })
+        (El $script:Win 'TxtTaskState').Text = 'Gorev: ' + $(if ($hj) { $hj.taskState } else { 'yok' })
+        $up = '-'
+        if ($hj) { $up = ([math]::Round(([double]$hj.uptimeMinutes) / 60.0, 1)).ToString() + ' sa' }
+        (El $script:Win 'TxtUptime').Text = 'Uptime: ' + $up
+
+        try { Update-ActionBarColors } catch { Write-Trace ('genel durum renk guncelleme hatasi: ' + $_.Exception.Message) }
+    } catch { Write-Trace ('genel durum yenileme hatasi: ' + $_.Exception.Message) }
 }
 
 function Update-Actions {
-    $list = Get-Actions
-    $col = @{ ok = $script:C.Ok; warn = $script:C.Warn; bad = $script:C.Bad; info = $script:C.Muted }
-    $items = @()
-    foreach ($a in $list) {
-        $items += [pscustomobject]@{ Title = [string]$a.Title; Detail = [string]$a.Detail; Action = [string]$a.Action; Key = [string]$a.Key; Brush = Bx $col[[string]$a.Level] }
+    try {
+        $list = Get-Actions
+        $col = @{ ok = $script:C.Ok; warn = $script:C.Warn; bad = $script:C.Bad; info = $script:C.Muted }
+        $items = @()
+        foreach ($a in $list) {
+            $items += [pscustomobject]@{ Title = [string]$a.Title; Detail = [string]$a.Detail; Action = [string]$a.Action; Key = [string]$a.Key; Brush = Bx $col[[string]$a.Level] }
+        }
+        $al = El $script:Win 'ActionList'
+        $al.ItemsSource = $items
+        $al.ItemTemplate = $script:Win.Resources['ActionRow']
+
+        (El $script:Win 'TxtActionsSub').Text = (@($list | Where-Object { $_.Level -ne 'ok' }).Count.ToString() + ' is bekliyor')
+
+        try { Update-ActionBarColors } catch { Write-Trace ('islem renk guncelleme hatasi: ' + $_.Exception.Message) }
+    } catch { Write-Trace ('islem yenileme hatasi: ' + $_.Exception.Message) }
+}
+
+function Update-ActionBarColors {
+    if (-not $script:ActionButtons) { return }
+    if ((Get-Date) -lt $script:TaskCacheUntil) {
+        $task = $script:TaskCache
+    } else {
+        $task = $null
+        try { $task = Get-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue } catch { }
+        $script:TaskCache = $task
+        $script:TaskCacheUntil = (Get-Date).AddSeconds(60)
     }
-    $al = El $script:Win 'ActionList'
-    $al.ItemsSource = $items
-    $al.ItemTemplate = $script:Win.Resources['ActionRow']
-
-
-    (El $script:Win 'TxtActionsSub').Text = (@($list | Where-Object { $_.Level -ne 'ok' }).Count.ToString() + ' is bekliyor')
+    $running = [bool]($task -and $task.State -eq 'Running')
+    $installed = [bool]$task
+    $statusText = 'Watchdog: kurulu degil'
+    $statusColor = 'Bad'
+    if ($installed -and $running) {
+        $statusText = 'Zamanlanmis gorev: CALISiyOR'
+        $statusColor = 'Ok'
+    } elseif ($installed) {
+        $statusText = 'Zamanlanmis gorev: kurulu, calismiyor'
+        $statusColor = 'Warn'
+    }
+    if ($script:TaskStatusText) {
+        $script:TaskStatusText.Text = $statusText
+        $script:TaskStatusText.Foreground = Bx $statusColor
+    }
+    foreach ($bb in $script:ActionButtons) {
+        $k = [string]$bb.Tag
+        if ($k -eq 'install') {
+            if ($installed) {
+                $bb.Background = Bx 'Ok'
+                $bb.Foreground = Bx '#0B1220'
+                $bb.BorderBrush = Bx 'Ok'
+                $bb.IsEnabled = $false
+            } else {
+                $bb.Background = Bx 'Bad'
+                $bb.Foreground = Bx '#1A0B0B'
+                $bb.BorderBrush = Bx 'Bad'
+                $bb.IsEnabled = $true
+            }
+        } elseif ($k -eq 'uninstall') {
+            if ($installed) {
+                $bb.Background = Bx 'Card2'
+                $bb.Foreground = Bx 'Text'
+                $bb.BorderBrush = Bx 'Line'
+                $bb.IsEnabled = $true
+            } else {
+                $bb.Background = Bx 'Card2'
+                $bb.Foreground = Bx 'Muted'
+                $bb.BorderBrush = Bx 'Line'
+                $bb.IsEnabled = $false
+            }
+        } elseif ($k -eq 'stoptask') {
+            if ($running) {
+                $bb.Background = Bx 'Warn'
+                $bb.Foreground = Bx '#1A1206'
+                $bb.BorderBrush = Bx 'Warn'
+                $bb.IsEnabled = $true
+            } else {
+                $bb.Background = Bx 'Card2'
+                $bb.Foreground = Bx 'Muted'
+                $bb.BorderBrush = Bx 'Line'
+                $bb.IsEnabled = $false
+            }
+        } elseif ($k -eq 'runtask') {
+            if (-not $running) {
+                $bb.Background = Bx 'Ok'
+                $bb.Foreground = Bx '#0B1220'
+                $bb.BorderBrush = Bx 'Ok'
+                $bb.IsEnabled = $true
+            } else {
+                $bb.Background = Bx 'Card2'
+                $bb.Foreground = Bx 'Muted'
+                $bb.BorderBrush = Bx 'Line'
+                $bb.IsEnabled = $false
+            }
+        } else {
+            $bb.Background = Bx 'Card2'
+            $bb.Foreground = Bx 'Text'
+            $bb.BorderBrush = Bx 'Line'
+            $bb.IsEnabled = $true
+        }
+    }
 }
 
 function Update-Log {
@@ -1361,22 +1467,26 @@ function New-Segmented {
         $kk = [string]$Key
         $b.add_Click({
                 param($s, $e)
-                $script:EnumSelect[$kk] = $opt
-                $grp = $s.Source
-                if (-not $grp) { $grp = $s.OriginalSource }
-                if ($grp) { $grp = $grp.Parent }
-                foreach ($x in @($grp.Children)) {
-                    if (-not ($x -is [System.Windows.Controls.Button])) { continue }
-                    if ([string]$x.Content -eq $opt) {
-                        $x.Background = Bx 'Accent'
-                        $x.Foreground = Bx '#0B1220'
-                        $x.BorderBrush = Bx 'Accent'
-                    } else {
-                        $x.Background = Bx 'Card2'
-                        $x.Foreground = Bx 'Muted'
-                        $x.BorderBrush = Bx 'Line'
+                try {
+                    $script:EnumSelect[$kk] = $opt
+                    $grp = $s.Source
+                    if (-not $grp) { $grp = $s.OriginalSource }
+                    if ($grp) { $grp = $grp.Parent }
+                    if ($grp) {
+                        foreach ($x in @($grp.Children)) {
+                            if (-not ($x -is [System.Windows.Controls.Button])) { continue }
+                            if ([string]$x.Content -eq $opt) {
+                                $x.Background = Bx 'Accent'
+                                $x.Foreground = Bx '#0B1220'
+                                $x.BorderBrush = Bx 'Accent'
+                            } else {
+                                $x.Background = Bx 'Card2'
+                                $x.Foreground = Bx 'Muted'
+                                $x.BorderBrush = Bx 'Line'
+                            }
+                        }
                     }
-                }
+                } catch { Write-Trace ('seçim grubu hatası: ' + $_.Exception.Message) }
             }.GetNewClosure())
         [void]$buttons.Add($b)
         [void]$p.Children.Add($b)
@@ -1416,64 +1526,69 @@ function New-SettingRow {
 }
 
 function Build-Settings {
-    $cur = Get-CurrentValues
-    $panel = El $script:Win 'SettingsPanel'
-    $panel.Children.Clear()
-    $first = $true
-    foreach ($d in $script:Defs) {
-        if ($d.Type -eq 'section') {
-            $hdr = New-Object System.Windows.Controls.TextBlock
-            $hdr.Text = [string]$d.Sec
-            $hdr.Foreground = Bx 'Accent'
-            $hdr.FontSize = 11
-            $hdr.FontWeight = 'SemiBold'
-            $hdr.Margin = New-Object System.Windows.Thickness(0, $(if ($first) { 0 } else { 20 }), 0, 10)
-            [void]$panel.Children.Add($hdr)
-            $first = $false
-            continue
-        }
-        if ($d.Type -eq 'actions') {
-            $wrap = New-Object System.Windows.Controls.Border
-            $style = $script:Win.TryFindResource('CardStyle')
-            if ($style) { $wrap.Style = $style }
-            Add-ActionBar -Container $wrap
-            $wrap.Margin = New-Object System.Windows.Thickness(0, 8, 0, 0)
-            [void]$panel.Children.Add($wrap)
-            continue
-        }
-        $ck = [string]$d.Key + $(if ($d.Target -eq 'client') { '|client' } else { '' })
-        $val = $cur[$ck]
-        $ctrl = $null
-        switch ($d.Type) {
-            'bool' { $ctrl = New-Toggle -On ([bool]$val); $ctrl.ToolTip = $ck }
-            'enum' { $ctrl = New-Segmented -Options $d.Options -Selected ([string]$val) -Key $ck }
-            'int' { $ctrl = New-TextBox -Width 130; $ctrl.Text = [string]$val; $ctrl.ToolTip = $ck }
-            'text' { $ctrl = New-TextBox -Width 300; $ctrl.Text = [string]$val; $ctrl.ToolTip = $ck }
-            'datetime' {
-                $ctrl = New-TextBox -Width 200
-                $t = ''
-                if ($val) { try { $t = ([datetime]::Parse([string]$val)).ToString('yyyy-MM-dd HH:mm') } catch { $t = '' } }
-                $ctrl.Text = $t
-                $ctrl.ToolTip = $ck
+    try {
+        $cur = Get-CurrentValues
+        $panel = El $script:Win 'SettingsPanel'
+        $panel.Children.Clear()
+        $first = $true
+        foreach ($d in $script:Defs) {
+            if ($d.Type -eq 'section') {
+                $hdr = New-Object System.Windows.Controls.TextBlock
+                $hdr.Text = [string]$d.Sec
+                $hdr.Foreground = Bx 'Accent'
+                $hdr.FontSize = 11
+                $hdr.FontWeight = 'SemiBold'
+                $hdr.Margin = New-Object System.Windows.Thickness(0, $(if ($first) { 0 } else { 20 }), 0, 10)
+                [void]$panel.Children.Add($hdr)
+                $first = $false
+                continue
             }
-            'lines' { $ctrl = New-TextBox -Multi -Width 430 -Height 66 -Text ((@($val)) -join "`n"); $ctrl.ToolTip = $ck }
-            'csv' { $ctrl = New-TextBox -Width 300; $ctrl.Text = ((@($val)) -join ', '); $ctrl.ToolTip = $ck }
-            'days' {
-                $p = New-Object System.Windows.Controls.StackPanel
-                $p.Orientation = 'Horizontal'
-                $names = ConvertTo-DayNames $val
-                foreach ($day in @('Pzt', 'Sal', 'Car', 'Per', 'Cum', 'Cmt', 'Paz')) {
-                    $on = $names -contains $day
-                    $t = New-Toggle -Label $day -On $on
-                    $t.Width = 50
-                    $t.Margin = New-Object System.Windows.Thickness(0, 0, 6, 0)
-                    $t.ToolTip = 'days|' + $ck + '|' + $day
-                    [void]$p.Children.Add($t)
+            if ($d.Type -eq 'actions') {
+                $wrap = New-Object System.Windows.Controls.Border
+                $style = $script:Win.TryFindResource('CardStyle')
+                if ($style) { $wrap.Style = $style }
+                Add-ActionBar -Container $wrap
+                $wrap.Margin = New-Object System.Windows.Thickness(0, 8, 0, 0)
+                [void]$panel.Children.Add($wrap)
+                continue
+            }
+            $ck = [string]$d.Key + $(if ($d.Target -eq 'client') { '|client' } else { '' })
+            $val = $cur[$ck]
+            $ctrl = $null
+            switch ($d.Type) {
+                'bool' { $ctrl = New-Toggle -On ([bool]$val); $ctrl.ToolTip = $ck }
+                'enum' { $ctrl = New-Segmented -Options $d.Options -Selected ([string]$val) -Key $ck }
+                'int' { $ctrl = New-TextBox -Width 130; $ctrl.Text = [string]$val; $ctrl.ToolTip = $ck }
+                'text' { $ctrl = New-TextBox -Width 300; $ctrl.Text = [string]$val; $ctrl.ToolTip = $ck }
+                'datetime' {
+                    $ctrl = New-TextBox -Width 200
+                    $t = ''
+                    if ($val) { try { $t = ([datetime]::Parse([string]$val)).ToString('yyyy-MM-dd HH:mm') } catch { $t = '' } }
+                    $ctrl.Text = $t
+                    $ctrl.ToolTip = $ck
                 }
-                $ctrl = $p
+                'lines' { $ctrl = New-TextBox -Multi -Width 430 -Height 66 -Text ((@($val)) -join "`n"); $ctrl.ToolTip = $ck }
+                'csv' { $ctrl = New-TextBox -Width 300; $ctrl.Text = ((@($val)) -join ', '); $ctrl.ToolTip = $ck }
+                'days' {
+                    $p = New-Object System.Windows.Controls.StackPanel
+                    $p.Orientation = 'Horizontal'
+                    $names = ConvertTo-DayNames $val
+                    foreach ($day in @('Pzt', 'Sal', 'Car', 'Per', 'Cum', 'Cmt', 'Paz')) {
+                        $on = $names -contains $day
+                        $t = New-Toggle -Label $day -On $on
+                        $t.Width = 50
+                        $t.Margin = New-Object System.Windows.Thickness(0, 0, 6, 0)
+                        $t.ToolTip = 'days|' + $ck + '|' + $day
+                        [void]$p.Children.Add($t)
+                    }
+                    $ctrl = $p
+                }
             }
+            [void]$panel.Children.Add((New-SettingRow -Title ([string]$d.Title) -Control $ctrl))
         }
-        [void]$panel.Children.Add((New-SettingRow -Title ([string]$d.Title) -Control $ctrl))
+    } catch {
+        Write-Trace ('Build-Settings hata: ' + $_.Exception.Message)
+        [System.Windows.MessageBox]::Show('Ayarlar yuklenirken hata olustu: ' + $_.Exception.Message, 'RemoteWatchdog') | Out-Null
     }
 }
 
@@ -1481,44 +1596,57 @@ function Add-ActionBar {
     param($Container)
     $p = New-Object System.Windows.Controls.StackPanel
     $p.Orientation = 'Vertical'
+    $status = New-Object System.Windows.Controls.TextBlock
+    $status.Name = 'TaskStatusText'
+    $status.Text = 'Gorev durumu: yukleniyor...'
+    $status.Foreground = Bx 'Muted'
+    $status.FontSize = 12
+    $status.Margin = New-Object System.Windows.Thickness(0, 0, 0, 10)
+    $p.Children.Add($status)
     $r1 = New-Object System.Windows.Controls.StackPanel
     $r1.Orientation = 'Horizontal'
-    $r1.Margin = New-Object System.Windows.Thickness(0, 4, 0, 8)
+    $r1.Margin = New-Object System.Windows.Thickness(0, 0, 0, 8)
     $mk = {
-        param([string]$Text, [string]$Key, [switch]$Danger)
+        param([string]$Text, [string]$Key)
         $b = New-Object System.Windows.Controls.Button
         $b.Content = $Text
         $b.Tag = $Key
         $b.Margin = New-Object System.Windows.Thickness(0, 0, 8, 0)
         $b.Padding = New-Object System.Windows.Thickness(14, 7, 14, 7)
         $b.Cursor = [System.Windows.Input.Cursors]::Hand
-        $style = $script:Win.TryFindResource($(if ($Danger) { 'BtnDanger' } else { 'Btn' }))
-        if ($style) { $b.Style = $style }
+        $b.FontSize = 12.5
+        $b.Background = Bx 'Card2'
+        $b.Foreground = Bx 'Text'
+        $b.BorderBrush = Bx 'Line'
+        $b.BorderThickness = New-Object System.Windows.Thickness(1)
+        $b.Template = $null
         return $b
     }
     $b1 = & $mk 'Watchdog kur' 'install'
-    $b2 = & $mk 'Watchdog kaldır' 'uninstall'
+    $b2 = & $mk 'Watchdog kaldir' 'uninstall'
     $b3 = & $mk 'Zamanlanmis gorevi durdur' 'stoptask'
     $b4 = & $mk 'Gorevi hemen calistir' 'runtask'
-    $b5 = & $mk 'Teşhis raporu üret' 'diag'
+    $b5 = & $mk 'Teshis raporu uret' 'diag'
     $r1.Children.Add($b1); $r1.Children.Add($b2); $r1.Children.Add($b3); $r1.Children.Add($b4); $r1.Children.Add($b5)
     $p.Children.Add($r1)
     $r2 = New-Object System.Windows.Controls.StackPanel
     $r2.Orientation = 'Horizontal'
     $r2.Margin = New-Object System.Windows.Thickness(0, 0, 0, 8)
-    $b6 = & $mk 'Telegram test mesajı' 'testalert'
-    $b7 = & $mk 'Sayaçları sıfırla' 'resetstate'
-    $b8 = & $mk 'Logları temizle' 'clearlog'
-    $b9 = & $mk 'config.json aç' 'openconfig'
-    $b10 = & $mk 'Simdi zorla kapat + restart' 'forcereboot' -Danger
+    $b6 = & $mk 'Telegram test mesaji' 'testalert'
+    $b7 = & $mk 'Sayaclari sifirla' 'resetstate'
+    $b8 = & $mk 'Loglari temizle' 'clearlog'
+    $b9 = & $mk 'config.json ac' 'openconfig'
+    $b10 = & $mk 'Simdi zorla kapat + restart' 'forcereboot'
     $r2.Children.Add($b6); $r2.Children.Add($b7); $r2.Children.Add($b8); $r2.Children.Add($b9); $r2.Children.Add($b10)
     $p.Children.Add($r2)
     $script:ActionButtons = @($b1, $b2, $b3, $b4, $b5, $b6, $b7, $b8, $b9, $b10)
+    $script:TaskStatusText = $status
     foreach ($bb in $script:ActionButtons) {
         $bkey = [string]$bb.Tag
         $bb.add_Click({ Invoke-SettingsAction $bkey }.GetNewClosure())
     }
     $Container.Child = $p
+    try { Update-ActionBarColors } catch { Write-Trace ('action bar renk guncelleme hatasi: ' + $_.Exception.Message) }
 }
 
 function Invoke-SettingsAction {
@@ -1560,64 +1688,71 @@ function Invoke-SettingsAction {
         }
         default { }
     }
+    try { Update-ActionBarColors } catch { Write-Trace ('ayarlar eylemi sonrasi renk guncelleme hatasi: ' + $_.Exception.Message) }
 }
 
 function Save-Settings {
     param([switch]$Quiet)
-    $hostVals = [ordered]@{}
-    $clientVals = [ordered]@{}
-    $daysVals = @{}
-    $csvVals = @{}
-    foreach ($ctrl in (Find-AllControls $script:Win)) {
-        $key = $ctrl.ToolTip
-        if ($key -isnot [string] -or $key -eq '') { continue }
-        if ($key.StartsWith('enum|')) {
-            $ek = $key.Substring(5)
-            if ($script:EnumSelect -and $script:EnumSelect.ContainsKey($ek)) {
-                if ($ek.EndsWith('|client')) { $clientVals[$ek.Substring(0, $ek.Length - 7)] = [string]$script:EnumSelect[$ek] }
-                else { $hostVals[$ek] = [string]$script:EnumSelect[$ek] }
-            }
-            continue
-        }
-        if ($key.StartsWith('days|')) {
-            $parts = $key.Split('|')
-            if ($parts.Count -ge 3) {
-                if (-not $daysVals.ContainsKey($parts[1])) { $daysVals[$parts[1]] = @() }
-                if ([bool]$ctrl.Tag) { $daysVals[$parts[1]] = @($daysVals[$parts[1]] + $parts[2]) }
-            }
-            continue
-        }
-        $ck = $key
-        $isClient = $ck.EndsWith('|client')
-        if ($isClient) { $ck = $ck.Substring(0, $ck.Length - 7) }
-        $def = $script:Defs | Where-Object { $_.Key -eq $ck -and $_.Type -ne 'section' -and $_.Type -ne 'actions' } | Select-Object -First 1
-        if (-not $def) { continue }
-        $val = $null
-        switch ($def.Type) {
-            'bool' { $val = [bool]$ctrl.Tag }
-            'enum' { $val = [string]$ctrl.SelectedItem }
-            'int' { $n = 0; if ([int]::TryParse(([string]$ctrl.Text).Trim(), [ref]$n)) { $val = $n } else { continue } }
-            'text' { $val = ([string]$ctrl.Text).Trim() }
-            'datetime' {
-                $t = ([string]$ctrl.Text).Trim()
-                if ($t -eq '') { $val = '' } else {
-                    $d = [datetime]::MinValue
-                    if (-not [datetime]::TryParse($t, [ref]$d)) { continue }
-                    $val = $d.ToString('yyyy-MM-ddTHH:mm:ss')
+    try {
+        $hostVals = [ordered]@{}
+        $clientVals = [ordered]@{}
+        $daysVals = @{}
+        $csvVals = @{}
+        foreach ($ctrl in (Find-AllControls $script:Win)) {
+            $key = $ctrl.ToolTip
+            if ($key -isnot [string] -or $key -eq '') { continue }
+            if ($key.StartsWith('enum|')) {
+                $ek = $key.Substring(5)
+                if ($script:EnumSelect -and $script:EnumSelect.ContainsKey($ek)) {
+                    if ($ek.EndsWith('|client')) { $clientVals[$ek.Substring(0, $ek.Length - 7)] = [string]$script:EnumSelect[$ek] }
+                    else { $hostVals[$ek] = [string]$script:EnumSelect[$ek] }
                 }
+                continue
             }
-            'lines' { $val = @((([string]$ctrl.Text) -split "`r?`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
-            'csv' { $csvVals[$ck] = @((([string]$ctrl.Text) -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+            if ($key.StartsWith('days|')) {
+                $parts = $key.Split('|')
+                if ($parts.Count -ge 3) {
+                    if (-not $daysVals.ContainsKey($parts[1])) { $daysVals[$parts[1]] = @() }
+                    if ([bool]$ctrl.Tag) { $daysVals[$parts[1]] = @($daysVals[$parts[1]] + $parts[2]) }
+                }
+                continue
+            }
+            $ck = $key
+            $isClient = $ck.EndsWith('|client')
+            if ($isClient) { $ck = $ck.Substring(0, $ck.Length - 7) }
+            $def = $script:Defs | Where-Object { $_.Key -eq $ck -and $_.Type -ne 'section' -and $_.Type -ne 'actions' } | Select-Object -First 1
+            if (-not $def) { continue }
+            $val = $null
+            switch ($def.Type) {
+                'bool' { $val = [bool]$ctrl.Tag }
+                'enum' { $val = [string]$ctrl.SelectedItem }
+                'int' { $n = 0; if ([int]::TryParse(([string]$ctrl.Text).Trim(), [ref]$n)) { $val = $n } else { continue } }
+                'text' { $val = ([string]$ctrl.Text).Trim() }
+                'datetime' {
+                    $t = ([string]$ctrl.Text).Trim()
+                    if ($t -eq '') { $val = '' } else {
+                        $d = [datetime]::MinValue
+                        if (-not [datetime]::TryParse($t, [ref]$d)) { continue }
+                        $val = $d.ToString('yyyy-MM-ddTHH:mm:ss')
+                    }
+                }
+                'lines' { $val = @((([string]$ctrl.Text) -split "`r?`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+                'csv' { $csvVals[$ck] = @((([string]$ctrl.Text) -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+            }
+            if ($null -eq $val) { continue }
+            if ($isClient) { $clientVals[$ck] = $val } else { $hostVals[$ck] = $val }
         }
-        if ($null -eq $val) { continue }
-        if ($isClient) { $clientVals[$ck] = $val } else { $hostVals[$ck] = $val }
+        foreach ($k in $daysVals.Keys) { $hostVals[$k] = @($daysVals[$k]) }
+        foreach ($k in $csvVals.Keys) { $hostVals[$k] = $csvVals[$k] }
+        Write-ConfigFile -Path $HostConfig -Values $hostVals
+        if ($clientVals.Count -gt 0) { Write-ConfigFile -Path $ClientConfig -Values $clientVals }
+        (El $script:Win 'TxtSaved').Text = 'Kaydedildi: ' + (Get-Date).ToString('HH:mm:ss') + '  (' + $hostVals.Count + ' host + ' + $clientVals.Count + ' istemci)'
+        if (-not $Quiet) { [System.Windows.MessageBox]::Show('Ayarlar kaydedildi: ' + $hostVals.Count + ' host + ' + $clientVals.Count + ' istemci ayari', 'RemoteWatchdog') | Out-Null }
+    } catch {
+        (El $script:Win 'TxtSaved').Text = 'Hata: ' + $_.Exception.Message
+        [System.Windows.MessageBox]::Show('Ayarlar kaydedilemedi: ' + $_.Exception.Message, 'RemoteWatchdog') | Out-Null
+        Write-Trace ('ayarlar kaydetme hatasi: ' + $_.Exception.Message)
     }
-    foreach ($k in $daysVals.Keys) { $hostVals[$k] = @($daysVals[$k]) }
-    foreach ($k in $csvVals.Keys) { $hostVals[$k] = $csvVals[$k] }
-    Write-ConfigFile -Path $HostConfig -Values $hostVals
-    if ($clientVals.Count -gt 0) { Write-ConfigFile -Path $ClientConfig -Values $clientVals }
-    (El $script:Win 'TxtSaved').Text = 'Kaydedildi: ' + (Get-Date).ToString('HH:mm:ss') + '  (' + $hostVals.Count + ' host + ' + $clientVals.Count + ' istemci)'
-    if (-not $Quiet) { [System.Windows.MessageBox]::Show('Ayarlar kaydedildi: ' + $hostVals.Count + ' host + ' + $clientVals.Count + ' istemci ayarı', 'RemoteWatchdog') | Out-Null }
 }
 
 function Find-AllControls {
@@ -1767,7 +1902,7 @@ function Invoke-TrayAction {
             if (Test-Path $d) { Start-Process explorer.exe ('"' + $d + '"') } else { [System.Windows.MessageBox]::Show('Log klasoru yok: ' + $d, 'RemoteWatchdog') | Out-Null }
         }
         'web' { Start-Process 'https://remotedesktop.google.com' }
-        'install' { Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null }
+        'install' { Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null; Start-Sleep 5; Update-ActionBarColors }
         'diag' { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaüstüne yazıldı.', 'RemoteWatchdog') | Out-Null }
         'quit' {
             $r = [System.Windows.MessageBox]::Show('Panel kapatilsin mi? Zamanlanmis watchdog gorevi calismaya devam eder.', 'RemoteWatchdog', 'YesNo', 'Question')
@@ -1841,13 +1976,13 @@ function Wire-UI {
             if ($r -eq 'Yes') { Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
         })
     (El $w 'BtnForceNow').Add_Click({
-            $r = [System.Windows.MessageBox]::Show('Daima zorla kapatma ACILIR ve makine yeniden baslatilir. Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Warning')
+            $r = [System.Windows.MessageBox]::Show('Daima zorla kapatma ACILIR ve makine yeniden baslatilir. Kaydedilmemis belge varsa once kaydedilir. Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Warning')
             if ($r -ne 'Yes') { return }
             Save-HostConfig @{ ForceRestartAlways = $true }
             Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait
         })
     (El $w 'BtnSave').Add_Click({ Save-Settings })
-    (El $w 'BtnReload').Add_Click({ Build-Settings; (El $w 'TxtSaved').Text = '' })
+    (El $w 'BtnReload').Add_Click({ try { Build-Settings } catch { } ; (El $w 'TxtSaved').Text = '' })
     (El $w 'BtnLogRefresh').Add_Click({ Update-Log })
     (El $w 'BtnLogCopy').Add_Click({ try { [System.Windows.Clipboard]::SetText((El $w 'TxtLog').Text) } catch { } })
     (El $w 'BtnLogOpen').Add_Click({ if (Test-Path $HostLog) { Start-Process notepad.exe $HostLog } })
@@ -1860,7 +1995,14 @@ function Wire-UI {
         })
     $script:Timer = New-Object System.Windows.Threading.DispatcherTimer
     $script:Timer.Interval = [TimeSpan]::FromSeconds(20)
-    $script:Timer.Add_Tick({ Update-Connections; Update-Overview; Update-Actions; Refresh-Icon })
+    $script:Timer.Add_Tick({
+            try {
+                Update-Connections
+                Update-Overview
+                Update-Actions
+                Refresh-Icon
+            } catch { Write-Trace ('zamanlayici hatasi: ' + $_.Exception.Message) }
+        })
     $script:Timer.Start()
 
     # 1 sn'lik sayac: sonraki otomatik denetimin kalan suresini (sn) gosterir, elle denetleme bitisini yakalar
@@ -1886,6 +2028,12 @@ function Wire-UI {
             $script:Win.Activate()
             Write-Trace 'goster istegi islendi (pencere one getirildi)'
         })
+    $w.add_DispatcherUnhandledException({
+            param($s, $e)
+            Write-Trace ('YAKALANAMAYAN HATA: ' + $e.Exception.GetType().Name + ' - ' + $e.Exception.Message + ' | ' + ($e.Exception.StackTrace -split "`r?`n")[0])
+            [System.Windows.MessageBox]::Show('Panelde bir hata olustu: ' + $e.Exception.Message + "`n`nAyrinti: C:\ProgramData\RemoteWatchdog\panel.log", 'RemoteWatchdog') | Out-Null
+            $e.Handled = $true
+        })
     $script:ShowTimer.Start()
     $script:HelpTimer = $null
     $script:HelpIndex = -1
@@ -1900,6 +2048,8 @@ function Wire-UI {
             })
         $script:FirstRunTimer.Start()
     }
+
+    Update-ActionBarColors
 }
 
 if ($Install) {
@@ -2123,4 +2273,10 @@ if ($SelfTest) {
 }
 
 if ($TrayOnly -or $script:Background) { $script:Win.Hide() } else { $script:Win.Show() }
+$script:Win.Dispatcher.UnhandledException.Add({
+        param($sender, $e)
+        Write-Trace ('yakalanmayan hata: ' + $e.Exception.Message + ' | ' + $e.Exception.ScriptStackTrace)
+        [System.Windows.MessageBox]::Show('Panel bir hata ile karsilasti: ' + $e.Exception.Message + '`r`nPanel acik kalmaya calisacak.', 'RemoteWatchdog', 'OK', 'Warning') | Out-Null
+        $e.Handled = $true
+    })
 try { [System.Windows.Threading.Dispatcher]::Run() } finally { try { $script:Mutex.ReleaseMutex() } catch { } }
