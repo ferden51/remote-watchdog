@@ -428,6 +428,11 @@ $Xaml = @'
               <Trigger Property="IsMouseOver" Value="True">
                 <Setter TargetName="bd" Property="Background" Value="#2B313A"/>
               </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="bd" Property="Background" Value="#0E1115"/>
+                <Setter TargetName="bd" Property="BorderBrush" Value="#4C8DFF"/>
+                <Setter TargetName="bd" Property="Opacity" Value="0.92"/>
+              </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
@@ -1955,51 +1960,55 @@ function Wire-UI {
     foreach ($n in @('NavConn', 'NavOverview', 'NavActions', 'NavSettings', 'NavLog')) {
         (El $w $n).Add_Click({ Show-Page ([string]$this.Tag) }.GetNewClosure())
     }
-    (El $w 'ConnList').Add_PreviewMouseLeftButtonUp({
+    (El $script:Win 'ConnList').Add_PreviewMouseLeftButtonUp({
             param($s, $e)
             $btn = $e.OriginalSource
             while ($btn -and -not ($btn -is [System.Windows.Controls.Button])) { $btn = $btn.Parent }
             if (-not $btn) { return }
             Invoke-ConnAction ([string]$btn.Tag)
         })
-    (El $w 'ActionList').Add_PreviewMouseLeftButtonUp({
+    (El $script:Win 'ActionList').Add_PreviewMouseLeftButtonUp({
             param($s, $e)
             $btn = $e.OriginalSource
             while ($btn -and -not ($btn -is [System.Windows.Controls.Button])) { $btn = $btn.Parent }
             if (-not $btn) { return }
             Invoke-ConnAction ([string]$btn.Tag)
         })
-    (El $w 'BtnCheck').Add_Click({ Start-ManualCheck })
-    (El $w 'BtnDiag').Add_Click({
+    (El $script:Win 'BtnCheck').Add_Click({ Start-ManualCheck })
+    (El $script:Win 'BtnDiag').Add_Click({
             $r = [System.Windows.MessageBox]::Show('Collect-Diagnostics calisacak (okuma modunda, ~40 sn). Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Question')
             if ($r -eq 'Yes') { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaüstüne yazıldı.', 'RemoteWatchdog') | Out-Null }
         })
-    (El $w 'BtnInstall').Add_Click({ Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null })
-    (El $w 'BtnReboot').Add_Click({
+    (El $script:Win 'BtnInstall').Add_Click({ Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null })
+    (El $script:Win 'BtnReboot').Add_Click({
             $r = [System.Windows.MessageBox]::Show('Makine yeniden baslatilsin mi? Kaydedilmemis belge varsa once kaydedilir.', 'RemoteWatchdog', 'YesNo', 'Question')
             if ($r -eq 'Yes') { Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
         })
-    (El $w 'BtnForceNow').Add_Click({
+    (El $script:Win 'BtnForceNow').Add_Click({
             $r = [System.Windows.MessageBox]::Show('Daima zorla kapatma ACILIR ve makine yeniden baslatilir. Kaydedilmemis belge varsa once kaydedilir. Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Warning')
             if ($r -ne 'Yes') { return }
             Save-HostConfig @{ ForceRestartAlways = $true }
             Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait
         })
-    (El $w 'BtnSave').Add_Click({ Save-Settings })
-    (El $w 'BtnReload').Add_Click({
+    (El $script:Win 'BtnSave').Add_Click({ Save-Settings })
+    (El $script:Win 'BtnReload').Add_Click({
+            $btnReload = $script:Win.FindName('BtnReload')
+            $statusBox = $script:Win.FindName('TxtSaved')
+            try { $btnReload.Content = 'Yenileniyor...'; $btnReload.IsEnabled = $false } catch { }
             try {
                 Build-Settings
-                $cnt = @((El $w 'SettingsPanel').Children).Count
+                $cnt = @((El $script:Win 'SettingsPanel').Children).Count
                 if ($cnt -lt 10) { Write-Trace ('Formu yenile: ayar satiri az (' + $cnt + ')') }
+                if ($statusBox) { $statusBox.Text = 'Form yenilendi: ' + (Get-Date).ToString('HH:mm:ss') + ' (' + $cnt + ' ayar)' }
             } catch {
                 Write-Trace ('Formu yenile HATASI: ' + $_.Exception.Message + ' | iz: ' + (($_.ScriptStackTrace -split "`r?`n" | Select-Object -First 3) -join ' <- '))
+                if ($statusBox) { $statusBox.Text = 'Yenileme hatası: ' + $_.Exception.Message; $statusBox.Foreground = Bx 'Bad' }
             }
-            try { (El $w 'TxtSaved').Text = 'Form yenilendi: ' + (Get-Date).ToString('HH:mm:ss') }
-            catch { Write-Trace ('durum yazisi hatasi: ' + $_.Exception.Message) }
+            try { $btnReload.Content = 'Formu yenile'; $btnReload.IsEnabled = $true; if ($statusBox) { $statusBox.Foreground = Bx 'Ok' } } catch { }
         })
-    (El $w 'BtnLogRefresh').Add_Click({ Update-Log })
-    (El $w 'BtnLogCopy').Add_Click({ try { [System.Windows.Clipboard]::SetText((El $w 'TxtLog').Text) } catch { } })
-    (El $w 'BtnLogOpen').Add_Click({ if (Test-Path $HostLog) { Start-Process notepad.exe $HostLog } })
+    (El $script:Win 'BtnLogRefresh').Add_Click({ Update-Log })
+    (El $script:Win 'BtnLogCopy').Add_Click({ try { [System.Windows.Clipboard]::SetText((El $script:Win 'TxtLog').Text) } catch { } })
+    (El $script:Win 'BtnLogOpen').Add_Click({ if (Test-Path $HostLog) { Start-Process notepad.exe $HostLog } })
     $w.add_Closing({
             param($s, $e)
             if ($script:ExitRequested) { return }
@@ -2129,7 +2138,7 @@ if ($SelfTest) {
     try {
         Update-Countdown
         $nx = Get-NextCheck
-        $ntext = [string](El $w 'TxtNext').Text
+        $ntext = [string](El $script:Win 'TxtNext').Text
         Write-Host ('Otomatik denetim sayaci: "' + $ntext + '" | aralik=' + ([math]::Round([double]$nx.IntervalMinutes, 1)) + ' dk (' + $nx.IntervalSource + ') | kaynak=' + $(if ($nx.Source) { $nx.Source } else { '-' }) + ' | son=' + $(if ($nx.Last) { $nx.Last.ToString('HH:mm:ss') } else { '-' }) + ' | sonraki=' + $(if ($nx.Next) { $nx.Next.ToString('HH:mm:ss') } else { '-' }) + ' | kalan=' + [int][math]::Ceiling($nx.RemainingSeconds) + ' sn')
         if (-not $nx.Known) {
             Write-Host 'Sayac: last-run.json yok - bekleme durumu gosteriliyor (beklenen)' -ForegroundColor DarkGray
@@ -2138,19 +2147,19 @@ if ($SelfTest) {
         } else {
             Write-Host 'Sayac dogrulandi: kalan sure saniye cinsinden gosteriliyor' -ForegroundColor Green
         }
-        if ([string](El $w 'TxtConnSub').Text -notmatch 'sonraki otomatik denetim|otomatik denetim zamani geldi|DENETLENIYOR') {
+        if ([string](El $script:Win 'TxtConnSub').Text -notmatch 'sonraki otomatik denetim|otomatik denetim zamani geldi|DENETLENIYOR') {
             Write-Host 'SELFTEST UYARI: baglanti sayfasi alt satirinda otomatik denetim bilgisi yok!' -ForegroundColor Red
         } else {
-            Write-Host ('Baglanti alt satiri: ' + [string](El $w 'TxtConnSub').Text) -ForegroundColor Green
+            Write-Host ('Baglanti alt satiri: ' + [string](El $script:Win 'TxtConnSub').Text) -ForegroundColor Green
         }
         $bx = $script:CheckBusy
         $bs = $script:CheckBusySince
         $script:CheckBusy = $true
         $script:CheckBusySince = (Get-Date).AddSeconds(-7)
         Update-Countdown
-        $busyText = [string](El $w 'TxtNext').Text
-        $busyBtn = [string](El $w 'BtnCheck').Content
-        $busySub = [string](El $w 'TxtConnSub').Text
+        $busyText = [string](El $script:Win 'TxtNext').Text
+        $busyBtn = [string](El $script:Win 'BtnCheck').Content
+        $busySub = [string](El $script:Win 'TxtConnSub').Text
         $script:CheckBusy = $bx
         $script:CheckBusySince = $bs
         Update-Countdown
@@ -2166,10 +2175,10 @@ if ($SelfTest) {
         while ((Test-ManualCheckRunning) -and $waited -lt 20000) { Start-Sleep -Milliseconds 250; $waited += 250 }
         $detected = -not (Test-ManualCheckRunning)
         Write-Host ('Denetleme bitis yakalama testi: bitti=' + $detected + ' (' + $waited + ' ms, surec PID ' + $noop.Id + ')')
-        if ($detected) { Complete-ManualCheck; Write-Host ('Elle denetleme bitisi dogrulandi: dugme="' + [string](El $w 'BtnCheck').Content + '" | sayac="' + [string](El $w 'TxtNext').Text + '"') -ForegroundColor Green }
+        if ($detected) { Complete-ManualCheck; Write-Host ('Elle denetleme bitisi dogrulandi: dugme="' + [string](El $script:Win 'BtnCheck').Content + '" | sayac="' + [string](El $script:Win 'TxtNext').Text + '"') -ForegroundColor Green }
         else { $script:CheckBusy = $false; $script:CheckProcs = @(); Write-Host 'SELFTEST UYARI: surec bitisi yakalanamadi (sayac islevi calismiyor olabilir)!' -ForegroundColor Red }
     } catch { Write-Host ('Sayac testi hata: ' + $_.Exception.Message) -ForegroundColor Red }
-    Write-Host ('Baglanti satiri: ' + (El $w 'ConnList').Items.Count + ' | kart: ' + (El $w 'Cards').Items.Count + ' | bekleyen is: ' + (El $w 'ActionList').Items.Count + ' | ayar satiri: ' + (El $w 'SettingsPanel').Children.Count)
+    Write-Host ('Baglanti satiri: ' + (El $script:Win 'ConnList').Items.Count + ' | kart: ' + (El $script:Win 'Cards').Items.Count + ' | bekleyen is: ' + (El $script:Win 'ActionList').Items.Count + ' | ayar satiri: ' + (El $script:Win 'SettingsPanel').Children.Count)
     try {
         $found = @(Find-AllControls $w)
         $keys = @($found | Where-Object { $_.ToolTip -is [string] -and ([string]$_.ToolTip) -ne '' })
@@ -2220,7 +2229,7 @@ if ($SelfTest) {
         $nav = El $w 'NavSettings'
         $nav.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
         Start-Sleep -Milliseconds 400
-        $vis = (El $w 'PageSettings').Visibility
+        $vis = (El $script:Win 'PageSettings').Visibility
         Write-Host ('Menu (nav) testi: Ayarlar sayfasi gorunur=' + $vis)
         if ($vis -ne 'Visible') { Write-Host 'SELFTEST UYARI: menu sayfayi acmadi!' -ForegroundColor Red } else { Write-Host 'Menu baglantisi dogrulandi' -ForegroundColor Green }
 
