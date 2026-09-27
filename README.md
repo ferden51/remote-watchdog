@@ -75,6 +75,15 @@ sağ tıkla: *Şimdi denetle*, *Kontrol panelini aç*, *Sessiz mod*, *Log klasö
 denetimi arka planda çalıştırır: arayüz donmaz, bitince bağlantı/genel durum/bekleyen işler/günlük kendiliğinden
 yenilenir (buton ve sayaç geçen süreyi gösterir).
 
+Üst çubuktaki **"Ağı / interneti onar"** düğmesi ağ kademelerini sırayla dener: önce sağlık testi (DNS, HTTPS,
+IP) yapılır; her şey yolundaysa hiçbir kademe uygulanmaz (sadece "ağ sağlıklı" raporu yazılır). Sorun varsa
+sırayla **DNS önbelleğini temizle → DHCP yenile → ağ adaptörünü yeniden başlat → winsock/IP sıfırla**
+kademeleri uygulanır; gerekirse makine yeniden başlatma istenir. Ağ sağlığı geri gelmezse kademe artar, her
+denemede `lastRepair` alanına hangi kademenin uygulandığı ve ne sonuç verdiği yazılır (Durum sekmesinde
+"ağ onarım kademesi"). Düğme, görevi **SYSTEM'de çalışan zamanlanmış görev üzerinden** tetikler
+(`C:\ProgramData\RemoteWatchdog\repair-request.json` dosyasını yazar, görevi elle başlatır), bu yüzden
+panel normal kullanıcı da olsa **UAC penceresi çıkmaz**.
+
 Panelde dört sekme:
 
 **1. Durum** — sistem ayakta mı, uzak makinenin her kontrolünün sonucu, bu makinenin (istemci) kontrolü,
