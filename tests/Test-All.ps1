@@ -276,7 +276,7 @@ if ($Section -eq 0 -or $Section -eq 3) {
         $rows = @(Get-Connections)
         Ok ('Get-Connections: ' + $rows.Count + ' satir dondu') ($rows.Count -ge 8)
         $names = @($rows | ForEach-Object { $_.Name })
-        foreach ($need in @('İnternet erişimi', 'DNS çözümlemesi', 'CRD sinyal yolu', 'Google Remote Desktop kaydı', 'CRD canlı bağlantısı', 'Windows RDP')) {
+        foreach ($need in @('İnternet erişimi', 'DNS çözümlemesi', 'Google istemci hizmetleri', 'Google Remote Desktop kaydı', 'CRD canlı bağlantısı', 'Windows RDP')) {
             Ok ('Get-Connections satir: ' + $need) ($names -contains $need)
         }
         $noMeasure = @($rows | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Measure) })

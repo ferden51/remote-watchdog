@@ -1,4 +1,4 @@
-# remote-watchdog
+﻿# remote-watchdog
 
 Uzaktaki bilgisayarı **server gibi** çalıştıran, bağlantı koparsa kendini onaran (gerekirse yeniden
 başlatan) iki parçalı PowerShell watchdog projesi.
@@ -109,7 +109,7 @@ Kaydet dediğinde `config.json` güncellenir, bir sonraki denetimde geçerli olu
 - **Sunucu modu**: AC/DC uyku, hibernasyon ve disk zaman aşımlarını kapatır, **Fast Startup**'ı kapatır
   (`powercfg /h off`), ağ adaptörlerinin "cihazı kapatma" modunu kapatıp Wake-on-LAN'ı açar.
 - **Saat senkronu**: sunucu saatine göre kayma 120 sn'yi aşarsa `w32tm /resync`.
-- **Ağ**: DNS çözümlemesi ve `mtalk.google.com:443` (CRD sinyal yolu) kontrolü; takılı adaptörü yeniden başlatır.
+- **Ağ**: DNS çözümlemesi, genel HTTPS erişimi ve `mtalk.google.com:443` (Google istemci hizmetleri - CRD kaydı için ön koşul, CRD'ye özgü uç değil) kontrolü; takılı adaptörü yeniden başlatır.
 - **Pil kontrolü**: dizüstü bilgisayarda pil bitmişse uyarır (sunucu modu için AC besleme şart).
 - **Reboot politikası**: üst üste `RebootAfterFailedCycles` (varsayılan 3) başarısız döngü olursa ve sorun
   reboot ile düzeltilebilecek türdense makineyi yeniden başlatır. `host.json` kayıp ise **reboot yapmaz**

@@ -891,7 +891,7 @@ function Get-Connections {
         }
         if ($mt.ContainsKey('signalstate')) {
             $lvl = if ($mt['signalstate'] -eq 'acik') { 'ok' } else { 'bad' }
-            Add-Conn 'CRD sinyal yolu' 'mtalk.google.com:443' $lvl $(if ($lvl -eq 'ok') { 'BAGLI' } else { 'KAPALI' }) ([string]$mt['signalms'] + ' ms')
+            Add-Conn 'Google istemci hizmetleri' 'mtalk.google.com:443 (CRD kaydi icin on kosul)' $lvl $(if ($lvl -eq 'ok') { 'BAGLI' } else { 'KAPALI' }) ([string]$mt['signalms'] + ' ms - CRD ozel ucu degil, kayit/yukseltme on kosulu')
         }
         if ($mt.ContainsKey('link')) {
             Add-Conn 'Ağ adaptörü' ([string]$mt['link']) 'none' 'BİLGİ' ('DHCP=' + $(if ($mt['dhcp']) { 'acik' } else { 'kapali' }) + ', TIME_WAIT=' + [string]$mt['timewait'])
