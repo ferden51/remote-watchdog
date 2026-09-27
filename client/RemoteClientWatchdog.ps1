@@ -28,7 +28,21 @@ param(
     [string]$HeartbeatUrl = ''
 )
 
+$LibDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) 'lib'
+foreach ($lib in @('Common.ps1', 'Contract.ps1')) {
+    $libPath = Join-Path $LibDir $lib
+    if (-not (Test-Path -LiteralPath $libPath)) { Write-Host ('KRITIK: kitaplik eksik: ' + $libPath); exit 2 }
+    . $libPath
+}
+
 $ErrorActionPreference = 'Continue'
+
+$LibDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) 'lib'
+foreach ($lib in @('Common.ps1', 'Contract.ps1')) {
+    $libPath = Join-Path $LibDir $lib
+    if (-not (Test-Path -LiteralPath $libPath)) { Write-Host ('KRITIK: kitaplik eksik: ' + $libPath); exit 2 }
+    . $libPath
+}
 $ScriptPath = $PSCommandPath
 $BaseDir = Join-Path $env:LOCALAPPDATA 'RemoteClientWatchdog'
 $LogFile = Join-Path $BaseDir 'client-watchdog.log'
@@ -235,8 +249,7 @@ function Write-JsonStatus {
         targets = @($script:TargetResults)
         config = [ordered]@{ targets = @($cfg.Targets); remoteName = [string]$cfg.RemoteName; rdpFile = [string]$cfg.RdpFile; browserUrl = [string]$cfg.BrowserUrl; heartbeatUrl = [string]$cfg.HeartbeatUrl }
     }
-    $json = $obj | ConvertTo-Json -Depth 6
-    try { Set-Content -LiteralPath (Join-Path $BaseDir 'last-run.json') -Value $json -Encoding UTF8 } catch { }
+    $json = Write-Status -Path (Join-Path $BaseDir 'last-run.json') -Object $obj
     if ($Json) { Write-Output $json }
 }
 

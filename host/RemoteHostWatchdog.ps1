@@ -32,6 +32,13 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+
+$LibDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) 'lib'
+foreach ($lib in @('Common.ps1', 'Contract.ps1')) {
+    $libPath = Join-Path $LibDir $lib
+    if (-not (Test-Path -LiteralPath $libPath)) { Write-Host ("KRITIK: kitaplik eksik: " + $libPath); exit 2 }
+    . $libPath
+}
 $ScriptPath = $PSCommandPath
 $BaseDir = Join-Path $env:ProgramData 'RemoteWatchdog'
 $LogFile = Join-Path $BaseDir 'host-watchdog.log'
@@ -1035,12 +1042,7 @@ function Write-JsonStatus {
         }
     }
     $json = $obj | ConvertTo-Json -Depth 6
-    if (-not $NoJson) {
-        try {
-            if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
-            Set-Content -LiteralPath (Join-Path $BaseDir 'last-run.json') -Value $json -Encoding UTF8
-        } catch { }
-    }
+    $null = Write-Status -Path (Join-Path $BaseDir 'last-run.json') -Object $obj -NoSkip:$NoJson
     if ($Json) { Write-Output $json }
     return $json
 }

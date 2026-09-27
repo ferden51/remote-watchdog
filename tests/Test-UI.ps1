@@ -17,6 +17,8 @@ Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 
 $Root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+$LibDir = Join-Path $Root 'lib'
+foreach ($l in @('Common.ps1', 'Contract.ps1', 'Settings.ps1')) { . (Join-Path $LibDir $l) }
 $PanelPath = Join-Path $Root 'ui\RemoteWatchdogPanel.ps1'
 $script:Pass = 0
 $script:Fail = 0
@@ -109,7 +111,8 @@ if ($ClickTest) {
 
 Write-Host ''
 Write-Host '-- Watchdog görev durumu (yanlış "kurulu değil" uyarısı) --'
-foreach ($code in (Get-FnCode $PanelPath @('Get-Json', 'Get-WatchdogTaskState'))) { Invoke-Expression $code }
+$script:TaskCache = $null
+$script:TaskCacheUntil = (Get-Date).AddMinutes(5)
 $tmpJson = Join-Path $env:TEMP 'rw-uitest-state.json'
 $script:HostJson = $tmpJson
 $script:TaskCache = $null
@@ -117,20 +120,20 @@ $script:TaskCacheUntil = (Get-Date).AddMinutes(5)
 function Set-StateJson { param($Obj) [System.IO.File]::WriteAllText($tmpJson, ($Obj | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding($false))) }
 Set-StateJson ([ordered]@{ generated = (Get-Date).ToString('o'); taskInstalled = 'unknown'; checks = @() })
 Ok ('gecici JSON okundu: taskInstalled=' + [string](Get-Json $tmpJson).taskInstalled) ([string](Get-Json $tmpJson).taskInstalled -eq 'unknown')
-$s1 = Get-WatchdogTaskState
+$s1 = Get-StatusTaskState -Status (Read-Status -Path $tmpJson) -VisibleTask $null
 Ok ('taze veri + görünmeyen görev -> kurulu sayıldı: ' + $s1.Installed + ' | renk=' + $s1.Color) ($s1.Installed -eq $true -and $s1.Color -eq 'Ok')
 Ok ('metin SYSTEM bilgisini içeriyor: ' + $s1.Text) ($s1.Text -match 'SYSTEM')
 $staleObj = [ordered]@{ generated = (Get-Date).AddHours(-6).ToString('o'); taskInstalled = 'unknown'; checks = @() }
 $staleObj | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tmpJson -Encoding UTF8
-$s2 = Get-WatchdogTaskState
+$s2 = Get-StatusTaskState -Status (Read-Status -Path $tmpJson) -VisibleTask $null
 Ok ('eski veri + görünmeyen görev -> kurulu değil denmeli: ' + $s2.Installed) ($s2.Installed -eq $false)
 $falseObj = [ordered]@{ generated = (Get-Date).ToString('o'); taskInstalled = $false; checks = @() }
 $falseObj | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tmpJson -Encoding UTF8
-$s3 = Get-WatchdogTaskState
+$s3 = Get-StatusTaskState -Status (Read-Status -Path $tmpJson) -VisibleTask $null
 Ok ('JSON açıkça false -> kurulu değil: ' + $s3.Installed) ($s3.Installed -eq $false)
 $trueObj = [ordered]@{ generated = (Get-Date).ToString('o'); taskInstalled = $true; checks = @() }
 $trueObj | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tmpJson -Encoding UTF8
-$s4 = Get-WatchdogTaskState
+$s4 = Get-StatusTaskState -Status (Read-Status -Path $tmpJson) -VisibleTask $null
 Ok ('JSON true -> çalışıyor: ' + $s4.Installed) ($s4.Installed -eq $true -and $s4.Color -eq 'Ok')
 Remove-Item -LiteralPath $tmpJson -Force -ErrorAction SilentlyContinue
 

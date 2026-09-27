@@ -255,3 +255,36 @@ Hızlı doğrulama: `.\tests\Test-All.ps1 -Section 1` (veya `-Section 2`).
 `ui/RemoteWatchdogPanel.ps1 -SelfTest` arayüzü kurar, PNG önizleme üretir ve şu davranışları doğrular:
 X ile kapatma (pencere gizlenir, tray ayakta kalır), sessiz mod, ayar kontrollerinin kaydedilebilirliği
 (`Find-AllControls` sayımı).
+
+## Geliştirme: modül yapısı ve sözleşme
+
+```
+lib/Common.ps1      paylaşılan yardımcılar (JSON okuma/yazma, TCP ölçümü, gün adı↔sayı dönüşümü)
+lib/Contract.ps1    host/client <-> panel arasındaki TEK veri sözleşmesi (schemaVersion + geriye dönük okuyucu)
+lib/Settings.ps1    ayar tanımları ($script:Defs, 65 satır) ve yardım balonu metinleri
+ui/RemoteWatchdogPanel.ps1   yalnızca arayüz (XAML + olay bağlama)
+host/…              kontrol/onarım mantığı (panelden bağımsız)
+client/…            istemci tarafı
+```
+
+**Sözleşme:** `last-run.json` yalnızca `Write-Status` ile yazılır (`schemaVersion` damgalanır) ve
+yalnızca `Read-Status` ile okunur. Okuyucu **sema numarası olmayan eski dosyaları da normalize eder**
+(metrics, taskVisible, state.RebootsUtc, config.intervalMinutes eksikse tamamlar). Yani watchdog sürümü
+değişse bile eski panel yeni dosyayı okur, yeni panel eski dosyayı okur.
+
+**Yeni kontrol eklemek** (`host/RemoteHostWatchdog.ps1`):
+1. `Add-Result 'Ad' $ok $detay $onarim -Metrics @{...}` çağrısı yaz
+2. `Invoke-Watchdog` içine bir satır ekle
+JSON'a, panele (kart + bağlantı satırı) ve alarm metnine otomatik düşer. Restart tetikleyicisi olmasını
+istersen adı `$RebootableProblems` listesine ekle.
+
+**Yeni ayar eklemek** (`lib/Settings.ps1`): `$script:Defs` tablosuna bir satır:
+`@{ Sec='Onarim'; Key='FixXyz'; Title='Metin'; Type='bool|int|text|enum|days|lines|csv|datetime' }`
+Arayüz, kaydetme ve **"panel kapsaması" testi** otomatik çalışır (eksik anahtar kalmışsa test kırmızıya döner).
+
+**Yeni buton/menü öğesi:** `Add-ActionBar` (`& $mk 'Metin' 'anahtar'`) + `Invoke-SettingsAction`/`Invoke-TrayAction`
+switch'i; `New-TrayIcon` içindeki `$items` dizisi.
+
+**Testler:** `tests/Test-All.ps1` (117 kontrol) ve `tests/Test-UI.ps1` (17 kontrol, WPF'yi pencere
+göstermeden kurup gerçek `Click` gönderir). Panel görsel regresyonu:
+`.\ui\RemoteWatchdogPanel.ps1 -SelfTest -PreviewPage conn -PreviewPath out.png`.

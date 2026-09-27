@@ -17,6 +17,8 @@ param([int]$Section = 0)
 
 $ErrorActionPreference = 'Continue'
 $Root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+$LibDir = Join-Path $Root 'lib'
+foreach ($l in @('Common.ps1', 'Contract.ps1', 'Settings.ps1')) { . (Join-Path $LibDir $l) }
 $Host_ = Join-Path $Root 'host\RemoteHostWatchdog.ps1'
 $Panel = Join-Path $Root 'ui\RemoteWatchdogPanel.ps1'
 $Client_ = Join-Path $Root 'client\RemoteClientWatchdog.ps1'
@@ -228,7 +230,7 @@ if ($Section -eq 0 -or $Section -eq 2) {
     $astH = [System.Management.Automation.Language.Parser]::ParseFile($Host_, [ref]$null, [ref]$null)
     $cfgFn = $astH.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Get-Config' }, $true)[0]
     $cfgKeys = @([regex]::Matches($cfgFn.Extent.Text, '(?m)^\s{8}([A-Za-z][A-Za-z0-9]*)\s*=') | ForEach-Object { $_.Groups[1].Value })
-    $panelText = Get-Content -LiteralPath $Panel -Raw
+    $panelText = (Get-Content -LiteralPath (Join-Path $LibDir 'Settings.ps1') -Raw) + [Environment]::NewLine + (Get-Content -LiteralPath $Panel -Raw)
     $panelKeys = @([regex]::Matches($panelText, "Key\s*=\s*'([A-Za-z][A-Za-z0-9]*)'") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
     Write-Host ('  watchdog config anahtari: ' + $cfgKeys.Count + ' | panelde tanimli: ' + $panelKeys.Count)
     $missing = @($cfgKeys | Where-Object { $panelKeys -notcontains $_ })
@@ -285,8 +287,7 @@ if ($Section -eq 0 -or $Section -eq 3) {
         Ok 'Get-Connections: her satirda renkler var' ($badBrush.Count -eq 0)
         $msRow = $rows | Where-Object { $_.Name -eq 'IP erişimi' } | Select-Object -First 1
         Ok ('Get-Connections: gecikme ölçümü "' + $msRow.Measure + '"') ([string]$msRow.Measure -match '\d+ ms')
-        foreach ($code in (Get-FnCode $Panel @('Get-HelpTopics'))) { Invoke-Expression $code }
-        $topics = @(Get-HelpTopics)
+        $topics = @(Get-HelpBalloonTopics)
         Ok ('ayarlar yardım balonları: ' + $topics.Count + ' konu') ($topics.Count -ge 8)
         $noText = @($topics | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Text) -or ([string]$_.Text).Length -lt 20 })
         Ok 'ayarlar yardım balonlarının tümünde açıklayıcı metin var' ($noText.Count -eq 0)
