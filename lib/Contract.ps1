@@ -1,4 +1,4 @@
-# RemoteWatchdog - Contract: host/client ile panel arasindaki TEK veri sozlesmesi.
+﻿# RemoteWatchdog - Contract: host/client ile panel arasindaki TEK veri sozlesmesi.
 # Dot-source edilir:  . <repo>\lib\Contract.ps1
 #
 # Sozlesme: host ve client "last-run.json" yazar, panel okur. Panelin watchdog'a hicbir
@@ -48,6 +48,7 @@ function ConvertTo-StatusObject {
     if (-not ($o.PSObject.Properties.Name -contains 'generated')) { $o | Add-Member -NotePropertyName 'generated' -NotePropertyValue '' -Force }
     if (-not ($o.PSObject.Properties.Name -contains 'config')) { $o | Add-Member -NotePropertyName 'config' -NotePropertyValue ([pscustomobject]@{}) -Force }
     if (-not ($o.PSObject.Properties.Name -contains 'state')) { $o | Add-Member -NotePropertyName 'state' -NotePropertyValue ([pscustomobject]@{}) -Force }
+    if (-not ($o.PSObject.Properties.Name -contains 'lastRepair')) { $o | Add-Member -NotePropertyName 'lastRepair' -NotePropertyValue $null -Force }
     if (-not ($o.config.PSObject.Properties.Name -contains 'intervalMinutes')) { $o.config | Add-Member -NotePropertyName 'intervalMinutes' -NotePropertyValue 0 -Force }
     if (-not ($o.state.PSObject.Properties.Name -contains 'RebootsUtc')) { $o.state | Add-Member -NotePropertyName 'RebootsUtc' -NotePropertyValue @() -Force }
     if (-not ($o.state.PSObject.Properties.Name -contains 'consecutiveFailures')) { $o.state | Add-Member -NotePropertyName 'consecutiveFailures' -NotePropertyValue 0 -Force }

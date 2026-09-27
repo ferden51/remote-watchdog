@@ -28,7 +28,9 @@ param(
     [switch]$ListHolidays,
     [switch]$Json,
     [switch]$NoJson,
-    [switch]$ForceReboot
+    [switch]$ForceReboot,
+    [switch]$RepairNetwork,
+    [int]$Rung = 0
 )
 
 $ErrorActionPreference = 'Continue'
@@ -319,8 +321,81 @@ function Invoke-NetworkRepair {
     return $done
 }
 
+function Test-NetworkHealthy {
+    <#  Ag katmani saglikli mi: IP, DNS, HTTPS ve sinyal yolu ayni anda. #>
+    $h = Get-NetworkHealth
+    return [bool]($h.Ip -and $h.Dns -and $h.Https -and $h.Signal)
+}
+
+function Invoke-NetworkRepairFlow {
+    <#
+        Kullanicinin (ya da panelin) istedigi elle onarim.
+        Kademeleri sirayla uygular, her kademeden sonra tekrar olcer ve saglikli olunca durur.
+        Sonucu $script:LastRepair olarak JSON'a yazar; panel bunu okuyup kullaniciya gosterir.
+    #>
+    param([int]$MaxRung = 0, [string]$Reason = 'kullanici istedi')
+    $cfg = $global:cfg
+    if ($MaxRung -le 0) { $MaxRung = [int]$cfg.NetMaxRepairRung }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $applied = @()
+    $rungs = @()
+    $healthy = Test-NetworkHealthy
+    Write-Log 'WARN' ('elle ag onarimi basladi: ' + $Reason + ' (saatlim: ' + $healthy + ')')
+    if (-not $healthy) {
+        for ($r = 1; $r -le $MaxRung; $r++) {
+            $steps = @(Invoke-NetworkRepair -Rung $r)
+            $rungs += $r
+            $applied += $steps
+            Write-Log 'INFO' ('kademe ' + $r + ' uygulandi: ' + ($steps -join '; '))
+            Start-Sleep -Seconds 3
+            $healthy = Test-NetworkHealthy
+            if ($healthy) { break }
+        }
+    }
+    $sw.Stop()
+    $h = Get-NetworkHealth
+    $still = @()
+    if (-not $h.Ip) { $still += 'IP erisimi yok' }
+    if (-not $h.Dns) { $still += 'DNS cozumlemiyor' }
+    if (-not $h.Https) { $still += 'HTTPS erisimi yok' }
+    if (-not $h.Signal) { $still += 'Google sinyal yolu kapali' }
+    $script:LastRepair = [ordered]@{
+        at = (Get-Date).ToString('o')
+        reason = $Reason
+        healthyAtStart = $healthy
+        ok = ($still.Count -eq 0)
+        rungs = $rungs
+        actions = $applied
+        stillBad = $still
+        elapsedSec = [int]$sw.Elapsed.TotalSeconds
+    }
+    Write-Log $(if ($script:LastRepair.ok) { 'INFO' } else { 'WARN' }) ('ag onarimi bitti: basarili=' + $script:LastRepair.ok + ', kademe=' + ($rungs -join ',') + ', sure=' + $script:LastRepair.elapsedSec + ' sn' + $(if ($still.Count) { ', kalan sorun: ' + ($still -join ', ') } else { '' }))
+    return $script:LastRepair
+}
+
+function Read-RepairRequest {
+    <#  Panelin bir dosya birakerek istedigi onarim: panel, görevi SYSTEM olarak çalıştırır, UAC gerekmez. #>
+    $reqPath = Join-Path $BaseDir 'repair-request.json'
+    if (-not (Test-Path -LiteralPath $reqPath)) { return $null }
+    $req = $null
+    try { $req = Get-Content -LiteralPath $reqPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+    try { Remove-Item -LiteralPath $reqPath -Force -ErrorAction SilentlyContinue } catch { }
+    $rung = 0
+    if ($req -and $req.PSObject.Properties.Name -contains 'rung') { try { $rung = [int]$req.rung } catch { } }
+    $who = 'panel'
+    if ($req -and $req.PSObject.Properties.Name -contains 'requestedBy') { $who = [string]$req.requestedBy }
+    return [pscustomobject]@{ Rung = $rung; RequestedBy = $who; At = (Get-Date).ToString('o') }
+}
+
 function Test-NetworkLayer {
     $cfg = $global:cfg
+    $script:LastRepair = $null
+    $repairReq = Read-RepairRequest
+    if ($RepairNetwork -or $repairReq) {
+        $why = $(if ($repairReq) { 'panel istedi (' + $repairReq.RequestedBy + ')' } else { 'kullanici istedi' })
+        $mr = $(if ($repairReq) { $repairReq.Rung } else { $Rung })
+        $null = Invoke-NetworkRepairFlow -MaxRung $mr -Reason $why
+    }
     $state = Get-State
     $h = Get-NetworkHealth
     $detail = 'ip=' + $h.Ip + ', dns=' + $h.Dns + ', https=' + $h.Https + ', sinyal=' + $h.Signal + ', dhcp=' + $h.Dhcp + ', timewait=' + $h.TimeWait + ', link=' + $h.Link
@@ -995,6 +1070,8 @@ function Write-JsonStatus {
     param([bool]$AllOk, [string]$Summary, [int]$BadCount)
     $cfg = $global:cfg
     $state = Get-State
+    $lastRepair = $null
+    if ($script:LastRepair) { $lastRepair = $script:LastRepair }
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     $taskKnown = $true
     if (-not $task -and -not (Test-Admin)) { $taskKnown = $false }
@@ -1012,6 +1089,7 @@ function Write-JsonStatus {
         summary = $Summary
         uptimeMinutes = (Get-UptimeMinutes)
         publicIp = $script:PublicIp
+        lastRepair = $lastRepair
         taskInstalled = $(if ($task) { $true } elseif ($taskKnown) { $false } else { 'unknown' })
         taskVisible = $taskKnown
         taskState = $(if ($task) { [string]$task.State } else { 'yok' })

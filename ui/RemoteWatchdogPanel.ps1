@@ -344,7 +344,7 @@ function Get-Actions {
         $key = 'run'
         $act = 'Logları aç'
         if ($c.name -eq 'CRD servisi' -and [string]$c.detail -match 'host_id=YOK') { $key = 'crd'; $act = 'CRD sayfası'; $lvl = 'bad' } else { $lvl = 'warn' }
-        if ($c.name -match 'Ag katmani') { $key = 'run'; $act = 'Ağ onarımı' }
+        if ($c.name -match 'Ag katmani') { $key = 'repair'; $act = 'Ağı onar' }
         [void]$a.Add([pscustomobject]@{ Level = $lvl; Title = $c.name; Detail = [string]$c.detail; Key = $key; Action = $act })
     }
     $docsState = Join-Path $env:windir 'Temp\RemoteWatchdog-docs.json'
@@ -639,6 +639,7 @@ $Xaml = @'
         </StackPanel>
         <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
           <Button x:Name="BtnCheck" Content="Şimdi denetle" Style="{StaticResource BtnAccent}" Margin="0,0,8,0"/>
+          <Button x:Name="BtnRepairNet" Content="Ağı / interneti onar" Style="{StaticResource Btn}" Margin="0,0,8,0" ToolTip="Ağ katmanını sırayla onarır: DNS → DHCP → adaptör/sürücü → winsock. Her kademeden sonra tekrar ölçer, düzelince durur."/>
           <Button x:Name="BtnReboot" Content="Yeniden başlat" Style="{StaticResource BtnDanger}"/>
         </StackPanel>
       </Grid>
@@ -784,6 +785,62 @@ function Start-HelpTour {
     $script:HelpTimer.Start()
     Write-Trace ('ayarlar yardım turu başladı: ' + $topics.Count + ' konu')
     return 0
+}
+
+function Get-RepairReport {
+    <#  last-run.json icindeki son ag onarim sonucunu ozetler. #>
+    $hj = Get-Json $HostJson
+    if (-not $hj) { return 'Henüz onarım çalıştırılmadı.' }
+    $lr = $hj.lastRepair
+    if (-not $lr) { return 'Henüz onarım çalıştırılmadı.' }
+    $when = ''
+    try { $when = ([datetime]::Parse([string]$lr.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToString('dd.MM HH:mm') } catch { }
+    $lines = New-Object System.Collections.ArrayList
+    [void]$lines.Add(('Son ağ onarımı: ' + $when + ' | ' + $(if ($lr.ok) { 'BAŞARILI' } else { 'KISMİ / BAŞARISIZ' }) + ' | ' + [int]$lr.elapsedSec + ' sn'))
+    [void]$lines.Add(('  uygulanan kademe: ' + $(if (@($lr.rungs).Count) { (@($lr.rungs) -join ' → ') } else { 'gerekmedi (ağ sağlıklıydı)' })))
+    if (@($lr.actions).Count) { [void]$lines.Add('  yapılanlar: ' + ((@($lr.actions)) -join '; ')) }
+    if (@($lr.stillBad).Count) { [void]$lines.Add('  kalan sorun: ' + ((@($lr.stillBad)) -join ', ') + '  (5. kademe restart önerir)') }
+    return ($lines -join "`n")
+}
+
+function Invoke-NetworkRepair {
+    <#  Ag onarimini ister. SYSTEM gorevi varsa dosya istegi ile tetikler (UAC yok), yoksa dogrudan calistirir. #>
+    param([int]$Rung = 0)
+    $btn = $script:Win.FindName('BtnRepairNet')
+    $top = $script:Win.FindName('TxtSettingsStatus')
+    $say = 'Ağ onarımı isteniyor...'
+    if ($top) { $top.Text = $say; $top.Foreground = Bx 'Warn' }
+    if ($btn) { $btn.Content = 'Onarılıyor...'; $btn.IsEnabled = $false }
+    $req = [ordered]@{ rung = $Rung; requestedBy = $env:USERNAME; at = (Get-Date).ToString('o') }
+    $sentToTask = $false
+    try {
+        $task = Get-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue
+        if (-not $task) { $task = Get-ScheduledTask -TaskName 'RemoteHostPanel' -ErrorAction SilentlyContinue }
+        if ($task) {
+            $dir = Split-Path -Parent $HostJson
+            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+            Write-RwJson -Path (Join-Path $dir 'repair-request.json') -Object $req
+            Start-ScheduledTask -TaskName ([string]$task.TaskName) -ErrorAction Stop
+            $sentToTask = $true
+        }
+    } catch { Write-Trace ('onarim göreve gönderilemedi: ' + $_.Exception.Message) }
+    if (-not $sentToTask) {
+        $args = @('-RepairNetwork')
+        if ($Rung -gt 0) { $args += @('-Rung', [string]$Rung) }
+        Invoke-Script -Path $HostScript -ScriptArgs $args -Wait
+    }
+    Start-Sleep -Seconds 2
+    Update-Connections
+    Update-Overview
+    $report = Get-RepairReport
+    if ($top) {
+        $top.Text = $report
+        $top.Foreground = $(if ($report -match 'BAŞARILI') { Bx 'Ok' } else { Bx 'Warn' })
+    }
+    $ok = ($report -match 'BAŞARILI')
+    Show-Balloon -Title 'Ağ onarımı' -Text $report -Icon $(if ($ok) { 'Info' } else { 'Warning' }) -Critical
+    if ($btn) { $btn.Content = 'Ağı / interneti onar'; $btn.IsEnabled = $true }
+    if ($script:Page -eq 'log') { Update-Log }
 }
 
 function New-Toggle {
@@ -1056,6 +1113,7 @@ function Invoke-ConnAction {
     switch ($Key) {
         'host' { Invoke-Script -Path $HostScript -Args @('-Install'); Start-Sleep 5; Update-Connections; Update-Overview; Update-Actions; Update-ActionBarColors }
         'run' { Start-ManualCheck }
+        'repair' { Invoke-NetworkRepair }
         'crd' { Start-Process 'https://remotedesktop.google.com/headless' }
         'docs' { Invoke-Script -Path $HostDocs -Args @('-Force') -Wait }
         'log' { Show-Page 'log'; Update-Log }
@@ -1097,9 +1155,8 @@ function Test-ManualCheckRunning {
 function Complete-ManualCheck {
     $el = [int]((Get-Date) - $script:CheckBusySince).TotalSeconds
     $script:CheckBusy = $false
-$script:CheckProcs = @()
-$script:EnumSelect = @{}
-$script:ActionButtons = @()
+    $script:CheckProcs = @()
+    $script:EnumSelect = @{}
     $btn = El $script:Win 'BtnCheck'
     if ($btn) { $btn.Content = 'Şimdi denetle' }
     Resolve-CheckInterval -Force | Out-Null
@@ -1920,6 +1977,7 @@ function Wire-UI {
             Invoke-ConnAction ([string]$btn.Tag)
         })
     (El $script:Win 'BtnCheck').Add_Click({ Start-ManualCheck })
+    (El $script:Win 'BtnRepairNet').Add_Click({ Invoke-NetworkRepair })
     (El $script:Win 'BtnDiag').Add_Click({
             $r = [System.Windows.MessageBox]::Show('Collect-Diagnostics calisacak (okuma modunda, ~40 sn). Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Question')
             if ($r -eq 'Yes') { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaüstüne yazıldı.', 'RemoteWatchdog') | Out-Null }
