@@ -58,7 +58,13 @@ $script:BalloonMode = 'off'
 $script:NoBalloon = $true
 $script:Silent = $true
 
-foreach ($code in (Get-FnCode $PanelPath @('Bx', 'Write-Trace', 'New-Toggle', 'New-Segmented'))) { Invoke-Expression $code }
+foreach ($code in (Get-FnCode $PanelPath @('Bx', 'Write-Trace', 'New-Toggle', 'New-Segmented', 'Get-Json'))) { Invoke-Expression $code }
+
+# Bu paketin cagirdigi panel/lib fonksiyonlari gercekten tanimli mi? (Bir fonksiyon yuklenmezse
+# PowerShell Ok(...) satirini hic calistirmaz ve test sessizce kaybolur - o yuzden acikca dogrulanir.)
+$required = @('Get-Json', 'New-Toggle', 'New-Segmented', 'Get-StatusTaskState', 'Read-Status', 'Write-Status')
+$missing = @($required | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
+Ok ('test icin gereken fonksiyonlar yuklendi (eksik: ' + $(if ($missing.Count) { $missing -join ', ' } else { 'yok' }) + ')') ($missing.Count -eq 0)
 
 Write-Host '-- Seçim grubu (RestartPolicy / HolidayMode) --'
 $p1 = New-Segmented -Options @('blackout', 'always', 'never') -Selected 'blackout' -Key 'RestartPolicy'
@@ -144,7 +150,7 @@ $mx = [regex]::Match($panelText, "(?s)\`$Xaml = @'\r?\n(.*?)\r?\n'@")
 if (-not $mx.Success) { Ok 'panel XAML bulundu' $false } else {
     Ok 'panel XAML bulundu' $true
     try { $script:Win = [Windows.Markup.XamlReader]::Parse($mx.Groups[1].Value) } catch { Ok 'XAML ayrıştırıldı' $false $_.Exception.Message }
-    $need = @('Bx', 'El', 'Write-Trace', 'Get-Json', 'Read-ConfigFile', 'Get-HostConfig', 'Get-ClientDefaults', 'Get-CurrentValues', 'ConvertTo-DayNames', 'New-Toggle', 'New-TextBox', 'New-Segmented', 'New-SettingRow', 'Add-ActionBar', 'Get-WatchdogTaskState', 'Update-ActionBarColors', 'Resolve-CheckInterval', 'Build-Settings', 'Invoke-SettingsAction', 'Invoke-TrayAction', 'Get-Actions', 'Update-Connections', 'Update-Overview', 'Update-Actions', 'Update-Log', 'Refresh-Icon', 'Get-StatusInfo', 'Show-Balloon', 'Get-BalloonMode', 'Set-BalloonMode', 'Invoke-Script', 'Update-Countdown', 'Get-NextCheck')
+    $need = @('Bx', 'El', 'Write-Trace', 'Get-Json', 'Read-ConfigFile', 'Get-HostConfig', 'Get-ClientDefaults', 'Get-CurrentValues', 'ConvertTo-DayNames', 'New-Toggle', 'New-TextBox', 'New-Segmented', 'New-SettingRow', 'Add-ActionBar', 'Get-WatchdogTaskState', 'Update-ActionBarColors', 'Resolve-CheckInterval', 'Build-Settings', 'Invoke-SettingsAction', 'Invoke-TrayAction', 'Get-Actions', 'Update-Connections', 'Update-Overview', 'Update-Actions', 'Update-Log', 'Refresh-Icon', 'Get-StatusInfo', 'Show-Balloon', 'Get-BalloonMode', 'Set-BalloonMode', 'Invoke-Script', 'Update-Countdown', 'Get-NextCheck', 'Show-RepairWindow', 'Close-RepairWindow')
     $script:TaskCache = $null
     $script:TaskCacheUntil = [datetime]::MinValue
     foreach ($code in (Get-FnCode $PanelPath $need)) { Invoke-Expression $code }
@@ -190,7 +196,35 @@ if (-not $mx.Success) { Ok 'panel XAML bulundu' $false } else {
     } else { Ok 'Formu yenile (ikinci Build-Settings) hatasız' $true }
     $rows2 = @((El $script:Win 'SettingsPanel').Children).Count
     Ok ('yenilemeden sonra form satır sayısı korundu: ' + $rows2) ($rows2 -ge 20)
+
+    Write-Host ''
+    Write-Host '-- Onarım penceresi (X ile kapandıktan sonra yeniden açılmalı) --'
+    $script:RepairWin = $null
+    $script:RepairLiveBox = $null
+    $script:RepairStatusBox = $null
+    $script:RepairElapsedBox = $null
+    $script:RepairStart = Get-Date
+    $script:RepairStatusText = 'test'
+    $script:RepairLiveText = 'ornek satir'
+    $err3 = $null
+    try { $null = Show-RepairWindow } catch { $err3 = $_ }
+    Ok ('onarım penceresi açıldı' + $(if ($err3) { ': ' + $err3.Exception.Message } else { '' })) ((-not $err3) -and [bool]$script:RepairWin -and [bool]$script:RepairLiveBox)
+    $first = $script:RepairWin
+    Close-RepairWindow
+    Ok 'pencere kapatıldı, referans temizlendi (Kapat düğmesi)' (($null -eq $script:RepairWin) -and ($null -eq $script:RepairLiveBox))
+    $err4 = $null
+    try { $null = Show-RepairWindow } catch { $err4 = $_ }
+    Ok ('X ile kapandıktan sonra ikinci pencere açıldı' + $(if ($err4) { ': ' + $err4.Exception.Message } else { '' })) ((-not $err4) -and [bool]$script:RepairWin -and [bool]$script:RepairLiveBox -and ($script:RepairWin -ne $first))
+    Close-RepairWindow
 }
+
+Write-Host ''
+# Guvenlik agi: bir fonksiyon yuklenmemisse PowerShell Ok(...) satirini sessizce atlayabilir.
+# Bu yuzden "tanimsiz komut" hatasi varsa test kirmiziya doner.
+$unknownCmds = @($Error | Where-Object { [string]$_.FullyQualifiedErrorId -like 'CommandNotFoundException*' } | ForEach-Object { [string]$_.TargetObject } | Sort-Object -Unique)
+if ($unknownCmds.Count) {
+    Ok ('suite boyunca tanimsiz komut cagrisi var: ' + ($unknownCmds -join ', ')) $false
+} else { Ok 'suite boyunca tanimsiz komut cagrisi yok' $true }
 
 Write-Host ''
 $traceFile = Join-Path $script:HostData 'panel.log'

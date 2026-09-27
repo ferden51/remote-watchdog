@@ -376,6 +376,16 @@ if ($Section -eq 0 -or $Section -eq 5) {
 }
 
 Head 'SONUC'
+# Guvenlik agi: tanimsiz bir komut cagrisi varsa bir Ok(...) satiri sessizce atlanmis olabilir.
+# Bu yuzden "tanimsiz komut" sayisi sifir degilse test kirmiziya doner.
+$unknownCmds = @($Error | Where-Object { [string]$_.FullyQualifiedErrorId -like 'CommandNotFoundException*' } | ForEach-Object { [string]$_.TargetObject } | Sort-Object -Unique)
+if ($unknownCmds.Count) {
+    $script:Fail++
+    Write-Host ('  [KALDI] suite boyunca tanimsiz komut cagrisi: ' + ($unknownCmds -join ', ') + ' (bu hatayi atlayan testler olabilir)') -ForegroundColor Red
+} else {
+    $script:Pass++
+    Write-Host '  [GECTI] suite boyunca tanimsiz komut cagrisi yok' -ForegroundColor Green
+}
 Write-Host ('  Gecti: ' + $script:Pass + ' | Kaldi: ' + $script:Fail) -ForegroundColor $(if ($script:Fail -eq 0) { 'Green' } else { 'Red' })
 if ($script:Fail -gt 0) {
     Write-Host '  Basarisiz olanlar:'

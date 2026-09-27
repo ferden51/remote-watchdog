@@ -1,4 +1,4 @@
-# Katkıda bulunma / Contributing
+﻿# Katkıda bulunma / Contributing
 
 Teşekkürler! Bu proje bir uzak bilgisayarı "kendisi gibi bırakılmış bir sunucu" gibi çalıştırmak için
 var: bağlantı koparsa ne olduğunu bulur, kademeli olarak onarır, gerekirse yeniden başlatır ve
@@ -9,10 +9,10 @@ kendisinden haberdar eder.
 ## Hızlı başlangıç (katkı öncesi)
 
 ```powershell
-# 1) Tüm testler (beklenen: Gecti: 117 | Kaldi: 0)
+# 1) Tüm testler (beklenen: Gecti: 118 | Kaldi: 0)
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-All.ps1
 
-# 2) Arayüz testleri (WPF, STA gerekir; beklenen: Gecti: 17 | Kaldi: 0)
+# 2) Arayüz testleri (WPF, STA gerekir; beklenen: Gecti: 23 | Kaldi: 0)
 powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\tests\Test-UI.ps1
 
 # 3) Paneli açmadan arayüzü kur + PNG üret + kapat (kendi makinenizde de çalışır)

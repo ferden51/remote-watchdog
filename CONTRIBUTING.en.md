@@ -1,4 +1,4 @@
-# Contributing
+﻿# Contributing
 
 Thanks for considering a contribution! This project makes a remote PC behave like a self-healing
 server: it finds what broke, repairs it in steps, restarts only when justified, and tells you what it did.
@@ -8,10 +8,10 @@ server: it finds what broke, repairs it in steps, restarts only when justified, 
 ## Before you start
 
 ```powershell
-# 1) Full suite (expected: Gecti: 117 | Kaldi: 0)
+# 1) Full suite (expected: Gecti: 118 | Kaldi: 0)
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-All.ps1
 
-# 2) UI suite (WPF, needs STA; expected: Gecti: 17 | Kaldi: 0)
+# 2) UI suite (WPF, needs STA; expected: Gecti: 23 | Kaldi: 0)
 powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\tests\Test-UI.ps1
 
 # 3) Build the UI, render a PNG and exit

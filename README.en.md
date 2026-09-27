@@ -1,4 +1,4 @@
-# remote-watchdog
+﻿# remote-watchdog
 
 Run a remote PC **like a server**: a two-part PowerShell watchdog that detects what broke, repairs it in
 steps (restarting the machine if that is the only cure) and keeps you informed.
@@ -156,8 +156,8 @@ what lets the panel and the watchdog be updated independently on two different m
 ## Tests
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-All.ps1        # 117 checks, read-only
-powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\tests\Test-UI.ps1    # 17 checks, WPF
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-All.ps1        # 118 checks, read-only
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\tests\Test-UI.ps1    # 23 checks, WPF
 powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\ui\RemoteWatchdogPanel.ps1 -SelfTest -PreviewPath out.png
 ```
 

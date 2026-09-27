@@ -872,8 +872,18 @@ function Wait-Dispatcher {
 function Show-RepairWindow {
     <#  Canli onarim penceresi: adimlar anlik gunlukten okunup gosterilir. #>
     if ($script:RepairWin) {
-        try { $script:RepairWin.Activate() | Out-Null } catch { }
-        return
+        # Kapatilmis bir pencereye Activate() cagirmak hatayi yutar ve yeni pencere hic acilmaz;
+        # bu yuzden once yarisini kontrol ediyoruz.
+        $alive = $false
+        try { $alive = ($script:RepairWin.IsLoaded -and -not $script:RepairWin.IsClosed) } catch { $alive = $false }
+        if ($alive) {
+            try { $script:RepairWin.Activate() | Out-Null } catch { }
+            return $script:RepairWin
+        }
+        $script:RepairWin = $null
+        $script:RepairLiveBox = $null
+        $script:RepairStatusBox = $null
+        $script:RepairElapsedBox = $null
     }
     $w = New-Object System.Windows.Window
     $w.Title = 'Ağ / interneti onarımı'
@@ -972,6 +982,7 @@ function Show-RepairWindow {
     $script:RepairStatusBox = $h2
     $script:RepairElapsedBox = $el
     $close.add_Click({ Close-RepairWindow })
+    $w.add_Closed({ Close-RepairWindow })
     $w.Show()
     return $w
 }

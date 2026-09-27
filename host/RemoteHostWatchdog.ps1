@@ -1089,6 +1089,25 @@ function Show-Results {
     return $bad.Count
 }
 
+function Write-RepairStatusPatch {
+    <#
+        Onarim sonrasi last-run.json'u YERINDE gunceller: mevcut kontroller (checks), state ve config
+        korunur, sadece zaman damgasi / onarim sonucu / ozet degisir.
+        Boylece 60 sn'lik izleyici, panelin kontrol listesini 5 dakika boyunca bosaltmaz.
+    #>
+    param([bool]$Ok, [string]$Summary, [int]$BadCount = 0)
+    $path = Join-Path $BaseDir 'last-run.json'
+    $cur = $null
+    if (Test-Path -LiteralPath $path) { try { $cur = Read-Status -Path $path } catch { } }
+    if (-not $cur) { $null = Write-JsonStatus -AllOk $Ok -Summary $Summary -BadCount $BadCount; return }
+    $cur.generated = (Get-Date).ToString('o')
+    $cur.ok = $Ok
+    $cur.summary = $Summary
+    $cur.badCount = $BadCount
+    $cur.lastRepair = $script:LastRepair
+    $null = Write-Status -Path $path -Object $cur
+}
+
 function Write-JsonStatus {
     param([bool]$AllOk, [string]$Summary, [int]$BadCount)
     $cfg = $global:cfg
@@ -1298,7 +1317,7 @@ if ($RepairWatch) {
     $wH = Get-NetworkHealth
     $wBad = 0
     if (-not ($wH.Ip -and $wH.Dns -and $wH.Https)) { $wBad = 1 }
-    $null = Write-JsonStatus -AllOk ($wBad -eq 0) -Summary ('ag onarimi (izleyici): basarili=' + $script:LastRepair.ok) -BadCount $wBad
+    Write-RepairStatusPatch -Ok ($wBad -eq 0) -Summary ('ag onarimi (izleyici): basarili=' + $script:LastRepair.ok) -BadCount $wBad
     Send-Telegram ('[BILDIRIM] ' + $env:COMPUTERNAME + ' ag onarimi bitti (izleyici): basarili=' + $script:LastRepair.ok)
     exit 0
 }

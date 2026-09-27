@@ -313,6 +313,6 @@ Arayüz, kaydetme ve **"panel kapsaması" testi** otomatik çalışır (eksik an
 **Yeni buton/menü öğesi:** `Add-ActionBar` (`& $mk 'Metin' 'anahtar'`) + `Invoke-SettingsAction`/`Invoke-TrayAction`
 switch'i; `New-TrayIcon` içindeki `$items` dizisi.
 
-**Testler:** `tests/Test-All.ps1` (117 kontrol) ve `tests/Test-UI.ps1` (17 kontrol, WPF'yi pencere
+**Testler:** `tests/Test-All.ps1` (118 kontrol) ve `tests/Test-UI.ps1` (23 kontrol, WPF'yi pencere
 göstermeden kurup gerçek `Click` gönderir). Panel görsel regresyonu:
 `.\ui\RemoteWatchdogPanel.ps1 -SelfTest -PreviewPage conn -PreviewPath out.png`.
