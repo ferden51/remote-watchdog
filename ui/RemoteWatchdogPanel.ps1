@@ -534,8 +534,21 @@ $Xaml = @'
             <TextBlock Text="{Binding Title}" Style="{StaticResource H2}"/>
             <TextBlock Text="{Binding Detail}" Style="{StaticResource Small}" Margin="0,4,0,0" TextWrapping="Wrap"/>
           </StackPanel>
-          <Button Grid.Column="2" Content="{Binding Action}" Style="{StaticResource Btn}" VerticalAlignment="Center"
-                  Tag="{Binding Key}" MinWidth="120"/>
+          <Button Grid.Column="2" Content="{Binding Action}" VerticalAlignment="Center"
+                  HorizontalAlignment="Right" Tag="{Binding Key}" MinWidth="120">
+            <Button.Style>
+              <Style TargetType="Button" BasedOn="{StaticResource Btn}">
+                <Style.Triggers>
+                  <DataTrigger Binding="{Binding Action}" Value="">
+                    <Setter Property="Visibility" Value="Collapsed"/>
+                  </DataTrigger>
+                  <DataTrigger Binding="{Binding Action}" Value="{x:Null}">
+                    <Setter Property="Visibility" Value="Collapsed"/>
+                  </DataTrigger>
+                </Style.Triggers>
+              </Style>
+            </Button.Style>
+          </Button>
         </Grid>
       </Border>
     </DataTemplate>
