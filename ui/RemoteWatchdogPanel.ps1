@@ -760,7 +760,7 @@ function Get-HelpTopics {
         [pscustomobject]@{ Title = 'Ayar yardımı 8/11 - Sunucu modu'; Text = 'Açık: uyku, hibernasyon ve Fast Startup kapatılır, ağ adaptörü uykuya girmez. Dizüstü kullanıyorsanız kapatın (kurulumda -KeepSleep). Kapalıyken bu kontrol atlanır, zorla restart baskısı oluşmaz.' }
         [pscustomobject]@{ Title = 'Ayar yardımı 9/11 - Belge koruma'; Text = 'Word/Excel belgeleri 2 dakikada bir otomatik kaydedilir. Restart öncesi kaydedilip kapatılır. Kaydedilemeyen belge varsa restart iptal edilir. "Daima zorla kapatma" bu korumayı baypaslar.' }
         [pscustomobject]@{ Title = 'Ayar yardımı 10/11 - Ağ onarımı'; Text = 'Ağ bozulursa sırayla DNS, DHCP, adaptör/sürücü ve winsock onarımı uygulanır. Kademe 5 gerektiğinde restart önerilir. 4. kademe adaptörü sıfırlar; uzak erişiminiz tamamen kesilebilir.' }
-        [pscustomobject]@{ Title = 'Ayar yardımı 11/11 - Bildirimler ve dış izleme'; Text = 'Telegram token ve chat id girerseniz sorunlar anında telefonunuza düşer. Dış izleme (heartbeat) ise tersini yakalar: makine sessizce kapanırsa. healthchecks.io ücretsiz hesabı açıp ping adresini Ayarlar > Bildirim > Healthchecks alanına yazın; ya da install klasöründeki github-action-machine-health.yml dosyasını bir repoya kopyalayın (GitHub 15 dakikada bir kontrol eder, e-posta ve Telegram ile haber verir). Tepsi bildirimleri varsayılan olarak yalnızca kritik olayları gösterir.' }
+        [pscustomobject]@{ Title = 'Ayar yardımı 11/11 - Dış izleme (heartbeat)'; Text = 'Makine kapalıyken kendi alarmını gönderemez; dışarıdan biri onun adına bakar. healthchecks.io (ücretsiz) kullanacaksanız İKİ ayrı kontrol oluşturup iki ayrı ping adresi alın: biri uzak makine (host) için, biri sizin makineniz (client) için. Aynı adresi iki makinede kullanırsanız uzak makine çökse bile sizin makineniz ping atmaya devam eder ve alarm hiç üretilmez. İki ayrı adresle hangi tarafın sustuğunu görürsünüz. Üçüncü hesap istemiyorsanız install klasöründeki GitHub Actions dosyası 15 dakikada bir dışarıdan erişim testi yapar; o durumda iki adrese gerek yoktur.' }
     )
 }
 
@@ -1420,7 +1420,7 @@ $script:Defs = @(
     @{ Sec = 'BILDIRIM'; Type = 'section' }
     @{ Sec = 'Bildirim'; Key = 'TelegramToken'; Title = 'Telegram bot token'; Type = 'text' }
     @{ Sec = 'Bildirim'; Key = 'TelegramChatId'; Title = 'Telegram chat id'; Type = 'text' }
-    @{ Sec = 'Bildirim'; Key = 'HeartbeatUrl'; Title = 'Healthchecks ping adresi'; Type = 'text' }
+    @{ Sec = 'Bildirim'; Key = 'HeartbeatUrl'; Title = 'Healthchecks ping adresi (host ve client için AYRI adres kullanın)'; Type = 'text' }
 
     @{ Sec = 'TATIL'; Type = 'section' }
     @{ Sec = 'Tatil'; Key = 'HolidayMode'; Title = 'Tatil modu (full = tam blackout)'; Type = 'enum'; Options = @('full', 'default', 'none') }
