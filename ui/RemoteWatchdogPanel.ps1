@@ -1990,13 +1990,12 @@ function Wire-UI {
             try {
                 Build-Settings
                 $cnt = @((El $w 'SettingsPanel').Children).Count
-                if ($cnt -lt 10) { Write-Trace ('Formu yenile: ayar satiri az (' + $cnt + ') - form kismen kurulmamis olabilir') }
-                (El $w 'TxtSaved').Text = 'Form yenilendi: ' + (Get-Date).ToString('HH:mm:ss')
+                if ($cnt -lt 10) { Write-Trace ('Formu yenile: ayar satiri az (' + $cnt + ')') }
             } catch {
-                Write-Trace ('Formu yenile HATASI: ' + $_.Exception.Message)
-                (El $w 'TxtSaved').Text = 'Yenileme hatası: ' + $_.Exception.Message
-                [System.Windows.MessageBox]::Show('Form yenilenemedi: ' + $_.Exception.Message, 'RemoteWatchdog') | Out-Null
+                Write-Trace ('Formu yenile HATASI: ' + $_.Exception.Message + ' | iz: ' + (($_.ScriptStackTrace -split "`r?`n" | Select-Object -First 3) -join ' <- '))
             }
+            try { (El $w 'TxtSaved').Text = 'Form yenilendi: ' + (Get-Date).ToString('HH:mm:ss') }
+            catch { Write-Trace ('durum yazisi hatasi: ' + $_.Exception.Message) }
         })
     (El $w 'BtnLogRefresh').Add_Click({ Update-Log })
     (El $w 'BtnLogCopy').Add_Click({ try { [System.Windows.Clipboard]::SetText((El $w 'TxtLog').Text) } catch { } })
@@ -2045,7 +2044,7 @@ function Wire-UI {
         })
     $w.add_DispatcherUnhandledException({
             param($s, $e)
-            Write-Trace ('YAKALANAMAYAN HATA: ' + $e.Exception.GetType().Name + ' - ' + $e.Exception.Message + ' | ' + ($e.Exception.StackTrace -split "`r?`n")[0])
+            Write-Trace ('YAKALANAMAYAN HATA: ' + $e.Exception.GetType().Name + ' - ' + $e.Exception.Message + ' | iz: ' + (($e.Exception.StackTrace -split "`r?`n" | Select-Object -First 3) -join ' <- '))
             [System.Windows.MessageBox]::Show('Panelde bir hata olustu: ' + $e.Exception.Message + "`n`nAyrinti: C:\ProgramData\RemoteWatchdog\panel.log", 'RemoteWatchdog') | Out-Null
             $e.Handled = $true
         })

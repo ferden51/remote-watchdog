@@ -108,6 +108,59 @@ if ($ClickTest) {
 }
 
 Write-Host ''
+Write-Host '-- Build-Settings (formu yenile) --'
+$panelText = Get-Content -LiteralPath $PanelPath -Raw -Encoding UTF8
+$mx = [regex]::Match($panelText, "(?s)\`$Xaml = @'\r?\n(.*?)\r?\n'@")
+if (-not $mx.Success) { Ok 'panel XAML bulundu' $false } else {
+    Ok 'panel XAML bulundu' $true
+    try { $script:Win = [Windows.Markup.XamlReader]::Parse($mx.Groups[1].Value) } catch { Ok 'XAML ayrıştırıldı' $false $_.Exception.Message }
+    $need = @('Bx', 'El', 'Write-Trace', 'Get-Json', 'Read-ConfigFile', 'Get-HostConfig', 'Get-ClientDefaults', 'Get-CurrentValues', 'ConvertTo-DayNames', 'New-Toggle', 'New-TextBox', 'New-Segmented', 'New-SettingRow', 'Add-ActionBar', 'Update-ActionBarColors', 'Resolve-CheckInterval', 'Build-Settings', 'Invoke-SettingsAction', 'Invoke-TrayAction', 'Get-Actions', 'Update-Connections', 'Update-Overview', 'Update-Actions', 'Update-Log', 'Refresh-Icon', 'Get-StatusInfo', 'Show-Balloon', 'Get-BalloonMode', 'Set-BalloonMode', 'Invoke-Script', 'Update-Countdown', 'Get-NextCheck', 'Update-TaskStatusText')
+    foreach ($code in (Get-FnCode $PanelPath $need)) { Invoke-Expression $code }
+    $script:TaskStatusText = $null
+    $md = [regex]::Match($panelText, "(?s)\`$script:Defs = @\(.*?\r?\n\)")
+    if ($md.Success) { Invoke-Expression $md.Value }
+    Ok ('ayar tanimlari yuklendi: ' + @($script:Defs).Count + ' satir') (@($script:Defs).Count -ge 30)
+    $script:ConnSummary = @{ Ok = 0; Bad = 0; Info = 0; LastRun = $null }
+    $script:HostData = Join-Path $env:TEMP 'rw-uitest'
+    New-Item -ItemType Directory -Force -Path $script:HostData | Out-Null
+    $script:HostJson = Join-Path $env:ProgramData 'RemoteWatchdog\last-run.json'
+    $script:HostConfig = Join-Path $env:ProgramData 'RemoteWatchdog\config.json'
+    $script:ClientData = Join-Path $env:LOCALAPPDATA 'RemoteClientWatchdog'
+    $script:ClientJson = Join-Path $script:ClientData 'last-run.json'
+    $script:ClientConfig = Join-Path $script:ClientData 'config.json'
+    $script:HolidaysFile = ''
+    $script:Root = $Root
+    $script:UiDir = Join-Path $Root 'ui'
+    $script:HostScript = Join-Path $Root 'host\RemoteHostWatchdog.ps1'
+    $script:ClientScript = Join-Path $Root 'client\RemoteClientWatchdog.ps1'
+    $script:HostDiag = Join-Path $Root 'host\Collect-Diagnostics.ps1'
+    $script:HostDocs = Join-Path $Root 'host\Protect-OpenDocuments.ps1'
+    $script:HostLog = Join-Path $script:HostData 'host-watchdog.log'
+    $script:ClientLog = Join-Path $script:ClientData 'client-watchdog.log'
+    $script:RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $script:RunName = 'RemoteWatchdogTrayTest'
+    $script:ShowRequest = Join-Path $env:TEMP 'RemoteWatchdog-show-test.flag'
+    $script:IntervalCacheMin = 5; $script:IntervalCacheUntil = (Get-Date).AddSeconds(90)
+    $script:IntervalCacheSrc = 'test'
+    $script:CheckBusy = $false
+    $script:Page = 'settings'
+    $script:LastState = 'x'
+    $script:LastColor = $null
+    $err1 = $null
+    try { Build-Settings } catch { $err1 = $_ }
+    Ok ('ilk Build-Settings hatasız (' + $(if ($err1) { 'HATA: ' + $err1.Exception.Message } else { 'tamam' }) + ')') ($null -eq $err1)
+    $rows1 = @((El $script:Win 'SettingsPanel').Children).Count
+    Ok ('form satır sayısı: ' + $rows1) ($rows1 -ge 20)
+    $err2 = $null
+    try { Build-Settings } catch { $err2 = $_ }
+    if ($err2) {
+        Ok 'Formu yenile (ikinci Build-Settings) hatasız' $false ($err2.Exception.Message + ' | ' + (($err2.ScriptStackTrace -split "`r?`n" | Select-Object -First 2) -join ' <- '))
+    } else { Ok 'Formu yenile (ikinci Build-Settings) hatasız' $true }
+    $rows2 = @((El $script:Win 'SettingsPanel').Children).Count
+    Ok ('yenilemeden sonra form satır sayısı korundu: ' + $rows2) ($rows2 -ge 20)
+}
+
+Write-Host ''
 $traceFile = Join-Path $script:HostData 'panel.log'
 if (Test-Path -LiteralPath $traceFile) {
     Write-Host '-- panel.log (işleyici hataları) --'
