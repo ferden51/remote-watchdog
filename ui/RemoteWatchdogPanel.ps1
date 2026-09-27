@@ -760,7 +760,7 @@ function Get-HelpTopics {
         [pscustomobject]@{ Title = 'Ayar yardımı 8/11 - Sunucu modu'; Text = 'Açık: uyku, hibernasyon ve Fast Startup kapatılır, ağ adaptörü uykuya girmez. Dizüstü kullanıyorsanız kapatın (kurulumda -KeepSleep). Kapalıyken bu kontrol atlanır, zorla restart baskısı oluşmaz.' }
         [pscustomobject]@{ Title = 'Ayar yardımı 9/11 - Belge koruma'; Text = 'Word/Excel belgeleri 2 dakikada bir otomatik kaydedilir. Restart öncesi kaydedilip kapatılır. Kaydedilemeyen belge varsa restart iptal edilir. "Daima zorla kapatma" bu korumayı baypaslar.' }
         [pscustomobject]@{ Title = 'Ayar yardımı 10/11 - Ağ onarımı'; Text = 'Ağ bozulursa sırayla DNS, DHCP, adaptör/sürücü ve winsock onarımı uygulanır. Kademe 5 gerektiğinde restart önerilir. 4. kademe adaptörü sıfırlar; uzak erişiminiz tamamen kesilebilir.' }
-        [pscustomobject]@{ Title = 'Ayar yardımı 11/11 - Dış izleme (heartbeat)'; Text = 'Makine kapalıyken kendi alarmını gönderemez; dışarıdan biri onun adına bakar. healthchecks.io (ücretsiz) kullanacaksanız İKİ ayrı kontrol oluşturup iki ayrı ping adresi alın: biri uzak makine (host) için, biri sizin makineniz (client) için. Aynı adresi iki makinede kullanırsanız uzak makine çökse bile sizin makineniz ping atmaya devam eder ve alarm hiç üretilmez. İki ayrı adresle hangi tarafın sustuğunu görürsünüz. Üçüncü hesap istemiyorsanız install klasöründeki GitHub Actions dosyası 15 dakikada bir dışarıdan erişim testi yapar; o durumda iki adrese gerek yoktur.' }
+        [pscustomobject]@{ Title = 'Ayar yardımı 11/11 - Dış izleme (heartbeat)'; Text = 'Ping, makine kendi alarmını gönderemediği zaman için vardır. Sizin kurulumunuzda host hep açık, istemci bazen kapalı olduğu için: host ping adresi ÖNEMLİDİR - makine çöktüğünde, elektrik gittiğinde, interneti kesildiğinde veya watchdog görevi silindiğinde host size hiçbir şey bildiremez, ama dışarıdaki kontrol susar ve sizi uyarır. İstemci ping adresi çoğu durumda GEREKMEZ: istemci saatlerce kapalıysa kontrol sürekli DOWN görünür ve yanlış alarm üretir; istemcinin gerçek katkısı Telegram uyarısı ve uzak hedefe TCP probu (kopuk olduğunda bildirir), ping değil. Host un interneti kesildi mi yoksa makine mi kapandı ayrımını yapmak isterseniz üçüncü bir bakış açısı gerekir: install klasöründeki GitHub Actions dosyası, sizin makineniz kapalıyken bile dışarıdan erişim testi yapar.' }
     )
 }
 
@@ -1420,7 +1420,7 @@ $script:Defs = @(
     @{ Sec = 'BILDIRIM'; Type = 'section' }
     @{ Sec = 'Bildirim'; Key = 'TelegramToken'; Title = 'Telegram bot token'; Type = 'text' }
     @{ Sec = 'Bildirim'; Key = 'TelegramChatId'; Title = 'Telegram chat id'; Type = 'text' }
-    @{ Sec = 'Bildirim'; Key = 'HeartbeatUrl'; Title = 'Healthchecks ping adresi (host ve client için AYRI adres kullanın)'; Type = 'text' }
+    @{ Sec = 'Bildirim'; Key = 'HeartbeatUrl'; Title = 'Healthchecks ping adresi (host için gerekli: makine açıkken kendi alarmı gidemez)'; Type = 'text' }
 
     @{ Sec = 'TATIL'; Type = 'section' }
     @{ Sec = 'Tatil'; Key = 'HolidayMode'; Title = 'Tatil modu (full = tam blackout)'; Type = 'enum'; Options = @('full', 'default', 'none') }
@@ -1436,7 +1436,7 @@ $script:Defs = @(
     @{ Sec = 'Istemci'; Key = 'KeepAliveMinutes'; Title = 'Oturumu canlı tutma aralığı (dk, 0 = kapalı)'; Type = 'int'; Target = 'client' }
     @{ Sec = 'Istemci'; Key = 'TelegramToken'; Title = 'Telegram bot token (istemci)'; Type = 'text'; Target = 'client' }
     @{ Sec = 'Istemci'; Key = 'TelegramChatId'; Title = 'Telegram chat id (istemci)'; Type = 'text'; Target = 'client' }
-    @{ Sec = 'Istemci'; Key = 'HeartbeatUrl'; Title = 'Healthchecks ping adresi (istemci)'; Type = 'text'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'HeartbeatUrl'; Title = 'Healthchecks ping adresi (istemci için genelde gerekmez: saatlerce kapalıysa yanlış alarm verir)'; Type = 'text'; Target = 'client' }
 
     @{ Sec = 'PANEL'; Type = 'section' }
     @{ Sec = 'Panel'; Key = 'PanelRepair'; Title = 'Panel kapanırsa watchdog yeniden başlatsın'; Type = 'bool' }
