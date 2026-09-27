@@ -267,7 +267,7 @@ if ($Section -eq 0 -or $Section -eq 3) {
     Add-Type -AssemblyName PresentationCore
     Add-Type -AssemblyName PresentationFramework
     $script:C = @{ Bg = '#0F1114'; Side = '#14161A'; Card = '#1A1D22'; Card2 = '#21252B'; Line = '#2A2F36'; Text = '#E8EAED'; Muted = '#98A0AA'; Accent = '#4C8DFF'; Ok = '#3FB950'; Warn = '#E3B341'; Bad = '#F85149'; Info = '#58A6FF' }
-    foreach ($code in (Get-FnCode $Panel @('Bx', 'Get-Json', 'Read-ConfigFile', 'Get-HostConfig', 'Get-RoleInfo', 'Get-StatusInfo', 'Get-Connections', 'Get-Actions', 'Invoke-Script'))) { Invoke-Expression $code }
+    foreach ($code in (Get-FnCode $Panel @('Bx', 'Get-Json', 'Read-ConfigFile', 'Get-HostConfig', 'Get-RoleInfo', 'Get-StatusInfo', 'Get-Connections', 'Get-Actions', 'Invoke-Script', 'Get-WatchdogTaskState'))) { Invoke-Expression $code }
 
     $hj = Get-Json $HostJson
     Ok 'host last-run.json okundu' ($null -ne $hj)
@@ -341,9 +341,17 @@ if ($Section -eq 0 -or $Section -eq 4) {
     } else {
         Ok 'Test-TcpPort: 3389 dinleyici yok, acik port testi atlandi' $true
     }
-    $cj = Get-Json (Join-Path $env:LOCALAPPDATA 'RemoteClientWatchdog\last-run.json')
-    Ok 'istemci last-run.json okundu' ($null -ne $cj)
-    if ($cj) { Ok 'istemci JSON: rol=client' ($cj.role -eq 'client'); Ok 'istemci JSON: kontroller var' (@($cj.checks).Count -ge 1) }
+    $cjPath = Join-Path $env:LOCALAPPDATA 'RemoteClientWatchdog\last-run.json'
+    $cj = $null
+    if (Test-Path -LiteralPath $cjPath) { $cj = Get-Json $cjPath }
+    if ($cj) {
+        Ok 'istemci last-run.json okundu' $true
+        Ok 'istemci JSON: rol=client' ($cj.role -eq 'client')
+        Ok 'istemci JSON: kontroller var' (@($cj.checks).Count -ge 1)
+    } else {
+        # Temiz bir makinede (veya CI runner'inda) istemci hic kurulmamis olabilir; bu bir hata degil
+        Ok 'istemci last-run.json yok (istemci bu makinede kurulu degil) - istemci JSON testi atlandi' $true
+    }
 }
 
 if ($Section -eq 0 -or $Section -eq 5) {

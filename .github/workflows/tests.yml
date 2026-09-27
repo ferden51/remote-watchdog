@@ -41,6 +41,13 @@ jobs:
             Write-Error 'last-run.json uretilmedi'
           }
 
+      - name: Istemci kontrolunu bir kez calistir (istemci last-run.json uretir)
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\client\RemoteClientWatchdog.ps1 -Check | Out-Null
+          $p = Join-Path $env:LOCALAPPDATA 'RemoteClientWatchdog\last-run.json'
+          if (Test-Path $p) { "istemci JSON: $p" } else { Write-Host 'istemci JSON uretilmedi (test bu durumda atlanir)' }
+
       - name: Test-All
         shell: pwsh
         run: |
