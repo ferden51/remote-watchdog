@@ -9,3 +9,8 @@ Thumbs.db
 host/holidays.txt
 install/output*.txt
 ui/preview*.png
+ui/preview-*.png
+repair-request.json
+last-run.json
+*.png
+.kilo/

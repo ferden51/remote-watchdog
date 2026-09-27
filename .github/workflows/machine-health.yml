@@ -1,0 +1,76 @@
+name: machine-health
+
+# Disaridan oldum manteri: GitHub'dan makinenizi periyodik yoklar.
+# Makine kapali / internetsiz / CRD kapali oldugunda Telegram + e-posta ile uyarir.
+# Yerel watchdog bu durumu yakalayamaz (makine yanit vermiyorsa kimse iceride calisamaz).
+on:
+  schedule:
+    - cron: '23,53 * * * *'   # saatte 2 kez, saatin 23. ve 53. dakikalarinda
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Kontrol edilecek adres (varsayilan: host last-run.json veya CRD URL)'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    name: Makineye ulaşılabiliyor mu?
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Yapılandırma
+        id: cfg
+        env:
+          HEALTH_URL: ${{ secrets.HEALTHCHECK_URL }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TARGET: ${{ github.event.inputs.url }}
+        run: |
+          if [ -n "${TELEGRAM_TOKEN}" ] && [ -n "${TELEGRAM_CHAT_ID}" ]; then
+            echo "telegram=on" >> "$GITHUB_OUTPUT"
+          else
+            echo "telegram=off" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "${HEALTH_URL}" ]; then
+            echo "url=${HEALTH_URL}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${TARGET}" ]; then
+            echo "url=${TARGET}" >> "$GITHUB_OUTPUT"
+          else
+            echo "url=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Yoklama
+        id: ping
+        env:
+          URL: ${{ steps.cfg.outputs.url }}
+        run: |
+          echo "Yoklanan adres: ${URL:-<secret tanimli degil>}"
+          if [ -z "${URL}" ]; then
+            echo "sonuc=skip" >> "$GITHUB_OUTPUT"
+            echo "Secret tanimli degil; yoklama atlandi." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "${URL}" || echo "000")
+          echo "HTTP ${code}"
+          if [ "${code}" -ge 200 ] && [ "${code}" -lt 400 ]; then
+            echo "sonuc=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "sonuc=bad" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bildirim
+        if: steps.ping.outputs.sonuc == 'bad'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          msg="[UYARI] Uzaktaki makine yanit vermiyor (HTTP ${HTTP_CODE:-hata}). Panel: ${PANEL_URL:-https://github.com}"
+          if [ -n "${TELEGRAM_TOKEN}" ] && [ -n "${TELEGRAM_CHAT_ID}" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${msg}" > /dev/null || true
+          fi
+          echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
+          exit 1

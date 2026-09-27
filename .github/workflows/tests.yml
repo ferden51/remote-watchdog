@@ -1,0 +1,68 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Test-All + Test-UI (windows-latest, PS 5.1)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: PS surumu
+        shell: pwsh
+        run: $PSVersionTable.PSVersion.ToString()
+
+      # Testler canli sistem durumunu okur (ProgramData\RemoteWatchdog). Runner temiz oldugu icin
+      # once veri klasorunu ve config'i hazirliyoruz.
+      - name: Test verisi hazirla
+        shell: pwsh
+        run: |
+          $d = Join-Path $env:ProgramData 'RemoteWatchdog'
+          New-Item -ItemType Directory -Force -Path $d | Out-Null
+          # config.json yoksa host betigi varsayilanlari kullanir; yalnizca klasorun yazilabilir oldugunu dogrula
+          Set-Content -LiteralPath (Join-Path $d '.ci-write-test') -Value 'ok' -Encoding utf8
+          Remove-Item -LiteralPath (Join-Path $d '.ci-write-test') -Force
+          "veri klasoru: $d"
+
+      - name: Bir kez gercek kontrol calistir (last-run.json uretir)
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\host\RemoteHostWatchdog.ps1 -Check
+          if (-not (Test-Path (Join-Path $env:ProgramData 'RemoteWatchdog\last-run.json'))) {
+            Write-Error 'last-run.json uretilmedi'
+          }
+
+      - name: Test-All
+        shell: pwsh
+        run: |
+          $out = & powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-All.ps1 2>&1
+          $out | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "Test-All basarisiz (exit $LASTEXITCODE)" }
+
+      - name: Test-UI (WPF, STA)
+        shell: pwsh
+        run: |
+          $out = & powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\tests\Test-UI.ps1 2>&1
+          $out | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "Test-UI basarisiz (exit $LASTEXITCODE)" }
+
+      - name: SelfTest (arayuz kurulumu + XAML dogrulama)
+        shell: pwsh
+        run: |
+          $png = Join-Path $env:RUNNER_TEMP 'panel.png'
+          & powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\ui\RemoteWatchdogPanel.ps1 -SelfTest -NoBalloon -PreviewPath $png 2>&1 | Out-Host
+          if (-not (Test-Path $png)) { throw 'SelfTest onizleme PNG uretmedi' }
+          if (Test-Path (Join-Path $env:ProgramData 'RemoteWatchdog\panel.log')) {
+            $log = Get-Content (Join-Path $env:ProgramData 'RemoteWatchdog\panel.log') -Tail 200
+            $bad = $log | Select-String 'SELFTEST UYARI'
+            if ($bad) { $bad | Out-Host; throw 'SelfTest uyarilari var' }
+          }

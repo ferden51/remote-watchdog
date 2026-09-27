@@ -7,7 +7,7 @@
     DIKKAT: Parola registry'de duz metin saklanir (LSA secrets sifrelemesi kullanilmaz).
     Bunu sadece evde/ofis gibi guvenli sayilan aglarda kullanin.
 
-    .\Enable-ConsoleAutoLogon.ps1 -User 'ADMN' -Password 'parola'
+    .\Enable-ConsoleAutoLogon.ps1 -User 'KULLANICI' -Password 'parola'
     .\Enable-ConsoleAutoLogon.ps1 -Disable
 #>
 [CmdletBinding()]
@@ -44,7 +44,7 @@ if ($Disable) {
     exit 0
 }
 
-if (-not $Password) { Write-Host 'Parola gerekli. Kullanım: .\Enable-ConsoleAutoLogon.ps1 -User ADMN -Password "..."'; exit 1 }
+if (-not $Password) { Write-Host ('Parola gerekli. Kullanım: .\Enable-ConsoleAutoLogon.ps1 -User "' + $User + '" -Password "..."'); exit 1 }
 
 $domainUser = if ($Domain -eq '.' -or -not $Domain) { '.' + $User } else { ($Domain.TrimEnd('.') + '\' + $User) }
 

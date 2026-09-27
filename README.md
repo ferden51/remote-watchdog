@@ -1,5 +1,7 @@
 ﻿# remote-watchdog
 
+> English: [README.en.md](README.en.md) · License: MIT ([LICENSE](LICENSE)) · Katkı: [CONTRIBUTING.md](CONTRIBUTING.md)
+
 Uzaktaki bilgisayarı **server gibi** çalıştıran, bağlantı koparsa kendini onaran (gerekirse yeniden
 başlatan) iki parçalı PowerShell watchdog projesi.
 
@@ -211,8 +213,11 @@ başlatmadan sonra sekmeler geri gelir.
 - **healthchecks.io**: `https://hc-ping.com/<uuid>` adresini `-HeartbeatUrl` ile verirseniz sunucu
   dönüp durması / hata vermesi durumunda e-posta veya çağrı gelir. Sorun halinde `<uuid>/fail` adresine gider.
   Yeni bir check oluşturup `Period: 5m`, `Grace: 10m` seçin (dead-man's switch).
-- **GitHub Actions** alternatifi: repo içine `schedule` ile çalışan, healthchecks.io ping atan bir iş akışı
-  konabilir; böylece host'un haber vermesi hiç olmazsa bile alarm çalar.
+- **GitHub Actions** alternatifi: repo içinde hazır iş akışı var -
+  `.github/workflows/machine-health.yml` (saatte 2 kez, `schedule`). Depo secret'larına
+  `HEALTHCHECK_URL`, `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID` tanımlanınca GitHub'dan makine yoklanır ve
+  yanıt vermezse Telegram'a uyarı gider. **Makine kapalı/internetsiz olduğu tek durumu budur**; yerel
+  watchdog kendi içinden bakamaz.
 
 ## İnsanın yapması gerekenler (watchdog çözemez)
 
