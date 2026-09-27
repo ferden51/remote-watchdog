@@ -1024,15 +1024,7 @@ function Format-ConnSubLine {
     $line = ([string]$s.Ok + ' saglikli') + $(if ($s.Bad -gt 0) { '  |  ' + $s.Bad + ' sorunlu' } else { '' }) + $(if ($s.Info -gt 0) { '  |  ' + $s.Info + ' bilgi' } else { '' })
     if ($s.LastRun) { $line += '   -   olcumler ' + ([datetime]$s.LastRun).ToString('HH:mm:ss') + ' (' + (Format-ShortSpan ((Get-Date) - [datetime]$s.LastRun).TotalSeconds) + ' once)' }
     else { $line += '   -   olcum zamani bilinmiyor' }
-    if ($script:CheckBusy) {
-        $line += '   -   DENETLENIYOR (' + [int]((Get-Date) - $script:CheckBusySince).TotalSeconds + ' sn)'
-    } elseif ($null -ne $Next -and $Next.Known -and $Next.RemainingSeconds -gt 0) {
-        $line += '   -   sonraki otomatik denetim ' + $Next.Next.ToString('HH:mm:ss') + ' (' + [int][math]::Ceiling($Next.RemainingSeconds) + ' sn sonra)'
-    } elseif ($null -ne $Next -and $Next.Known) {
-        $line += '   -   otomatik denetim zamani geldi (' + [int][math]::Ceiling($Next.OverdueSeconds) + ' sn gecikme)'
-    } else {
-        $line += '   -   sonraki otomatik denetim bilinmiyor'
-    }
+    if ($script:CheckBusy) { $line += '   -   DENETLENIYOR' }
     return $line
 }
 
@@ -2154,8 +2146,8 @@ if ($SelfTest) {
         } else {
             Write-Host 'Sayac dogrulandi: kalan sure saniye cinsinden gosteriliyor' -ForegroundColor Green
         }
-        if ([string](El $script:Win 'TxtConnSub').Text -notmatch 'sonraki otomatik denetim|otomatik denetim zamani geldi|DENETLENIYOR') {
-            Write-Host 'SELFTEST UYARI: baglanti sayfasi alt satirinda otomatik denetim bilgisi yok!' -ForegroundColor Red
+        if ([string](El $script:Win 'TxtConnSub').Text -notmatch 'saglikli' -or [string](El $script:Win 'TxtConnSub').Text -match 'sonraki otomatik denetim|otomatik denetim zamani geldi') {
+            Write-Host 'SELFTEST UYARI: baglanti sayfasi alt satiri beklenen formatta degil!' -ForegroundColor Red
         } else {
             Write-Host ('Baglanti alt satiri: ' + [string](El $script:Win 'TxtConnSub').Text) -ForegroundColor Green
         }
