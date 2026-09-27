@@ -1084,7 +1084,9 @@ function Test-ManualCheckRunning {
 function Complete-ManualCheck {
     $el = [int]((Get-Date) - $script:CheckBusySince).TotalSeconds
     $script:CheckBusy = $false
-    $script:CheckProcs = @()
+$script:CheckProcs = @()
+$script:EnumSelect = @{}
+$script:ActionButtons = @()
     $btn = El $script:Win 'BtnCheck'
     if ($btn) { $btn.Content = 'Şimdi denetle' }
     Resolve-CheckInterval -Force | Out-Null
@@ -1449,8 +1451,9 @@ function ConvertTo-DayNames {
 
 function New-Segmented {
     param([string[]]$Options, [string]$Selected, [string]$Key)
-    if (-not $script:EnumSelect) { $script:EnumSelect = @{} }
+    if ($null -eq $script:EnumSelect) { $script:EnumSelect = @{} }
     $script:EnumSelect[$Key] = $Selected
+    $store = $script:EnumSelect
     $p = New-Object System.Windows.Controls.StackPanel
     $p.Orientation = 'Horizontal'
     $buttons = New-Object System.Collections.ArrayList
@@ -1465,13 +1468,14 @@ function New-Segmented {
         if ($style) { $b.Style = $style }
         $opt = [string]$o
         $kk = [string]$Key
+        $grpRef = $p
         $b.add_Click({
                 param($s, $e)
                 try {
-                    $script:EnumSelect[$kk] = $opt
-                    $grp = $s.Source
-                    if (-not $grp) { $grp = $s.OriginalSource }
-                    if ($grp) { $grp = $grp.Parent }
+                    $store[$kk] = $opt
+                    $grp = $null
+                    if ($s -and $s.Source) { $grp = $s.Source }
+                    if (-not $grp) { $grp = $grpRef }
                     if ($grp) {
                         foreach ($x in @($grp.Children)) {
                             if (-not ($x -is [System.Windows.Controls.Button])) { continue }
@@ -1982,7 +1986,18 @@ function Wire-UI {
             Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait
         })
     (El $w 'BtnSave').Add_Click({ Save-Settings })
-    (El $w 'BtnReload').Add_Click({ try { Build-Settings } catch { } ; (El $w 'TxtSaved').Text = '' })
+    (El $w 'BtnReload').Add_Click({
+            try {
+                Build-Settings
+                $cnt = @((El $w 'SettingsPanel').Children).Count
+                if ($cnt -lt 10) { Write-Trace ('Formu yenile: ayar satiri az (' + $cnt + ') - form kismen kurulmamis olabilir') }
+                (El $w 'TxtSaved').Text = 'Form yenilendi: ' + (Get-Date).ToString('HH:mm:ss')
+            } catch {
+                Write-Trace ('Formu yenile HATASI: ' + $_.Exception.Message)
+                (El $w 'TxtSaved').Text = 'Yenileme hatası: ' + $_.Exception.Message
+                [System.Windows.MessageBox]::Show('Form yenilenemedi: ' + $_.Exception.Message, 'RemoteWatchdog') | Out-Null
+            }
+        })
     (El $w 'BtnLogRefresh').Add_Click({ Update-Log })
     (El $w 'BtnLogCopy').Add_Click({ try { [System.Windows.Clipboard]::SetText((El $w 'TxtLog').Text) } catch { } })
     (El $w 'BtnLogOpen').Add_Click({ if (Test-Path $HostLog) { Start-Process notepad.exe $HostLog } })
