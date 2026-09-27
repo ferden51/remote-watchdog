@@ -700,8 +700,11 @@ $Xaml = @'
         <!-- AYARLAR -->
         <ScrollViewer x:Name="PageSettings" VerticalScrollBarVisibility="Auto" Padding="22,20" Visibility="Collapsed">
           <StackPanel>
-            <TextBlock Text="Ayarlar" Style="{StaticResource H1}" Margin="0,0,0,4"/>
-            <TextBlock Text="Kaydettiginizde config.json guncellenir; bir sonraki denetimde gecerli olur." Style="{StaticResource Small}" Margin="0,0,0,16"/>
+              <TextBlock Text="Ayarlar" Style="{StaticResource H1}" Margin="0,0,0,4"/>
+              <TextBlock Text="Kaydettiginizde config.json guncellenir; bir sonraki denetimde gecerli olur." Style="{StaticResource Small}" Margin="0,0,0,6"/>
+              <Border Background="#16191E" CornerRadius="8" Padding="12,8" Margin="0,0,0,12" BorderBrush="#2A2F36" BorderThickness="1">
+                <TextBlock x:Name="TxtSettingsStatus" Text="Watchdog durumu yukleniyor..." Style="{StaticResource Small}" TextWrapping="Wrap"/>
+              </Border>
             <StackPanel x:Name="SettingsPanel"/>
             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
               <Button x:Name="BtnSave" Content="Ayarları kaydet" Style="{StaticResource BtnAccent}" Margin="0,0,10,0"/>
@@ -1268,6 +1271,11 @@ function Update-ActionBarColors {
         $script:TaskStatusText.Text = $statusText
         $script:TaskStatusText.Foreground = Bx $statusColor
     }
+    $top = $script:Win.FindName('TxtSettingsStatus')
+    if ($top) {
+        $top.Text = $statusText
+        $top.Foreground = Bx $statusColor
+    }
     foreach ($bb in $script:ActionButtons) {
         $k = [string]$bb.Tag
         if ($k -eq 'install') {
@@ -1275,24 +1283,32 @@ function Update-ActionBarColors {
                 $bb.Background = Bx 'Ok'
                 $bb.Foreground = Bx '#0B1220'
                 $bb.BorderBrush = Bx 'Ok'
+                $bb.Opacity = 0.55
                 $bb.IsEnabled = $false
+                $bb.ToolTip = 'Watchdog zaten kurulu ve çalışıyor. Bu düğme pasif durumdadır.'
             } else {
                 $bb.Background = Bx 'Bad'
                 $bb.Foreground = Bx '#1A0B0B'
                 $bb.BorderBrush = Bx 'Bad'
+                $bb.Opacity = 1
                 $bb.IsEnabled = $true
+                $bb.ToolTip = 'Watchdog kurulu değil. Bu düğmeye basarak Install-Host.ps1 çalıştırılır.'
             }
         } elseif ($k -eq 'uninstall') {
             if ($installed) {
                 $bb.Background = Bx 'Card2'
                 $bb.Foreground = Bx 'Text'
                 $bb.BorderBrush = Bx 'Line'
+                $bb.Opacity = 1
                 $bb.IsEnabled = $true
+                $bb.ToolTip = 'Watchdog görevini kaldırır (izleme ve otomatik onarım durur).'
             } else {
                 $bb.Background = Bx 'Card2'
                 $bb.Foreground = Bx 'Muted'
                 $bb.BorderBrush = Bx 'Line'
+                $bb.Opacity = 0.55
                 $bb.IsEnabled = $false
+                $bb.ToolTip = 'Kaldırılacak görev yok.'
             }
         } elseif ($k -eq 'stoptask') {
             if ($running) {
@@ -1640,7 +1656,7 @@ function Add-ActionBar {
     $r1.Orientation = 'Horizontal'
     $r1.Margin = New-Object System.Windows.Thickness(0, 0, 0, 8)
     $mk = {
-        param([string]$Text, [string]$Key)
+        param([string]$Text, [string]$Key, [switch]$Danger)
         $b = New-Object System.Windows.Controls.Button
         $b.Content = $Text
         $b.Tag = $Key
@@ -1648,11 +1664,12 @@ function Add-ActionBar {
         $b.Padding = New-Object System.Windows.Thickness(14, 7, 14, 7)
         $b.Cursor = [System.Windows.Input.Cursors]::Hand
         $b.FontSize = 12.5
+        $style = $script:Win.TryFindResource($(if ($Danger) { 'BtnDanger' } else { 'Btn' }))
+        if ($style) { $b.Style = $style }
         $b.Background = Bx 'Card2'
         $b.Foreground = Bx 'Text'
         $b.BorderBrush = Bx 'Line'
         $b.BorderThickness = New-Object System.Windows.Thickness(1)
-        $b.Template = $null
         return $b
     }
     $b1 = & $mk 'Watchdog kur' 'install'
@@ -2023,9 +2040,13 @@ function Wire-UI {
                 Build-Settings
                 $cnt = @((El $script:Win 'SettingsPanel').Children).Count
                 if ($cnt -lt 10) { Write-Trace ('Formu yenile: ayar satiri az (' + $cnt + ')') }
+                $top = $script:Win.FindName('TxtSettingsStatus')
+                if ($top) { $top.Text = 'Form yenilendi: ' + (Get-Date).ToString('HH:mm:ss') + ' (' + $cnt + ' ayar)'; $top.Foreground = Bx 'Ok' }
                 if ($statusBox) { $statusBox.Text = 'Form yenilendi: ' + (Get-Date).ToString('HH:mm:ss') + ' (' + $cnt + ' ayar)' }
             } catch {
                 Write-Trace ('Formu yenile HATASI: ' + $_.Exception.Message + ' | iz: ' + (($_.ScriptStackTrace -split "`r?`n" | Select-Object -First 3) -join ' <- '))
+                $top = $script:Win.FindName('TxtSettingsStatus')
+                if ($top) { $top.Text = 'Yenileme hatası: ' + $_.Exception.Message; $top.Foreground = Bx 'Bad' }
                 if ($statusBox) { $statusBox.Text = 'Yenileme hatası: ' + $_.Exception.Message; $statusBox.Foreground = Bx 'Bad' }
             }
             try { $btnReload.Content = 'Formu yenile'; $btnReload.IsEnabled = $true; if ($statusBox) { $statusBox.Foreground = Bx 'Ok' } } catch { }
