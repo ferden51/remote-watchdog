@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     Test-UI - Arayuz birim testleri (gosterilmez, tek butona basar)
     Yalnizca WPF bilesenlerini kullanir; panel acmaz, ekrana pencere gostermez.
@@ -108,13 +108,42 @@ if ($ClickTest) {
 }
 
 Write-Host ''
+Write-Host '-- Watchdog görev durumu (yanlış "kurulu değil" uyarısı) --'
+foreach ($code in (Get-FnCode $PanelPath @('Get-Json', 'Get-WatchdogTaskState'))) { Invoke-Expression $code }
+$tmpJson = Join-Path $env:TEMP 'rw-uitest-state.json'
+$script:HostJson = $tmpJson
+$script:TaskCache = $null
+$script:TaskCacheUntil = (Get-Date).AddMinutes(5)
+function Set-StateJson { param($Obj) [System.IO.File]::WriteAllText($tmpJson, ($Obj | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding($false))) }
+Set-StateJson ([ordered]@{ generated = (Get-Date).ToString('o'); taskInstalled = 'unknown'; checks = @() })
+Ok ('gecici JSON okundu: taskInstalled=' + [string](Get-Json $tmpJson).taskInstalled) ([string](Get-Json $tmpJson).taskInstalled -eq 'unknown')
+$s1 = Get-WatchdogTaskState
+Ok ('taze veri + görünmeyen görev -> kurulu sayıldı: ' + $s1.Installed + ' | renk=' + $s1.Color) ($s1.Installed -eq $true -and $s1.Color -eq 'Ok')
+Ok ('metin SYSTEM bilgisini içeriyor: ' + $s1.Text) ($s1.Text -match 'SYSTEM')
+$staleObj = [ordered]@{ generated = (Get-Date).AddHours(-6).ToString('o'); taskInstalled = 'unknown'; checks = @() }
+$staleObj | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tmpJson -Encoding UTF8
+$s2 = Get-WatchdogTaskState
+Ok ('eski veri + görünmeyen görev -> kurulu değil denmeli: ' + $s2.Installed) ($s2.Installed -eq $false)
+$falseObj = [ordered]@{ generated = (Get-Date).ToString('o'); taskInstalled = $false; checks = @() }
+$falseObj | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tmpJson -Encoding UTF8
+$s3 = Get-WatchdogTaskState
+Ok ('JSON açıkça false -> kurulu değil: ' + $s3.Installed) ($s3.Installed -eq $false)
+$trueObj = [ordered]@{ generated = (Get-Date).ToString('o'); taskInstalled = $true; checks = @() }
+$trueObj | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tmpJson -Encoding UTF8
+$s4 = Get-WatchdogTaskState
+Ok ('JSON true -> çalışıyor: ' + $s4.Installed) ($s4.Installed -eq $true -and $s4.Color -eq 'Ok')
+Remove-Item -LiteralPath $tmpJson -Force -ErrorAction SilentlyContinue
+
+Write-Host ''
 Write-Host '-- Build-Settings (formu yenile) --'
 $panelText = Get-Content -LiteralPath $PanelPath -Raw -Encoding UTF8
 $mx = [regex]::Match($panelText, "(?s)\`$Xaml = @'\r?\n(.*?)\r?\n'@")
 if (-not $mx.Success) { Ok 'panel XAML bulundu' $false } else {
     Ok 'panel XAML bulundu' $true
     try { $script:Win = [Windows.Markup.XamlReader]::Parse($mx.Groups[1].Value) } catch { Ok 'XAML ayrıştırıldı' $false $_.Exception.Message }
-    $need = @('Bx', 'El', 'Write-Trace', 'Get-Json', 'Read-ConfigFile', 'Get-HostConfig', 'Get-ClientDefaults', 'Get-CurrentValues', 'ConvertTo-DayNames', 'New-Toggle', 'New-TextBox', 'New-Segmented', 'New-SettingRow', 'Add-ActionBar', 'Update-ActionBarColors', 'Resolve-CheckInterval', 'Build-Settings', 'Invoke-SettingsAction', 'Invoke-TrayAction', 'Get-Actions', 'Update-Connections', 'Update-Overview', 'Update-Actions', 'Update-Log', 'Refresh-Icon', 'Get-StatusInfo', 'Show-Balloon', 'Get-BalloonMode', 'Set-BalloonMode', 'Invoke-Script', 'Update-Countdown', 'Get-NextCheck', 'Update-TaskStatusText')
+    $need = @('Bx', 'El', 'Write-Trace', 'Get-Json', 'Read-ConfigFile', 'Get-HostConfig', 'Get-ClientDefaults', 'Get-CurrentValues', 'ConvertTo-DayNames', 'New-Toggle', 'New-TextBox', 'New-Segmented', 'New-SettingRow', 'Add-ActionBar', 'Get-WatchdogTaskState', 'Update-ActionBarColors', 'Resolve-CheckInterval', 'Build-Settings', 'Invoke-SettingsAction', 'Invoke-TrayAction', 'Get-Actions', 'Update-Connections', 'Update-Overview', 'Update-Actions', 'Update-Log', 'Refresh-Icon', 'Get-StatusInfo', 'Show-Balloon', 'Get-BalloonMode', 'Set-BalloonMode', 'Invoke-Script', 'Update-Countdown', 'Get-NextCheck')
+    $script:TaskCache = $null
+    $script:TaskCacheUntil = [datetime]::MinValue
     foreach ($code in (Get-FnCode $PanelPath $need)) { Invoke-Expression $code }
     $script:TaskStatusText = $null
     $md = [regex]::Match($panelText, "(?s)\`$script:Defs = @\(.*?\r?\n\)")

@@ -315,19 +315,16 @@ function Get-Actions {
         [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = 'Uzak makine verisi yok'; Detail = 'Watchdog kurulu degil veya hic calismadi.'; Key = 'host'; Action = 'Kur' })
         return $a
     }
-    if ($hj) {
-        $fresh = $false
-        try { $fresh = (((Get-Date) - [datetime]::Parse([string]$hj.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -lt 30) } catch { }
-        $hState = 'bilinmiyor'
-        if ($hj.taskInstalled -eq $true) { $hState = 'calisiyor' }
-        elseif ($hj.taskInstalled -eq $false) { $hState = 'KURULU DEGIL' }
-        elseif ($fresh) { $hState = 'gorunmuyor-ama-calisiyor' }
-        else { $hState = 'calismiyor' }
-        if ($hState -eq 'KURULU DEGIL' -or $hState -eq 'calismiyor') {
-            [void]$a.Add([pscustomobject]@{ Level = 'bad'; Title = 'Zamanlanmış görev kurulu değil'; Detail = 'RemoteHostWatchdog görevi bulunamadı. Bu görev olmadan kontrol, onarım, alarm ve restart politikası çalışmaz. Kurulum: install\Install-Host.ps1 (yönetici) ya da aşağıdaki Kur işlemi.'; Key = 'host'; Action = 'Kur' })
-        } elseif ($hState -eq 'gorunmuyor-ama-calisiyor') {
-            [void]$a.Add([pscustomobject]@{ Level = 'ok'; Title = 'Zamanlanmış görev çalışıyor'; Detail = 'RemoteHostWatchdog SYSTEM hesabına ait olduğu için normal kullanıcı sorgusunda görünmez; ancak veriler taze, yani görev düzenli çalışıyor.'; Key = ''; Action = '' })
+    $hj = Get-Json $HostJson
+    $st = Get-WatchdogTaskState
+    if ($st.Installed) {
+        if ($st.Visible) {
+            [void]$a.Add([pscustomobject]@{ Level = 'ok'; Title = 'Zamanlanmış görev kurulu'; Detail = $st.Text + '.'; Key = ''; Action = '' })
+        } else {
+            [void]$a.Add([pscustomobject]@{ Level = 'ok'; Title = 'Zamanlanmış görev çalışıyor'; Detail = $st.Text + '. Sistem kendi kendine yeniden başlatmıyor; veriler taze olduğu için görev düzenli çalışıyor.'; Key = ''; Action = '' })
         }
+    } else {
+        [void]$a.Add([pscustomobject]@{ Level = 'bad'; Title = 'Watchdog kurulu değil'; Detail = 'RemoteHostWatchdog görevi yok. Bu görev olmadan kontrol, onarım, alarm ve restart politikası çalışmaz. Kurulum: install\Install-Host.ps1 (yönetici) ya da aşağıdaki Kur işlemi.'; Key = 'host'; Action = 'Kur' })
     }
     if ($st.Age -and $st.Age.TotalMinutes -gt ([double]$cfg.IntervalMinutes * 3)) {
         [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ('Watchdog donmuyor (' + [math]::Round($st.Age.TotalMinutes) + ' dk once)'); Detail = 'Gorev durmus olabilir veya makine uyuyor.'; Key = 'run'; Action = 'Şimdi denetle' })
@@ -1219,8 +1216,7 @@ function Update-Actions {
     } catch { Write-Trace ('islem yenileme hatasi: ' + $_.Exception.Message) }
 }
 
-function Update-ActionBarColors {
-    if (-not $script:ActionButtons) { return }
+function Get-WatchdogTaskState {
     if ((Get-Date) -lt $script:TaskCacheUntil) {
         $task = $script:TaskCache
     } else {
@@ -1229,17 +1225,45 @@ function Update-ActionBarColors {
         $script:TaskCache = $task
         $script:TaskCacheUntil = (Get-Date).AddSeconds(60)
     }
-    $running = [bool]($task -and $task.State -eq 'Running')
-    $installed = [bool]$task
-    $statusText = 'Watchdog: kurulu degil'
-    $statusColor = 'Bad'
-    if ($installed -and $running) {
-        $statusText = 'Zamanlanmis gorev: CALISiyOR'
-        $statusColor = 'Ok'
-    } elseif ($installed) {
-        $statusText = 'Zamanlanmis gorev: kurulu, calismiyor'
-        $statusColor = 'Warn'
+    $hj = Get-Json $HostJson
+    $fresh = $false
+    if ($hj -and $hj.generated) {
+        try { $fresh = (((Get-Date) - [datetime]::Parse([string]$hj.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -lt 30) } catch { }
     }
+    if ($task) {
+        $running = ($task.State -eq 'Running')
+        return [pscustomobject]@{
+            Installed = $true; Visible = $true; Running = $running; Fresh = $fresh
+            Text = $(if ($running) { 'Zamanlanmış görev: ÇALIŞIYOR' } else { 'Zamanlanmış görev: kurulu, şu an çalışmıyor' })
+            Color = $(if ($running) { 'Ok' } else { 'Warn' })
+        }
+    }
+    $hjSays = $null
+    if ($hj -and $null -ne $hj.taskInstalled) { $hjSays = $hj.taskInstalled }
+    if ($hjSays -eq $true -or ($hjSays -eq 'unknown' -and $fresh)) {
+        return [pscustomobject]@{
+            Installed = $true; Visible = $false; Running = $true; Fresh = $fresh
+            Text = 'Zamanlanmış görev: ÇALIŞIYOR (SYSTEM hesabında, bu oturumda görünmüyor)'
+            Color = 'Ok'
+        }
+    }
+    if ($hjSays -eq 'unknown' -and $fresh) {
+        return [pscustomobject]@{ Installed = $true; Visible = $false; Running = $true; Fresh = $fresh; Text = 'Zamanlanmış görev: çalışıyor'; Color = 'Ok' }
+    }
+    return [pscustomobject]@{
+        Installed = $false; Visible = $true; Running = $false; Fresh = $fresh
+        Text = 'Watchdog: kurulu değil — Install-Host.ps1 ile kurun'
+        Color = 'Bad'
+    }
+}
+
+function Update-ActionBarColors {
+    if (-not $script:ActionButtons) { return }
+    $st = Get-WatchdogTaskState
+    $task = $script:TaskCache
+    $installed = $st.Installed
+    $statusText = $st.Text
+    $statusColor = $st.Color
     if ($script:TaskStatusText) {
         $script:TaskStatusText.Text = $statusText
         $script:TaskStatusText.Foreground = Bx $statusColor
