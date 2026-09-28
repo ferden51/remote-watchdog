@@ -247,9 +247,13 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'panel last-run.json damga yoklamasi (1 sn) var' ($panelText -match 'JsonLastWrite')
     Ok 'panel ayar kaydedince watchdog tetikliyor' ($panelText -match 'Start-ScheduledTask -TaskName \$tn')
     Ok 'panel sesli bildirim (Speak-Text) var' ($panelText -match 'function Speak-Text')
+    Ok 'panel dogal kadin sesi (edge-tts) yolu var' ($panelText -match 'function Speak-EdgeTts')
+    Ok 'panel edge-tts dogrulama (Test-EdgeTts) var' ($panelText -match 'function Test-EdgeTts')
+    Ok 'panel Turkce SAPI yedegi var' ($panelText -match 'function Speak-SapiText')
     Ok 'panel ses gecisi izleyici (Update-VoiceAlerts) var' ($panelText -match 'function Update-VoiceAlerts')
     Ok 'Wire-UI penceresiz calismada net atliyor' ($panelText -match 'Wire-UI atlandi')
     Ok 'host SesliBildirim varsayilani var' ($hostText -match '(?m)^\s{8}SesliBildirim\s*=')
+    Ok 'host SesliBildirimEdge varsayilani var' ($hostText -match '(?m)^\s{8}SesliBildirimEdge\s*=')
     Ok 'panel surumu ayarlar sayfasinda gosteriyor' ($panelText -match "TxtVersion")
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

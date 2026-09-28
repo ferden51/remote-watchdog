@@ -80,6 +80,16 @@ $script:IntervalCacheSrc = ''
 $script:IntervalCacheUntil = [datetime]::MinValue
 $script:ConnSummary = @{ Ok = 0; Bad = 0; Info = 0; LastRun = $null }
 $script:JsonLastWrite = [datetime]::MinValue
+$script:SpeechBusy = $false
+$script:SpeechPlayer = $null
+$script:SpeechMp3 = ''
+$script:SpeechTxt = ''
+$script:SpeechDeadline = [datetime]::MinValue
+$script:SpeechTimer = $null
+$script:EdgeOk = $null
+$script:PyExe = ''
+$script:VoiceLast = $null
+$script:VoiceNoTr = $false
 # --- Canli ag onarim izleme (basliktaki "Agi / interneti onar" dugmesi) ---
 $script:RepairRunning = $false
 $script:RepairSawDone = $false
@@ -286,7 +296,7 @@ function Get-HostConfig {
         ServerMode = $true; DisableFastStartup = $true; OfficeSaveBeforeReboot = $true
         OfficeSaveTimeoutSeconds = 120; OfficeAbortRebootIfStillOpen = $true; OfficeAbortRebootIfUnsaved = $true
         TelegramToken = ''; TelegramChatId = ''; HeartbeatUrl = ''; AlertRepeatHours = 12; NotifyRepeatHours = 4
-        SesliBildirim = $true
+        SesliBildirim = $true; SesliBildirimEdge = $true
     }
     if (Test-Path -LiteralPath $HostConfig) {
         try {
@@ -2173,25 +2183,132 @@ function Show-Balloon {
     } catch { Write-Trace ('balloon gosterilemedi: ' + $_.Exception.Message) }
 }
 
-function Speak-Text {
-    <#
-        Kisa Turkce sesli anons (SAPI, harici bagimlilik yok). Ses yoksa/cihaz yoksa sessiz gecer.
-        SesliBildirim kapaliysa veya sessiz moddaysa konusmaz. Volume=0 ile sessizce dogrulanabilir.
-    #>
+function Get-PythonExe {
+    if ($script:PyExe) { return $script:PyExe }
+    $script:PyExe = ''
+    try { $script:PyExe = (Get-Command python.exe -ErrorAction Stop | Select-Object -First 1).Source } catch { }
+    return $script:PyExe
+}
+
+function Test-EdgeTts {
+    <# edge-tts (dogal Turkce KADIN ses) kurulu mu; sonuc onbellege alinir. #>
+    if ($null -ne $script:EdgeOk) { return [bool]$script:EdgeOk }
+    $script:EdgeOk = $false
+    $py = Get-PythonExe
+    if (-not $py) { Write-Trace 'python bulunamadi; Turkce SAPI sesine donuluyor'; return $false }
+    try {
+        & $py -c 'import edge_tts' 2>&1 | Out-Null
+        $script:EdgeOk = ($LASTEXITCODE -eq 0)
+    } catch { }
+    if (-not $script:EdgeOk) { Write-Trace 'edge-tts yok (python -m pip install --user edge-tts); Turkce SAPI sesine donuluyor' }
+    return [bool]$script:EdgeOk
+}
+
+function Stop-Speech {
+    if ($script:SpeechTimer) { try { $script:SpeechTimer.Stop() } catch { } }
+    if ($script:SpeechPlayer) { try { $script:SpeechPlayer.Stop(); $script:SpeechPlayer.Close() } catch { } }
+    foreach ($f in @($script:SpeechMp3, $script:SpeechTxt)) { if ($f) { try { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } catch { } } }
+    $script:SpeechPlayer = $null
+    $script:SpeechMp3 = ''
+    $script:SpeechTxt = ''
+    $script:SpeechBusy = $false
+}
+
+function Update-SpeechPlayback {
+    <# 250 ms'lik sayac: mp3 hazir olunca calar (arayuz bloklanmaz), bitince temizler. #>
+    if (-not $script:SpeechBusy) { if ($script:SpeechTimer) { $script:SpeechTimer.Stop() }; return }
+    $late = ((Get-Date) -gt $script:SpeechDeadline)
+    if (-not $script:SpeechPlayer) {
+        $f = $script:SpeechMp3
+        if ($f -and (Test-Path -LiteralPath $f) -and (Get-Item -LiteralPath $f).Length -gt 0) {
+            try {
+                $pl = New-Object System.Windows.Media.MediaPlayer
+                $pl.Open([uri]$f)
+                $pl.Play()
+                $script:SpeechPlayer = $pl
+            } catch { Write-Trace ('mp3 calinamadi: ' + $_.Exception.Message); Stop-Speech; return }
+        } elseif ($late) { Stop-Speech; return }
+        return
+    }
+    try {
+        if ($script:SpeechPlayer.NaturalDuration.HasTimeSpan) {
+            $end = $script:SpeechPlayer.NaturalDuration.TimeSpan.TotalMilliseconds
+            if ($script:SpeechPlayer.Position.TotalMilliseconds -ge ($end - 120)) { Stop-Speech }
+        } elseif ($late) { Stop-Speech }
+    } catch { Stop-Speech }
+}
+
+function Speak-EdgeTts {
+    <#  Metni dogal Turkce KADIN sese (tr-TR-EmelNeural) cevirip mp3 olarak calar. #>
+    param([string]$Text)
+    if ($script:SpeechBusy) { return $false }
+    $py = Get-PythonExe
+    if (-not $py) { return $false }
+    $id = [Guid]::NewGuid().ToString('N')
+    $txt = Join-Path $env:TEMP ('rw-tts-' + $id + '.txt')
+    $mp3 = Join-Path $env:TEMP ('rw-tts-' + $id + '.mp3')
+    $voice = 'tr-TR-EmelNeural'
+    try {
+        [System.IO.File]::WriteAllText($txt, $Text, (New-Object System.Text.UTF8Encoding($false)))
+        Start-Process -FilePath $py -ArgumentList @('-m', 'edge_tts', '--voice', $voice, '--file', $txt, '--write-media', $mp3) -WindowStyle Hidden | Out-Null
+    } catch { Write-Trace ('edge-tts baslatilamadi: ' + $_.Exception.Message); return $false }
+    $script:SpeechBusy = $true
+    $script:SpeechMp3 = $mp3
+    $script:SpeechTxt = $txt
+    $script:SpeechDeadline = (Get-Date).AddSeconds(25)
+    $script:SpeechPlayer = $null
+    if (-not $script:SpeechTimer) { $script:SpeechTimer = New-Object System.Windows.Threading.DispatcherTimer }
+    $script:SpeechTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $script:SpeechTimer.Stop()
+    $script:SpeechTimer.Add_Tick({ Update-SpeechPlayback })
+    $script:SpeechTimer.Start()
+    return $true
+}
+
+function Speak-SapiText {
+    <#  Yedek yol: Windows'un kendi Turkce sesi (Tolga). Turkce ses yoksa INGILIZCE okumaz, susar. #>
     param([string]$Text, [int]$Volume = 100)
-    if ([string]::IsNullOrWhiteSpace($Text)) { return }
-    try { if ((Get-HostConfig).SesliBildirim -eq $false) { return } } catch { }
-    if ($script:Silent) { return }
+    $tr = $null
     try {
         Add-Type -AssemblyName System.Speech
         $sp = New-Object System.Speech.Synthesis.SpeechSynthesizer
-        try { $sp.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::NotSet, [System.Speech.Synthesis.VoiceAge]::NotSet, 0, (New-Object System.Globalization.CultureInfo 'tr-TR')) } catch { }
+        foreach ($v in $sp.GetInstalledVoices()) {
+            $vi = $v.VoiceInfo
+            if ($vi.Enabled -and ([string]$vi.Culture).StartsWith('tr')) { $tr = $vi.Name; break }
+        }
+        if (-not $tr) {
+            if (-not $script:VoiceNoTr) {
+                $script:VoiceNoTr = $true
+                Write-Trace 'Turkce SAPI sesi yok; edge-tts kullanilmali, aksi halde sesli bildirim susuyor'
+            }
+            $sp.Dispose()
+            return
+        }
+        $sp.SelectVoice($tr)
         $sp.Volume = [Math]::Max(0, [Math]::Min(100, $Volume))
-        $t = [string]$Text
-        if ($t.Length -gt 160) { $t = $t.Substring(0, 160) }
-        $sp.Speak($t)
+        $sp.Speak($Text)
         $sp.Dispose()
-    } catch { Write-Trace ('sesli bildirim calismadi: ' + $_.Exception.Message) }
+    } catch { Write-Trace ('SAPI sesli bildirim calismadi: ' + $_.Exception.Message) }
+}
+
+function Speak-Text {
+    <#
+        Turkce sesli anons. Oncelik dogal KADIN sesi (edge-tts, tr-TR-EmelNeural); edge-tts yoksa
+        Windows'un Turkce sesi (Tolga); Turkce ses yoksa hic okumaz (Ingilizce okumaz).
+        SesliBildirim kapaliysa veya sessiz moddaysa konusmaz.
+    #>
+    param([string]$Text, [int]$Volume = 100, [switch]$Force)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return }
+    try { $cfg = Get-HostConfig; if ($cfg.SesliBildirim -eq $false) { return } } catch { $cfg = $null }
+    if ($script:Silent -and -not $Force) { return }
+    $t = [string]$Text
+    if ($t.Length -gt 160) { $t = $t.Substring(0, 160) }
+    try {
+        if ($cfg.SesliBildirimEdge -ne $false -and (Test-EdgeTts)) {
+            if (Speak-EdgeTts -Text $t) { return }
+        }
+    } catch { Write-Trace ('edge-tts yolu hata verdi, SAPI''ya dusuluyor: ' + $_.Exception.Message) }
+    Speak-SapiText -Text $t -Volume $Volume
 }
 
 function Update-VoiceAlerts {
@@ -2477,12 +2594,13 @@ function Wire-UI {
         })
     # Dispatcher uzerinde tek merkezî hata yakalayici (Window'da add_DispatcherUnhandledException
     # metodu YOKTUR; Dispatcher.UnhandledException kullanilir). Dosya sonunda tekrar KAYDEDILMEZ.
-    $script:Win.Dispatcher.UnhandledException.Add({
-            param($s, $e)
-            Write-Trace ('YAKALANAMAYAN HATA: ' + $e.Exception.GetType().Name + ' - ' + $e.Exception.Message + ' | iz: ' + (($e.Exception.StackTrace -split "`r?`n" | Select-Object -First 3) -join ' <- '))
-            [System.Windows.MessageBox]::Show('Panelde bir hata olustu: ' + $e.Exception.Message + "`n`nAyrinti: C:\ProgramData\RemoteWatchdog\panel.log", 'RemoteWatchdog') | Out-Null
-            $e.Handled = $true
-        })
+    try { $script:Win.Dispatcher.UnhandledException.Add({
+                param($s, $e)
+                Write-Trace ('YAKALANAMAYAN HATA: ' + $e.Exception.GetType().Name + ' - ' + $e.Exception.Message + ' | iz: ' + (($e.Exception.StackTrace -split "`r?`n" | Select-Object -First 3) -join ' <- '))
+                [System.Windows.MessageBox]::Show('Panelde bir hata olustu: ' + $e.Exception.Message + "`n`nAyrinti: C:\ProgramData\RemoteWatchdog\panel.log", 'RemoteWatchdog') | Out-Null
+                $e.Handled = $true
+            })
+    } catch { Write-Trace ('dispatcher hata yakalayici kurulamadi: ' + $_.Exception.Message) }
     $script:ShowTimer.Start()
     $script:HelpTimer = $null
     $script:HelpIndex = -1

@@ -112,6 +112,7 @@ function Get-Config {
         HolidaysFile = ''
         NotifyRepeatHours = 4
         SesliBildirim = $true
+        SesliBildirimEdge = $true
         ForceRestartAlways = $false
         ForceRestartUntil = ''
         CrdRestartAfterHours = 0
