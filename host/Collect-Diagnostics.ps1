@@ -201,7 +201,7 @@ if ($gaps.Count -gt 0) {
     if ($maxGap -gt 30) { Add-Suspect ('Wi-Fi en uzun ' + $maxGap + ' dk kapali kalmis -> yonlendirici bos istemcileri dusuruyor olabilir (DHCP lease) veya adaptor uykuya giriyor') 'yuksek' }
     if ($wlanDisc.Count -gt 20) { Add-Suspect ('Wi-Fi 14 günde ' + $wlanDisc.Count + ' kez koptu; CRD her kopmada oturumu dusurur, adaptor guc modu ve yonlendirici DHCP suresi gozden gecirilmeli') 'orta' }
 }
-$ndr = Get-Events -Log 'System' -Ids @(27, 32, 10400, 10401, 4201, 4202) -Max 40
+$ndr = @(Get-Events -Log 'System' -Ids @(27, 32, 10400, 10401, 4201, 4202) -Max 40 | Where-Object { $_.ProviderName -notmatch '(?i)kernel-boot' })
 if ($ndr.Count -gt 0) { Add-Suspect ('Ağ adaptörü/link olayi: ' + $ndr.Count + ' adet') 'orta' }
 Event-Lines ($wlanDisc | Select-Object -Last 12 | Sort-Object TimeCreated -Descending)
 
@@ -215,12 +215,11 @@ $exp = [regex]::Match($ipconfigAll, '(?i)Lease Expires[^\r\n]*?:\s*([^\r\n]+)')
 if ($obt.Success) { Add-Line ('  - Lease obtained: ' + $obt.Groups[1].Value.Trim()) }
 if ($exp.Success) { Add-Line ('  - Lease expires: ' + $exp.Groups[1].Value.Trim() + ' (Dolduysa ve asili kaldiyasa DHCP sorunu)') }
 Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { Add-Line ('  - Arayuz ' + $_.InterfaceAlias + ': durum=' + $_.ConnectionState + ' | DHCP=' + $_.Dhcp + ' | metrik=' + $_.InterfaceMetric) }
-$nsStat = (netstat -s -p tcp 2>&1 | Out-String)
-$tw = [regex]::Match($nsStat, '(?i)([0-9,]+)\s+TIME_WAIT')
-$est = [regex]::Match($nsStat, '(?i)([0-9,]+)\s+ESTABLISHED')
-$failTw = [regex]::Match($nsStat, '(?i)([0-9,]+)\s+.*?active connections?')
-Add-Line ('- TCP istatistik: TIME_WAIT=' + $(if ($tw.Success) { $tw.Groups[1].Value } else { '?' }) + ' | ESTABLISHED=' + $(if ($est.Success) { $est.Groups[1].Value } else { '?' }))
-if ($tw.Success -and [int](($tw.Groups[1].Value -replace ',', '')) -gt 15000) { Add-Suspect ('TIME_WAIT ' + $tw.Groups[1].Value + ' -> TCP yigini sizmis, yeniden baslatma gerekir') 'yuksek' }
+$anoTcp = @(netstat -ano -p tcp 2>&1)
+$twCount = @($anoTcp | Where-Object { $_ -match '(?i)\bTIME_WAIT\b' }).Count
+$estCount = @($anoTcp | Where-Object { $_ -match '(?i)\bESTABLISHED\b' }).Count
+Add-Line ('- TCP istatistik: TIME_WAIT=' + $twCount + ' | ESTABLISHED=' + $estCount)
+if ($twCount -gt 15000) { Add-Suspect ('TIME_WAIT ' + $twCount + ' -> TCP yigini sizmis, yeniden baslatma gerekir') 'yuksek' }
 try { $dnsCache = @(Get-DnsClientCache -ErrorAction Stop); Add-Line ('- DNS onbellegi kayit sayisi: ' + $dnsCache.Count); if ($dnsCache.Count -gt 2000) { Add-Suspect 'DNS onbellegi asiri buyuk -> cozumleme yavaslamasi/kilitlenmesi olabilir' 'orta' } } catch { }
 $arp = (arp -a 2>&1 | Out-String)
 $incomplete = @($arp -split "`r?`n" | Where-Object { $_ -match '(?i)incomplete|gecersiz' })
@@ -239,7 +238,7 @@ $dhcpWarn = @($dhcpErrAll | Where-Object { $_.LevelDisplayName -in 'Hata', 'Uyar
 Add-Line ('- DHCP-Client olaylari (hata/uyari): ' + $dhcpWarn.Count)
 if ($dhcpWarn.Count -gt 0) { Add-Suspect ('DHCP yenileme hatasi ' + $dhcpWarn.Count + ' kez -> lease dusuyor, restart ile duzelir') 'yuksek' }
 Event-Lines ($dhcpWarn | Select-Object -First 8)
-$dnsErr = @(Get-Events -Log 'Microsoft-Windows-DNS-Client Events/Operational' -Max 400 | Where-Object { $_.Id -in 1014, 1016, 3006, 3007 })
+$dnsErr = @(Get-Events -Log 'Microsoft-Windows-DNS-Client/Operational' -Max 400 | Where-Object { $_.Id -in 1014, 1016, 3006, 3007 })
 Add-Line ('- DNS cozumleme hatalari (ID 1014/3006): ' + $dnsErr.Count)
 if ($dnsErr.Count -gt 5) { Add-Suspect ('DNS cozumleme hatasi ' + $dnsErr.Count + ' kez -> cozumleyici takiliyor olabilir') 'orta' }
 Event-Lines ($dnsErr | Select-Object -First 6)

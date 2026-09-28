@@ -287,9 +287,8 @@ function Get-NetworkHealth {
     $h.HttpsMs = $r.Ms
     try { $h.Dhcp = @((Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ConnectionState -eq 'Connected' -and $_.Dhcp -eq 'Enabled' })).Count -gt 0 } catch { }
     try {
-        $ns = netstat -s -p tcp 2>&1 | Out-String
-        $tw = [regex]::Match($ns, '(?i)([0-9,]+)\s+TIME_WAIT')
-        if ($tw.Success) { $h.TimeWait = [int](($tw.Groups[1].Value -replace ',', '')) }
+        $ano = @(netstat -ano -p tcp 2>&1)
+        $h.TimeWait = @($ano | Where-Object { $_ -match '(?i)\bTIME_WAIT\b' }).Count
     } catch { }
     try { $h.Link = (@(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { $_.Name }) -join ',') } catch { }
     return [pscustomobject]$h
