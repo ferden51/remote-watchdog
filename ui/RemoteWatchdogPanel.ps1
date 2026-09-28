@@ -2986,6 +2986,11 @@ try { Speak-PendingVoice } catch { Write-Trace ('bekleyen anons hatasi: ' + $_.E
             $script:Win.Hide()
             Write-Trace 'pencere kapatma istegi yoksayildi (trayde kalindi)'
         })
+    $w.add_Closed({
+            if ($script:ExitRequested) {
+                try { [System.Windows.Threading.Dispatcher]::Shutdown() } catch { }
+            }
+        })
     $script:Timer = New-Object System.Windows.Threading.DispatcherTimer
     $script:Timer.Interval = [TimeSpan]::FromSeconds(20)
     $script:Timer.Add_Tick({

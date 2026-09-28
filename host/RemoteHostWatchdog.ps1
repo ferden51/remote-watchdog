@@ -301,6 +301,7 @@ function Test-Internet {
     $ok = $r.Ok -and $mtalk
     $m = [ordered]@{ google204 = $(if ($r.Ok) { $r.Status } else { 'hata' }); google204ms = $r.Ms; mtalk443 = $(if ($mtalk) { 'acik' } else { 'kapali' }); mtalk443ms = $mtalkMs }
     Add-Result 'Internet' $ok ('google204=' + $(if ($r.Ok) { $r.Status } else { 'HATA' }) + ' (' + $r.Ms + 'ms), mtalk:443=' + $(if ($mtalk) { 'acik/' + $mtalkMs + 'ms' } else { 'KAPALI' })) $(if ($ok) { '' } else { 'ag yok; CRD kayit olamaz' }) $false $m
+    return $ok
 }
 
 function Test-Clock {
@@ -1241,15 +1242,19 @@ function Invoke-Watchdog {
     $global:cfg = Get-Config
     Write-Log 'INFO' ('dongu basladi | admin=' + (Test-Admin) + ' | rapor=' + $Check.IsPresent + ' | uptime=' + (Get-UptimeMinutes) + 'dk')
     try { $ip = Invoke-Probe -Url 'https://api.ipify.org' -TimeoutSec 8; if ($ip.Ok) { $script:PublicIp = [string]$ip.Raw.Content } } catch { }
-    Test-Internet
-    Test-Clock
-    Test-NetworkLayer
-    Test-CrdService
-    Test-Rdp
+    $internetOk = Test-Internet
+    if ($internetOk) {
+        Test-Clock
+        Test-NetworkLayer
+        Test-CrdService
+        Test-Rdp
+        Test-Tunnel
+        Test-ServiceRecovery
+    } else {
+        Write-Log 'WARN' 'internet yok, ag kontrolleri atlaniyor'
+    }
     Test-Panel
     Test-ServerPower
-    Test-Tunnel
-    Test-ServiceRecovery
     # Onarim istegi bu calisma sirasinda gelmisse (panelden tiklandi) beklemeden uygula
     if (Test-RepairRequestPending) {
         $req2 = Read-RepairRequest
