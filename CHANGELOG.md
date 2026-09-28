@@ -11,6 +11,12 @@ panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürü
   görevlerini silerse izleme durmasın diye `-Install` artık kullanıcı görevini de kaydediyor.
   Görev `-UserFallback` ile çalışır: SYSTEM sağlam + veri tazeyken sessiz çıkar, yoksa tam
   döngüyü üstlenir (`-Uninstall` kaldırır, `-Status` durumunu gösterir).
+- **Hızlı yoklama (`RemoteHostFastProbe`, `-FastProbe`):** 5 dakikalık döngü sorunu geç fark
+  ediyordu → her 1 dakikada hafif ağ yoklaması; sorun görürse tam döngüyü hemen tetikler.
+- **Panel canlı yenileme:** bağlantılar ancak kapatıp açınca güncelleniyordu → `last-run.json`
+  dosya izleyici ile yazıldığı anda yenileniyor (20 sn sayaç yedek).
+- **Ayarlar hemen geçerli:** kaydetme artık watchdog görevini tetikliyor; kesinti sırasında
+  değiştirilen ayarlar sıradaki döngüyü beklemiyor.
 
 ### Düzeltilen
 - **IP erişimi probu tek adrese bakıyordu:** kurumsal duvarda `1.1.1.1` kapalıysa satır sürekli

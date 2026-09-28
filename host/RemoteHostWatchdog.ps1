@@ -7,6 +7,7 @@
     .\RemoteHostWatchdog.ps1 -Check     sadece rapor, hicbir sey degistirmez
     .\RemoteHostWatchdog.ps1            bir onarim dongusu
     .\RemoteHostWatchdog.ps1 -UserFallback  SYSTEM gorevi saglamsa cikis, yoksa/eskise tam dongu (kullanici yedegi)
+    .\RemoteHostWatchdog.ps1 -FastProbe     hafif 60 sn yoklamasi: sorun varsa tam donguyu hemen tetikler
     .\RemoteHostWatchdog.ps1 -Install   zamanlanmis gorev + servis ayarlari (admin)
     .\RemoteHostWatchdog.ps1 -Uninstall
     .\RemoteHostWatchdog.ps1 -Status
@@ -33,6 +34,7 @@ param(
     [switch]$RepairNetwork,
     [switch]$RepairWatch,
     [switch]$UserFallback,
+    [switch]$FastProbe,
     [switch]$Version,
     [int]$Rung = 0
 )
@@ -1285,6 +1287,15 @@ function Install-Watchdog {
         Register-ScheduledTask -TaskName $userTask -Action $uAct -Trigger @($uTrg1, $uTrg2) -Principal $uPrn -Settings $uStg -Force | Out-Null
         Write-Log 'INFO' ('kullanici yedek gorevi kuruldu: ' + $userTask + ' (kullanici ' + $env:USERNAME + ', her ' + $IntervalMinutes + ' dk; SYSTEM gorevi saglamsa bekler, silinirse devreye girer)')
     } catch { Write-Log 'WARN' ('kullanici yedek gorevi kurulamadi: ' + $_.Exception.Message) }
+    $probeTask = 'RemoteHostFastProbe'
+    try {
+        $fAct = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -FastProbe')
+        $fTrg = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
+        $fPrn = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+        $fStg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 3)
+        Register-ScheduledTask -TaskName $probeTask -Action $fAct -Trigger @($fTrg) -Principal $fPrn -Settings $fStg -Force | Out-Null
+        Write-Log 'INFO' ('hizli yoklama gorevi kuruldu: ' + $probeTask + ' (kullanici ' + $env:USERNAME + ', her 1 dk; sorun gorurse tam donguyu tetikler)')
+    } catch { Write-Log 'WARN' ('hizli yoklama gorevi kurulamadi: ' + $_.Exception.Message) }
     Write-Host ('Kuruldu. Elle calistirmak icin: Start-ScheduledTask -TaskName ' + $TaskName)
     Write-Host 'Sunucu modu: BIOS icinde "Restore on AC Power Loss = Power On" ve "Wake on LAN" acik olmali.'
 }
@@ -1297,6 +1308,7 @@ function Uninstall-Watchdog {
     if (Get-ScheduledTask -TaskName 'RemoteHostRepairWatch' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostRepairWatch' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostRepairWatch' }
     if (Get-ScheduledTask -TaskName 'RemoteHostOfficeSaver' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostOfficeSaver' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostOfficeSaver' }
     if (Get-ScheduledTask -TaskName 'RemoteHostWatchdogUser' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostWatchdogUser' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostWatchdogUser' }
+    if (Get-ScheduledTask -TaskName 'RemoteHostFastProbe' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostFastProbe' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostFastProbe' }
     Write-Host ('Config/loglar korundu: ' + $BaseDir)
 }
 
@@ -1317,6 +1329,25 @@ function Test-SystemWatchdogActive {
     } catch { return $false }
 }
 
+function Invoke-FastProbe {
+    <#
+        Hafif canli yoklama (60 sn gorevi): sadece ag sagligini olcer (~bir kac sn).
+        Saglikliysa sessiz cikar; sorun varsa tam donguyu hemen tetikler (5 dk beklenmez).
+    #>
+    $global:cfg = Get-Config
+    $h = Get-NetworkHealth
+    if ($h.Ip -and $h.Dns -and $h.Https -and $h.Signal) { exit 0 }
+    $eksik = @(@(if (-not $h.Ip) { 'IP' }) + @(if (-not $h.Dns) { 'DNS' }) + @(if (-not $h.Https) { 'HTTPS' }) + @(if (-not $h.Signal) { 'sinyal' }) -join ',')
+    Write-Log 'WARN' ('hizli yoklama sorun gordu (' + $eksik + ') -> tam dongu tetikleniyor')
+    try { Start-ScheduledTask -TaskName 'RemoteHostWatchdogUser' -ErrorAction Stop; exit 0 }
+    catch {
+        try { Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop; exit 0 }
+        catch { Write-Log 'WARN' ('tam dongu gorevle baslatilamadi, dogrudan calisiyor: ' + $_.Exception.Message) }
+    }
+    $null = Invoke-Watchdog
+    exit 0
+}
+
 function Show-Status {
     Write-Host ('=== ' + $TaskName + ' ===')
     $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -1328,6 +1359,8 @@ function Show-Status {
     Write-Host ('ardisik basarisiz dongu: ' + $state.ConsecutiveFailures + ' | son basari: ' + $state.LastOkUtc + ' | son alarm: ' + $state.AlertKey)
     $ut = Get-ScheduledTask -TaskName 'RemoteHostWatchdogUser' -ErrorAction SilentlyContinue
     Write-Host ('kullanici yedegi: ' + $(if ($ut) { $ut.State } else { 'YOK' }) + ' | SYSTEM devrede: ' + (Test-SystemWatchdogActive))
+    $ft = Get-ScheduledTask -TaskName 'RemoteHostFastProbe' -ErrorAction SilentlyContinue
+    Write-Host ('hizli yoklama: ' + $(if ($ft) { $ft.State } else { 'YOK' }) + ' (her 1 dk)')
     Write-Host ('=== son loglar (' + $LogFile + ') ===')
     if (Test-Path -LiteralPath $LogFile) { Get-Content -LiteralPath $LogFile -Tail 40 | ForEach-Object { Write-Host $_ } } else { Write-Host 'log yok' }
 }
@@ -1353,6 +1386,7 @@ if ($UserFallback) {
     $null = Invoke-Watchdog
     exit 0
 }
+if ($FastProbe) { Invoke-FastProbe; exit 0 }
 if ($RepairWatch) {
     # Hafif izleyici: her 60 sn bir kez calisir. Istek dosyasi yoksa aninda cikar (gunluk/JSON dokunulmaz).
     $wReq = Read-RepairRequest

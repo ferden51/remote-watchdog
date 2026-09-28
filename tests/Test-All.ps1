@@ -241,6 +241,11 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host -UserFallback anahtari var' ($hostText -match '\[switch\]\$UserFallback')
     Ok 'host yedek gorev karari (Test-SystemWatchdogActive) var' ($hostText -match 'function Test-SystemWatchdogActive')
     Ok "host yedek gorevi (RemoteHostWatchdogUser) kuruluyor" ($hostText -match "RemoteHostWatchdogUser")
+    Ok 'host -FastProbe anahtari var' ($hostText -match '\[switch\]\$FastProbe')
+    Ok 'host hizli yoklama karari (Invoke-FastProbe) var' ($hostText -match 'function Invoke-FastProbe')
+    Ok "host hizli yoklama gorevi (RemoteHostFastProbe) kuruluyor" ($hostText -match "RemoteHostFastProbe")
+    Ok 'panel last-run.json izleyicisi (FileSystemWatcher) var' ($panelText -match 'FileSystemWatcher')
+    Ok 'panel ayar kaydedince watchdog tetikliyor' ($panelText -match 'Start-ScheduledTask -TaskName \$tn')
     Ok 'panel surumu ayarlar sayfasinda gosteriyor' ($panelText -match "TxtVersion")
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

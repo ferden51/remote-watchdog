@@ -105,6 +105,15 @@ aynı kurulum kullanıcı seviyesinde ikinci bir görev de kaydeder (`-UserFallb
 SYSTEM görevi sağlam ve verisi tazeyken sessiz çıkar (çift çalışma yok); SYSTEM yoksa/eskimişse tam
 döngüyü üstlenir (kontrol + onarım + alarm + restart politikası).
 
+**Hızlı yoklama (`RemoteHostFastProbe`):** 5 dakikalık döngü sorunu geç fark eder diye aynı
+kurulum her 1 dakikada çalışan hafif bir yoklama da kaydeder (`-FastProbe`). Sadece ağ sağlığına
+bakar (IP/DNS/HTTPS/sinyal, birkaç saniye); sağlıklıysa sessiz çıkar, sorun görürse tam döngüyü
+hemen tetikler — algılama ~1 dakikaya iner.
+
+**Canlı panel:** `last-run.json` değiştiği anda panel kendini yeniler (dosya izleyici; 20 sn'lik
+sayaç yedekte durur) — kapatıp açmak gerekmez. **Ayarlar kaydedilince** watchdog görevi hemen
+tetiklenir, yeni ayarlar sıradaki döngüyü beklemez.
+
 Panelde dört sekme:
 
 **1. Durum** — sistem ayakta mı, uzak makinenin her kontrolünün sonucu, bu makinenin (istemci) kontrolü,

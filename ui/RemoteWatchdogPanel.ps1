@@ -2065,6 +2065,16 @@ function Save-Settings {
         Write-ConfigFile -Path $HostConfig -Values $hostVals
         if ($clientVals.Count -gt 0) { Write-ConfigFile -Path $ClientConfig -Values $clientVals }
         (El $script:Win 'TxtSaved').Text = 'Kaydedildi: ' + (Get-Date).ToString('HH:mm:ss') + '  (' + $hostVals.Count + ' host + ' + $clientVals.Count + ' istemci)'
+        try { Resolve-CheckInterval -Force | Out-Null } catch { }
+        if (-not $Quiet) {
+            $triggered = $false
+            foreach ($tn in @('RemoteHostWatchdogUser', 'RemoteHostWatchdog')) {
+                try { Start-ScheduledTask -TaskName $tn -ErrorAction Stop; $triggered = $true; break } catch { }
+            }
+            if ($triggered) { (El $script:Win 'TxtSaved').Text += ' — watchdog tetiklendi, yeni ayarlar hemen uygulaniyor' }
+            else { (El $script:Win 'TxtSaved').Text += ' — gorev calismiyor, siradaki dongude gecerli' }
+            Write-Trace ('ayarlar kaydedildi, watchdog tetikleme: ' + $triggered)
+        }
         if (-not $Quiet) { [System.Windows.MessageBox]::Show('Ayarlar kaydedildi: ' + $hostVals.Count + ' host + ' + $clientVals.Count + ' istemci ayari', 'RemoteWatchdog') | Out-Null }
     } catch {
         (El $script:Win 'TxtSaved').Text = 'Hata: ' + $_.Exception.Message
@@ -2362,6 +2372,22 @@ function Wire-UI {
             } catch { Write-Trace ('zamanlayici hatasi: ' + $_.Exception.Message) }
         })
     $script:Timer.Start()
+
+    # last-run.json izleyicisi: watchdog yazdigi anda arayuzu yeniler (20 sn sayaci yedek kalir).
+    # Olaylar arka planda gelir; UI guncellemesi dispatcher uzerinden yapilir.
+    $script:JsonRefresh = {
+        try { $script:Win.Dispatcher.Invoke([System.Action]{ Update-Connections; Update-Overview; Update-Actions; Refresh-Icon }) }
+        catch { Write-Trace ('json izleyici hatasi: ' + $_.Exception.Message) }
+    }
+    try {
+        $script:JsonWatcher = New-Object System.IO.FileSystemWatcher
+        $script:JsonWatcher.Path = $HostData
+        $script:JsonWatcher.Filter = 'last-run.json'
+        $script:JsonWatcher.NotifyFilter = [System.IO.NotifyFilters]::LastWrite
+        $script:JsonWatcher.Add_Changed($script:JsonRefresh)
+        $script:JsonWatcher.Add_Created($script:JsonRefresh)
+        $script:JsonWatcher.EnableRaisingEvents = $true
+    } catch { Write-Trace ('json izleyici kurulamadi: ' + $_.Exception.Message) }
 
     # 1 sn'lik sayac: sonraki otomatik denetimin kalan suresini (sn) gosterir, elle denetleme bitisini yakalar
     $script:Tick = New-Object System.Windows.Threading.DispatcherTimer
