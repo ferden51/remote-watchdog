@@ -285,6 +285,7 @@ function Get-HostConfig {
         ServerMode = $true; DisableFastStartup = $true; OfficeSaveBeforeReboot = $true
         OfficeSaveTimeoutSeconds = 120; OfficeAbortRebootIfStillOpen = $true; OfficeAbortRebootIfUnsaved = $true
         TelegramToken = ''; TelegramChatId = ''; HeartbeatUrl = ''; AlertRepeatHours = 12; NotifyRepeatHours = 4
+        SesliBildirim = $true
     }
     if (Test-Path -LiteralPath $HostConfig) {
         try {
@@ -1021,6 +1022,7 @@ function Complete-NetworkRepairLive {
     $top = $script:Win.FindName('TxtSettingsStatus')
     if ($top) { $top.Text = $report; $top.Foreground = $(if ($ok) { Bx 'Ok' } else { Bx 'Warn' }) }
     Show-Balloon -Title 'Ağ onarımı' -Text $report -Icon $(if ($ok) { 'Info' } else { 'Warning' }) -Critical
+    Speak-Text $(if ($ok) { 'Onarim tamamlandi' } else { 'Onarim basarisiz' })
     if ($script:Page -eq 'log') { Update-Log }
     Write-Trace ('ag onarimi izi tamam: ' + $script:RepairStatusText)
 }
@@ -1100,6 +1102,7 @@ function Invoke-NetworkRepair {
         Invoke-Script -Path $HostScript -ScriptArgs $sargs
     }
     Write-Trace ('ag onarimi baslatildi (gorev: ' + $taskUsed + ', sistem: ' + $sentToTask + ') - canli iz açildi')
+    Speak-Text 'Baglanti onariliyor'
     if (-not $script:RepairTimer) { $script:RepairTimer = New-Object System.Windows.Threading.DispatcherTimer }
     $script:RepairTimer.Interval = [TimeSpan]::FromMilliseconds(700)
     $script:RepairTimer.Stop()
@@ -2169,6 +2172,65 @@ function Show-Balloon {
     } catch { Write-Trace ('balloon gosterilemedi: ' + $_.Exception.Message) }
 }
 
+function Speak-Text {
+    <#
+        Kisa Turkce sesli anons (SAPI, harici bagimlilik yok). Ses yoksa/cihaz yoksa sessiz gecer.
+        SesliBildirim kapaliysa veya sessiz moddaysa konusmaz. Volume=0 ile sessizce dogrulanabilir.
+    #>
+    param([string]$Text, [int]$Volume = 100)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return }
+    try { if ((Get-HostConfig).SesliBildirim -eq $false) { return } } catch { }
+    if ($script:Silent) { return }
+    try {
+        Add-Type -AssemblyName System.Speech
+        $sp = New-Object System.Speech.Synthesis.SpeechSynthesizer
+        try { $sp.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::NotSet, [System.Speech.Synthesis.VoiceAge]::NotSet, 0, (New-Object System.Globalization.CultureInfo 'tr-TR')) } catch { }
+        $sp.Volume = [Math]::Max(0, [Math]::Min(100, $Volume))
+        $t = [string]$Text
+        if ($t.Length -gt 160) { $t = $t.Substring(0, 160) }
+        $sp.Speak($t)
+        $sp.Dispose()
+    } catch { Write-Trace ('sesli bildirim calismadi: ' + $_.Exception.Message) }
+}
+
+function Update-VoiceAlerts {
+    <#
+        last-run.json + host-state.json gecislerini seslendirir (balon modundan bagimsiz).
+        Ilk calismada mevcut durumu sessizce taban alir, sadece gecislerde konusur.
+    #>
+    try {
+        $st = Get-StatusInfo
+        $hj = $st.Host
+        if (-not $hj) { return }
+        $stt = Get-Json (Join-Path $HostData 'host-state.json')
+        $snap = [ordered]@{
+            Ok = [bool]$hj.ok
+            Bad = @(@($hj.checks | Where-Object { -not $_.ok }) | ForEach-Object { [string]$_.name })
+            Rung = 0; ResetPending = 0; ForceAlways = $false; Reboots = 0
+        }
+        if ($stt) {
+            try { $snap.Rung = [int]$stt.NetRepairRung } catch { }
+            try { $snap.ResetPending = [int]$stt.NetResetPendingReboot } catch { }
+            try { $snap.Reboots = @($stt.RebootsUtc).Count } catch { }
+        }
+        try { $snap.ForceAlways = [bool](Get-HostConfig).ForceRestartAlways } catch { }
+        if (-not $script:VoiceLast) { $script:VoiceLast = $snap; return }
+        $p = $script:VoiceLast
+        if ($p.Ok -and -not $snap.Ok) {
+            $k = ($snap.Bad | Select-Object -First 2) -join ', '
+            Speak-Text ('Baglanti sorunu' + $(if ($k) { ': ' + $k } else { '' }))
+        } elseif (-not $p.Ok -and $snap.Ok) {
+            if ([int]$p.Rung -gt 0) { Speak-Text 'Onarim tamamlandi' } else { Speak-Text 'Baglanti duzeldi' }
+        } elseif (-not $snap.Ok -and [int]$snap.Rung -gt [int]$p.Rung) {
+            Speak-Text 'Baglanti onariliyor'
+        }
+        if ([int]$snap.ResetPending -eq 1 -and [int]$p.ResetPending -ne 1) { Speak-Text 'Sistem tekrar baslatiliyor' }
+        elseif ($snap.ForceAlways -and -not $p.ForceAlways) { Speak-Text 'Sistem tekrar baslatiliyor' }
+        if ([int]$snap.Reboots -gt [int]$p.Reboots) { Speak-Text 'Sistem yeniden baslatildi' }
+        $script:VoiceLast = $snap
+    } catch { Write-Trace ('sesli uyari gecisi hatasi: ' + $_.Exception.Message) }
+}
+
 function Get-BalloonMode {
     $v = (Get-ItemProperty -Path $RunKey -Name ($RunName + 'Balloon') -ErrorAction SilentlyContinue).($RunName + 'Balloon')
     if ($v -in @('off', 'critical', 'all')) { return [string]$v }
@@ -2296,6 +2358,7 @@ function Set-WindowIcon {
 }
 
 function Wire-UI {
+    if (-not $script:Win) { Write-Host 'Wire-UI atlandi: pencere olusmamis (fonksiyon tek basina cagrildi?)'; return }
     $w = $script:Win
     foreach ($n in @('NavConn', 'NavOverview', 'NavActions', 'NavSettings', 'NavLog')) {
         (El $w $n).Add_Click({ Show-Page ([string]$this.Tag) }.GetNewClosure())
@@ -2368,6 +2431,7 @@ function Wire-UI {
                 Update-Connections
                 Update-Overview
                 Update-Actions
+                Update-VoiceAlerts
                 Refresh-Icon
             } catch { Write-Trace ('zamanlayici hatasi: ' + $_.Exception.Message) }
         })
@@ -2376,7 +2440,7 @@ function Wire-UI {
     # last-run.json izleyicisi: watchdog yazdigi anda arayuzu yeniler (20 sn sayaci yedek kalir).
     # Olaylar arka planda gelir; UI guncellemesi dispatcher uzerinden yapilir.
     $script:JsonRefresh = {
-        try { $script:Win.Dispatcher.Invoke([System.Action]{ Update-Connections; Update-Overview; Update-Actions; Refresh-Icon }) }
+        try { $script:Win.Dispatcher.Invoke([System.Action]{ Update-Connections; Update-Overview; Update-Actions; Update-VoiceAlerts; Refresh-Icon }) }
         catch { Write-Trace ('json izleyici hatasi: ' + $_.Exception.Message) }
     }
     try {

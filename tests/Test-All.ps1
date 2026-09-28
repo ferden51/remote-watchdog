@@ -246,6 +246,10 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok "host hizli yoklama gorevi (RemoteHostFastProbe) kuruluyor" ($hostText -match "RemoteHostFastProbe")
     Ok 'panel last-run.json izleyicisi (FileSystemWatcher) var' ($panelText -match 'FileSystemWatcher')
     Ok 'panel ayar kaydedince watchdog tetikliyor' ($panelText -match 'Start-ScheduledTask -TaskName \$tn')
+    Ok 'panel sesli bildirim (Speak-Text) var' ($panelText -match 'function Speak-Text')
+    Ok 'panel ses gecisi izleyici (Update-VoiceAlerts) var' ($panelText -match 'function Update-VoiceAlerts')
+    Ok 'Wire-UI penceresiz calismada net atliyor' ($panelText -match 'Wire-UI atlandi')
+    Ok 'host SesliBildirim varsayilani var' ($hostText -match '(?m)^\s{8}SesliBildirim\s*=')
     Ok 'panel surumu ayarlar sayfasinda gosteriyor' ($panelText -match "TxtVersion")
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

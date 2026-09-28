@@ -114,6 +114,11 @@ hemen tetikler — algılama ~1 dakikaya iner.
 sayaç yedekte durur) — kapatıp açmak gerekmez. **Ayarlar kaydedilince** watchdog görevi hemen
 tetiklenir, yeni ayarlar sıradaki döngüyü beklemez.
 
+**Sesli bildirim:** önemli olaylarda kısa Türkçe anons yapılır — bağlantı sorunu / düzeldi,
+onarılıyor / tamamlandı, tekrar başlatılıyor / başlatıldı. SAPI ile çalışır (harici bağımlılık
+yok; Türkçe ses yoksa varsayılan ses okur). Ayarlar → Bildirim → `SesliBildirim` ile açılır/kapanır,
+tepsi *Sessiz mod* açıkken susar.
+
 Panelde dört sekme:
 
 **1. Durum** — sistem ayakta mı, uzak makinenin her kontrolünün sonucu, bu makinenin (istemci) kontrolü,

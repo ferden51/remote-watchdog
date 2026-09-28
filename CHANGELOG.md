@@ -17,6 +17,11 @@ panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürü
   dosya izleyici ile yazıldığı anda yenileniyor (20 sn sayaç yedek).
 - **Ayarlar hemen geçerli:** kaydetme artık watchdog görevini tetikliyor; kesinti sırasında
   değiştirilen ayarlar sıradaki döngüyü beklemiyor.
+- **Sesli bildirim (`SesliBildirim`, varsayılan açık):** tüm önemli olaylarda kısa Türkçe anons
+  (sorun / düzeldi / onarılıyor / tamamlandı / tekrar başlatılıyor / başlatıldı). SAPI, panelsürecinde çalışır (SYSTEM oturumunda ses çıkmaz); sessiz modda susar. Ayarlar → Bildirim'den
+  kapatılabilir.
+- **Wire-UI koruması:** pencere oluşmadan çağrılırsa kriptik hata yerine net şekilde atlanır
+  (test ortamında görülen `Dispatcher` null hatası).
 
 ### Düzeltilen
 - **IP erişimi probu tek adrese bakıyordu:** kurumsal duvarda `1.1.1.1` kapalıysa satır sürekli

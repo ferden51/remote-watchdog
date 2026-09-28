@@ -56,6 +56,7 @@ function Get-SettingsDefs { return @(
     @{ Sec = 'Bildirim'; Key = 'TelegramToken'; Title = 'Telegram bot token'; Type = 'text' }
     @{ Sec = 'Bildirim'; Key = 'TelegramChatId'; Title = 'Telegram chat id'; Type = 'text' }
     @{ Sec = 'Bildirim'; Key = 'HeartbeatUrl'; Title = 'Healthchecks ping adresi (host için gerekli: makine açıkken kendi alarmı gidemez)'; Type = 'text' }
+    @{ Sec = 'Bildirim'; Key = 'SesliBildirim'; Title = 'Sesli bildirim (önemli olaylarda kısa Türkçe anons, sessiz modda susar)'; Type = 'bool' }
 
     @{ Sec = 'TATIL'; Type = 'section' }
     @{ Sec = 'Tatil'; Key = 'HolidayMode'; Title = 'Tatil modu (full = tam blackout)'; Type = 'enum'; Options = @('full', 'default', 'none') }

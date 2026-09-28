@@ -111,6 +111,7 @@ function Get-Config {
         Holidays = @()
         HolidaysFile = ''
         NotifyRepeatHours = 4
+        SesliBildirim = $true
         ForceRestartAlways = $false
         ForceRestartUntil = ''
         CrdRestartAfterHours = 0
