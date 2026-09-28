@@ -133,6 +133,56 @@ Check it manually: `.\Protect-OpenDocuments.ps1 -Status`.
   "machine off / no internet", which no local watchdog can see. Set the repository secrets
   `HEALTHCHECK_URL`, `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`.
 
+## Audible alerts (voice + film effects)
+
+Every important event is announced in **two layers**: a ready-made effect first, then a short Turkish
+sentence (voice). The voice engine is tried in this order:
+
+1. **edge-tts → natural FEMALE Turkish voice (`tr-TR-EmelNeural`)** — Microsoft's official neural
+   voice, free, the most natural pronunciation. Install: `python -m pip install --user edge-tts`.
+   *Requires internet.* The panel calls it through the `tools\edge_tts_win.py` wrapper (edge-tts 7.x
+   uses aiodns, which on Windows requires `WindowsSelectorEventLoopPolicy`; without the wrapper the
+   process dies before producing any audio).
+2. **Piper TTS (local fallback)** — natural but **male**; works offline.
+   Install: `.\tools\Install-Voice.ps1` → `%LOCALAPPDATA%\RemoteWatchdog\voice`
+3. **Windows Turkish SAPI voice** — used when a Turkish text-to-speech pack is installed (Tolga/Emel).
+4. If none exists the panel stays **silent** — it never reads Turkish text with an English voice.
+
+Settings → Notification → `SesliBildirim` (on/off) and `SesliBildirimEdge` (cloud voice on/off; if
+off it goes straight to local Piper); tray *Silent mode* mutes it. The panel logs the engine it
+picked at startup. Check with `.\tools\Install-Voice.ps1 -Status`.
+
+The effects are shipped ready-made as `ui/sounds/*.wav` and are designed to sound like a sci-fi console:
+**clear** (attack under 2 ms), **sharp** (4 ms bright transient), **bright** (inharmonic metallic
+partials plus a short shimmer reverb) and **realistic** (sub layer, soft limiter, no clipping). The
+panel preloads them on first use, so there is no delay between the event and the sound; if a file or
+the audio device is missing it falls back to the Windows system sounds.
+
+| Effect | When | Character |
+|---|---|---|
+| `alert` | connection lost / critical alarm | 3-pulse klaxon, metallic edge, sub thump |
+| `warn` | warning: partial/failed repair, problem found by a manual check | two-note tense chime |
+| `ok` | confirmation: repair done, check clean | single bright glass ping |
+| `recover` | connection recovered | rising shimmer + double bright chime |
+| `repair` | repair in progress | sonar scan (repeated rising ping) |
+| `reboot` | reboot requested/detected | falling sweep + sub, sharp top blip |
+| `online` | system online (install/startup) | two-note glass bell + long tail |
+| `scan` | manual check started | two micro blips |
+
+Settings → Notification has **two independent switches**: `SesEfektleri` (the ready-made **wav**
+effects) and `SesliBildirim` (the **human voice**, Turkish announcement). Both are one click away in
+the tray menu — *Sesli anons (insan sesi)* and *Film efektleri (wav)* (their labels show the current
+state) — and *Ses testi* checks both at once. Tray *Silent mode* mutes both. Effect volume:
+`SesEfektleriVolume` (0-100, 0 = effects off). Regenerate or verify the pack with
+`.\tools\New-SoundPack.ps1` (`-List`, `-Verify`); the sound design lives in `tools/SfxSynth.cs`.
+
+> **Pronunciation note:** announcement texts are written **with Turkish characters** (`Bağlantı
+> düzeldi.`, `Ağ onarılıyor.`). ASCII spellings (`Baglanti duzeldi`) are read with English letter
+> sounds and break the Turkish pronunciation. Check names arrive ASCII from `last-run.json`, so
+> `ConvertTo-TtsText` maps them through a small dictionary (`Internet erisimi` → `İnternet erişimi`);
+> a general ASCII→diacritic conversion is deliberately **not** done (it would produce `ınternet`).
+> A trailing full stop is added to short sentences for prosody.
+
 ## What a human must do (no script can)
 
 - **BIOS**: *Restore on AC Power Loss = Power On* and *Wake on LAN = Enabled*. If the machine does not

@@ -131,6 +131,8 @@ function Get-Config {
         NotifyRepeatHours = 4
         SesliBildirim = $true
         SesliBildirimEdge = $true
+        SesEfektleri = $true
+        SesEfektleriVolume = 80
         ForceRestartAlways = $false
         ForceRestartUntil = ''
         CrdRestartAfterHours = 0

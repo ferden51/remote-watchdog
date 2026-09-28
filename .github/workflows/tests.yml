@@ -48,6 +48,11 @@ jobs:
           $p = Join-Path $env:LOCALAPPDATA 'RemoteClientWatchdog\last-run.json'
           if (Test-Path $p) { "istemci JSON: $p" } else { Write-Host 'istemci JSON uretilmedi (test bu durumda atlanir)' }
 
+      - name: Ses paketi dogrula (hazir film efektleri)
+        shell: pwsh
+        run: |
+          .\tools\New-SoundPack.ps1 -Verify
+
       - name: Test-All
         shell: pwsh
         run: |

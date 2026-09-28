@@ -39,6 +39,7 @@ foreach ($lib in @('Common.ps1', 'Contract.ps1', 'Settings.ps1')) {
 $ScriptPath = $PSCommandPath
 $UiDir = Split-Path -Parent $ScriptPath
 $Root = Split-Path -Parent $UiDir
+$SfxDir = Join-Path $UiDir 'sounds'
 $HostScript = Join-Path $Root 'host\RemoteHostWatchdog.ps1'
 $HostDiag = Join-Path $Root 'host\Collect-Diagnostics.ps1'
 $HostDocs = Join-Path $Root 'host\Protect-OpenDocuments.ps1'
@@ -51,6 +52,7 @@ $ClientData = Join-Path $env:LOCALAPPDATA 'RemoteClientWatchdog'
 $ClientJson = Join-Path $ClientData 'last-run.json'
 $ClientConfig = Join-Path $ClientData 'config.json'
 $ClientLog = Join-Path $ClientData 'client-watchdog.log'
+$VoiceDir = Join-Path $env:LOCALAPPDATA 'RemoteWatchdog\voice'
 $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $RunName = 'RemoteWatchdogTray'
 $ShowRequest = Join-Path $env:TEMP 'RemoteWatchdog-show.flag'
@@ -59,9 +61,18 @@ $script:AppVersion = '0.0.0'
 if (Test-Path -LiteralPath $VersionFile) { try { $script:AppVersion = ([System.IO.File]::ReadAllText($VersionFile)).Trim() } catch { } }
 if ($Version) { Write-Host ('RemoteWatchdogPanel ' + $script:AppVersion); exit 0 }
 
+# Bayrak degerleri kayit defterinde metin olarak durur ('0' / '1'). PowerShell'de [bool]'0' TRUE
+# oldugu icin dogrudan cast yapilirsa panel sessiz modda acilirdi (her yeniden baslatmada ses yok).
+function Get-FlagBool {
+    param($Value)
+    $s = ([string]$Value).Trim().ToLowerInvariant()
+    if (-not $s) { return $false }
+    return ($s -eq '1' -or $s -eq 'true' -or $s -eq 'evet' -or $s -eq 'acik' -or $s -eq 'açık')
+}
+
 $script:Win = $null
 $script:Icon = $null
-$script:Silent = [bool]((Get-ItemProperty -Path $RunKey -Name ($RunName + 'Silent') -ErrorAction SilentlyContinue).($RunName + 'Silent'))
+$script:Silent = Get-FlagBool ((Get-ItemProperty -Path $RunKey -Name ($RunName + 'Silent') -ErrorAction SilentlyContinue).($RunName + 'Silent'))
 $script:BalloonMode = 'off'
 $script:Background = [bool]$Background
 $script:LastState = ''
@@ -88,8 +99,39 @@ $script:SpeechDeadline = [datetime]::MinValue
 $script:SpeechTimer = $null
 $script:EdgeOk = $null
 $script:PyExe = ''
+$script:PiperOk = $null
+$script:PiperExe = ''
+$script:PiperModel = ''
+# Kontrol adlari last-run.json'dan ASCII gelir; anonda Turkce yazilirsa telaffuz duzgun olur
+$script:TtsFix = @{
+    'Internet erisimi'                = 'İnternet erişimi'
+    'DNS cozumlemesi'                 = 'DNS çözümlemesi'
+    'Google istemci hizmetleri'       = 'Google istemci hizmetleri'
+    'Google Remote Desktop kaydi'     = 'Google Remote Desktop kaydı'
+    'CRD canli baglantisi'            = 'CRD canlı bağlantısı'
+    'CRD kaydi'                       = 'CRD kaydı'
+    'Windows RDP'                     = 'Windows RDP'
+    'Saat senkronu'                   = 'Saat senkronu'
+    'Uyku modu'                       = 'Uyku modu'
+    'Ag onarimi'                      = 'Ağ onarımı'
+    'Uzak masaustu'                   = 'Uzak masaüstü'
+    'Tunel'                           = 'Tünel'
+    'Belge kaydetme'                  = 'Belge kaydetme'
+    'Sistem yeniden baslatildi'       = 'Sistem yeniden başlatıldı'
+}
+$script:SpeechProc = $null
+$script:SpeechText = ''
+$script:SpeechEngine = ''
 $script:VoiceLast = $null
 $script:VoiceNoTr = $false
+# --- Uzay filmi tarzi hazir ses efektleri (ui\sounds\*.wav); on yuklenir, aninda calar ---
+$script:SfxNames = @('online', 'ok', 'warn', 'alert', 'repair', 'recover', 'reboot', 'scan')
+$script:SfxPlayers = @{}
+$script:SfxMissing = @{}
+# Ayarlar panelden de degisebiliyor; calisma anindaki secim (tepsi anahtari) ustun tutulur,
+# boylece "kapattim ama ses geliyor" durumu olusmaz.
+$script:SfxOn = $true
+$script:VoiceOn = $true
 # --- Canli ag onarim izleme (basliktaki "Agi / interneti onar" dugmesi) ---
 $script:RepairRunning = $false
 $script:RepairSawDone = $false
@@ -297,6 +339,7 @@ function Get-HostConfig {
         OfficeSaveTimeoutSeconds = 120; OfficeAbortRebootIfStillOpen = $true; OfficeAbortRebootIfUnsaved = $true
         TelegramToken = ''; TelegramChatId = ''; HeartbeatUrl = ''; AlertRepeatHours = 12; NotifyRepeatHours = 4
         SesliBildirim = $true; SesliBildirimEdge = $true
+        SesEfektleri = $true; SesEfektleriVolume = 80
     }
     if (Test-Path -LiteralPath $HostConfig) {
         try {
@@ -1037,7 +1080,7 @@ function Complete-NetworkRepairLive {
     $top = $script:Win.FindName('TxtSettingsStatus')
     if ($top) { $top.Text = $report; $top.Foreground = $(if ($ok) { Bx 'Ok' } else { Bx 'Warn' }) }
     Show-Balloon -Title 'Ağ onarımı' -Text $report -Icon $(if ($ok) { 'Info' } else { 'Warning' }) -Critical
-    Speak-Text $(if ($ok) { 'Onarim tamamlandi' } else { 'Onarim basarisiz' })
+    if ($ok) { Speak-Text 'Onarım tamamlandı.' -Sfx 'ok' } else { Speak-Text 'Onarım başarısız oldu.' -Sfx 'warn' }
     if ($script:Page -eq 'log') { Update-Log }
     Write-Trace ('ag onarimi izi tamam: ' + $script:RepairStatusText)
 }
@@ -1117,7 +1160,7 @@ function Invoke-NetworkRepair {
         Invoke-Script -Path $HostScript -ScriptArgs $sargs
     }
     Write-Trace ('ag onarimi baslatildi (gorev: ' + $taskUsed + ', sistem: ' + $sentToTask + ') - canli iz açildi')
-    Speak-Text 'Baglanti onariliyor'
+    Speak-Text 'Ağ onarılıyor.' -Sfx 'repair'
     if (-not $script:RepairTimer) { $script:RepairTimer = New-Object System.Windows.Threading.DispatcherTimer }
     $script:RepairTimer.Interval = [TimeSpan]::FromMilliseconds(700)
     $script:RepairTimer.Stop()
@@ -1395,7 +1438,7 @@ function Invoke-ConnAction {
         'settings' { Show-Page 'settings'; Build-Settings }
         'reboot' {
             $r = [System.Windows.MessageBox]::Show('Makine yeniden baslatilsin mi? Kaydedilmemis belge varsa once kaydedilir.', 'RemoteWatchdog', 'YesNo', 'Question')
-            if ($r -eq 'Yes') { Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
+            if ($r -eq 'Yes') { Speak-Text 'Sistem yeniden başlatılıyor.' -Sfx 'reboot'; Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
         }
         default { }
     }
@@ -1418,6 +1461,7 @@ function Start-ManualCheck {
     $script:CheckBusySince = Get-Date
     $script:CheckProcs = @($procs)
     Write-Trace ('elle denetleme basladi (' + $script:CheckProcs.Count + ' surec) - arka planda, arayuz donmaz')
+    Play-Sfx 'scan' | Out-Null
     Update-Countdown
 }
 
@@ -1443,6 +1487,10 @@ function Complete-ManualCheck {
     Refresh-Icon
     Update-Countdown
     Write-Trace ('elle denetleme bitti (' + $el + ' sn) - baglanti/genel durum/bekleyen is/gunluk yenilendi')
+    try {
+        $stc = Get-StatusInfo
+        if ([int]$stc.Bad -gt 0) { Speak-Text 'Denetleme bitti, sorun var.' -Sfx 'warn' } else { Speak-Text 'Denetleme bitti, her şey yolunda.' -Sfx 'ok' }
+    } catch { }
 }
 
 function Show-Page {
@@ -2031,7 +2079,7 @@ function Invoke-SettingsAction {
     $script:ActionLog += $Key
     Write-Trace ('islem calistirildi: ' + $Key)
     switch ($Key) {
-        'install' { Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null }
+        'install' { Play-Sfx 'online' | Out-Null; Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null }
         'uninstall' {
             if ([System.Windows.MessageBox]::Show('Watchdog zamanlanmis gorevi kaldirilsin mi?', 'RemoteWatchdog', 'YesNo', 'Question') -eq 'Yes') { Invoke-Script -Path $HostScript -Args @('-Uninstall') -Wait }
         }
@@ -2040,6 +2088,7 @@ function Invoke-SettingsAction {
         'diag' { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaüstüne yazıldı.', 'RemoteWatchdog') | Out-Null }
         'testalert' {
             $cfg = Get-HostConfig
+            Play-Sfx 'alert' | Out-Null
             $msg = 'RemoteWatchdog test bildirimi - ' + $env:COMPUTERNAME + ' - ' + (Get-Date).ToString('HH:mm:ss')
             if (-not $cfg.TelegramToken) { [System.Windows.MessageBox]::Show('Telegram token ayarli degil.', 'RemoteWatchdog') | Out-Null; break }
             try {
@@ -2060,7 +2109,7 @@ function Invoke-SettingsAction {
         'openconfig' { if (Test-Path -LiteralPath $HostConfig) { Start-Process notepad.exe $HostConfig } }
         'forcereboot' {
             $r = [System.Windows.MessageBox]::Show('Daima zorla kapatma ACILIR ve makine yeniden baslatilir. Kaydedilmemis belge varsa once kaydedilir. Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Warning')
-            if ($r -eq 'Yes') { Write-ConfigFile -Path $HostConfig -Values @{ ForceRestartAlways = $true }; Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
+            if ($r -eq 'Yes') { Write-ConfigFile -Path $HostConfig -Values @{ ForceRestartAlways = $true }; Speak-Text 'Sistem yeniden başlatılıyor.' -Sfx 'reboot'; Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
         }
         default { }
     }
@@ -2251,27 +2300,61 @@ function Test-EdgeTts {
 function Stop-Speech {
     if ($script:SpeechTimer) { try { $script:SpeechTimer.Stop() } catch { } }
     if ($script:SpeechPlayer) { try { $script:SpeechPlayer.Stop(); $script:SpeechPlayer.Close() } catch { } }
+    if ($script:SpeechProc) { try { if (-not $script:SpeechProc.HasExited) { $script:SpeechProc.Kill() } } catch { } }
     foreach ($f in @($script:SpeechMp3, $script:SpeechTxt)) { if ($f) { try { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } catch { } } }
     $script:SpeechPlayer = $null
+    $script:SpeechProc = $null
     $script:SpeechMp3 = ''
     $script:SpeechTxt = ''
+    $script:SpeechText = ''
+    $script:SpeechEngine = ''
     $script:SpeechBusy = $false
 }
 
+function Start-SpeechPoller {
+    <# Anons dosyasi hazir olana kadar 200 ms'de bir bakar; arayuz bloklanmaz. #>
+    if (-not $script:SpeechTimer) {
+        $script:SpeechTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:SpeechTimer.Add_Tick({ Update-SpeechPlayback })
+    }
+    $script:SpeechTimer.Interval = [TimeSpan]::FromMilliseconds(200)
+    $script:SpeechTimer.Stop()
+    $script:SpeechTimer.Start()
+}
+
 function Update-SpeechPlayback {
-    <# 250 ms'lik sayac: mp3 hazir olunca calar (arayuz bloklanmaz), bitince temizler. #>
+    <#
+        Uretici sureci bitince dosyayi acar ve calar. Dosya hic uretilemezse Turkce SAPI'ya duser
+        (yoksa susar). Boylece bozuk/engelli motor sessizce yutmaz.
+    #>
     if (-not $script:SpeechBusy) { if ($script:SpeechTimer) { $script:SpeechTimer.Stop() }; return }
     $late = ((Get-Date) -gt $script:SpeechDeadline)
+    $procDone = $true
+    if ($script:SpeechProc) { try { $procDone = $script:SpeechProc.HasExited } catch { $procDone = $true } }
+    $f = $script:SpeechMp3
+    $hasFile = $false
+    if ($f) { try { $hasFile = (Test-Path -LiteralPath $f) -and ((Get-Item -LiteralPath $f).Length -gt 0) } catch { $hasFile = $false } }
+
     if (-not $script:SpeechPlayer) {
-        $f = $script:SpeechMp3
-        if ($f -and (Test-Path -LiteralPath $f) -and (Get-Item -LiteralPath $f).Length -gt 0) {
+        if ($hasFile -and $procDone) {
             try {
                 $pl = New-Object System.Windows.Media.MediaPlayer
                 $pl.Open([uri]$f)
                 $pl.Play()
                 $script:SpeechPlayer = $pl
-            } catch { Write-Trace ('mp3 calinamadi: ' + $_.Exception.Message); Stop-Speech; return }
-        } elseif ($late) { Stop-Speech; return }
+                Write-Trace ('anons: ' + $script:SpeechText + ' (' + $script:SpeechEngine + ')')
+            } catch { Write-Trace ('anons dosyasi calinamadi: ' + $_.Exception.Message); Stop-Speech; return }
+            return
+        }
+        if (($script:SpeechProc -and $procDone -and -not $hasFile) -or $late) {
+            $t = $script:SpeechText
+            $eng = $script:SpeechEngine
+            Stop-Speech
+            if ($t) {
+                Write-Trace ('konusma motoru ses uretemedi (' + $eng + '); Turkce SAPI denenecek')
+                Speak-SapiText -Text $t
+            }
+        }
         return
     }
     try {
@@ -2280,6 +2363,58 @@ function Update-SpeechPlayback {
             if ($script:SpeechPlayer.Position.TotalMilliseconds -ge ($end - 120)) { Stop-Speech }
         } elseif ($late) { Stop-Speech }
     } catch { Stop-Speech }
+}
+
+function Get-PiperVoice {
+    <#
+        Yerel Turkce konusma motoru: %LOCALAPPDATA%\RemoteWatchdog\voice (piper.exe + *.onnx modeli).
+        Kurulum: .\tools\Install-Voice.ps1  ->  dogal kadin Turkce ses, internet gerektirmez.
+    #>
+    if ($null -ne $script:PiperOk) { return $script:PiperOk }
+    $script:PiperOk = $false
+    $script:PiperExe = ''
+    $script:PiperModel = ''
+    try {
+        $exe = Join-Path $VoiceDir 'piper\piper.exe'
+        $model = @(Get-ChildItem -LiteralPath $VoiceDir -Filter '*.onnx' -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -First 1)
+        if ((Test-Path -LiteralPath $exe) -and $model.Count -eq 1 -and (Test-Path -LiteralPath ($model[0].FullName + '.json'))) {
+            $script:PiperExe = $exe
+            $script:PiperModel = $model[0].FullName
+            $script:PiperOk = $true
+        }
+    } catch { }
+    if (-not $script:PiperOk) { Write-Trace 'yerel Piper motoru yok; Turkce anons icin .\tools\Install-Voice.ps1 calistirin' }
+    return $script:PiperOk
+}
+
+function Test-Piper {
+    <#  Yerel konusma motoru hazir mi (sonuc onbellege alinir). #>
+    return [bool](Get-PiperVoice)
+}
+
+function Speak-Piper {
+    <#  Metni YEREL Piper ile Turkce sese cevirip wav uretir (internet yok, ~1 sn, dogal kadin sesi). #>
+    param([string]$Text)
+    if ($script:SpeechBusy) { return $false }
+    if (-not (Test-Piper)) { return $false }
+    $id = [Guid]::NewGuid().ToString('N')
+    $txt = Join-Path $env:TEMP ('rw-voice-' + $id + '.txt')
+    $wav = Join-Path $env:TEMP ('rw-voice-' + $id + '.wav')
+    try {
+        [System.IO.File]::WriteAllText($txt, $Text, (New-Object System.Text.UTF8Encoding($false)))
+        $cmd = 'type "' + $txt + '" | "' + $script:PiperExe + '" -m "' + $script:PiperModel + '" -f "' + $wav + '"'
+        $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $cmd) -WindowStyle Hidden -PassThru
+    } catch { Write-Trace ('Piper baslatilamadi: ' + $_.Exception.Message); return $false }
+    $script:SpeechBusy = $true
+    $script:SpeechMp3 = $wav
+    $script:SpeechTxt = $txt
+    $script:SpeechProc = $proc
+    $script:SpeechText = $Text
+    $script:SpeechEngine = 'piper (yerel)'
+    $script:SpeechDeadline = (Get-Date).AddSeconds(20)
+    $script:SpeechPlayer = $null
+    Start-SpeechPoller
+    return $true
 }
 
 function Speak-EdgeTts {
@@ -2292,20 +2427,26 @@ function Speak-EdgeTts {
     $txt = Join-Path $env:TEMP ('rw-tts-' + $id + '.txt')
     $mp3 = Join-Path $env:TEMP ('rw-tts-' + $id + '.mp3')
     $voice = 'tr-TR-EmelNeural'
+    $wrap = Join-Path $Root 'tools\edge_tts_win.py'
     try {
         [System.IO.File]::WriteAllText($txt, $Text, (New-Object System.Text.UTF8Encoding($false)))
-        Start-Process -FilePath $py -ArgumentList @('-m', 'edge_tts', '--voice', $voice, '--file', $txt, '--write-media', $mp3) -WindowStyle Hidden | Out-Null
+        # edge-tts 7.x Windows'ta aiodns/Selector hatasi veriyor; sarmalayici politika ayarlar.
+        # Sarmalayici yoksa eski yol denenir (diger isletim sistemleri/guncel surumler).
+        if (Test-Path -LiteralPath $wrap) {
+            $proc = Start-Process -FilePath $py -ArgumentList @($wrap, '--voice', $voice, '--file', $txt, '--write-media', $mp3) -WindowStyle Hidden -PassThru
+        } else {
+            $proc = Start-Process -FilePath $py -ArgumentList @('-m', 'edge_tts', '--voice', $voice, '--file', $txt, '--write-media', $mp3) -WindowStyle Hidden -PassThru
+        }
     } catch { Write-Trace ('edge-tts baslatilamadi: ' + $_.Exception.Message); return $false }
     $script:SpeechBusy = $true
     $script:SpeechMp3 = $mp3
     $script:SpeechTxt = $txt
+    $script:SpeechProc = $proc
+    $script:SpeechText = $Text
+    $script:SpeechEngine = 'edge-tts (dogal kadin Turkce)'
     $script:SpeechDeadline = (Get-Date).AddSeconds(25)
     $script:SpeechPlayer = $null
-    if (-not $script:SpeechTimer) { $script:SpeechTimer = New-Object System.Windows.Threading.DispatcherTimer }
-    $script:SpeechTimer.Interval = [TimeSpan]::FromMilliseconds(250)
-    $script:SpeechTimer.Stop()
-    $script:SpeechTimer.Add_Tick({ Update-SpeechPlayback })
-    $script:SpeechTimer.Start()
+    Start-SpeechPoller
     return $true
 }
 
@@ -2323,7 +2464,7 @@ function Speak-SapiText {
         if (-not $tr) {
             if (-not $script:VoiceNoTr) {
                 $script:VoiceNoTr = $true
-                Write-Trace 'Turkce SAPI sesi yok; edge-tts kullanilmali, aksi halde sesli bildirim susuyor'
+                Write-Trace 'Turkce SAPI sesi yok; sesli bildirim icin yerel Piper motoru kurulmali (.\tools\Install-Voice.ps1)'
             }
             $sp.Dispose()
             return
@@ -2335,23 +2476,151 @@ function Speak-SapiText {
     } catch { Write-Trace ('SAPI sesli bildirim calismadi: ' + $_.Exception.Message) }
 }
 
+# --- Uzay filmi tarzi ses efektleri ----------------------------------------------------------
+# Panel olaylari iki katmanli duyurur: once NET / KESKIN / PARLAK efekt (ui\sounds\*.wav, hazir
+# dosyalar), ardindan Turkce anons. Efektler panel surecinde calar (SYSTEM oturumunda ses cikmaz),
+# on yuklendikleri icin gecikmesizdir.
+
+function Get-SfxPack {
+    <#  Pakette olmasi gereken efektleri (ve dosya durumunu) doner. #>
+    $out = @()
+    foreach ($n in @($script:SfxNames)) {
+        $f = Join-Path $SfxDir ($n + '.wav')
+        $out += [pscustomobject]@{ Name = $n; Path = $f; Exists = (Test-Path -LiteralPath $f) }
+    }
+    return $out
+}
+
+function Get-SfxPath {
+    param([string]$Name)
+    $safe = [System.IO.Path]::GetFileNameWithoutExtension([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($safe)) { return '' }
+    $p = Join-Path $SfxDir ($safe + '.wav')
+    if (Test-Path -LiteralPath $p) { return $p }
+    return ''
+}
+
+function Get-SfxVolume {
+    <#  Ses seviyesi ayardan (SesEfektleriVolume, 0-100; 0 = efektler kapali); okunamazsa 80. #>
+    $v = 80
+    try {
+        $raw = (Get-HostConfig).SesEfektleriVolume
+        if ($null -ne $raw -and ([string]$raw).Trim() -ne '') { $v = [int]$raw }
+    } catch { $v = 80 }
+    if ($v -le 0) { $v = 0 }
+    if ($v -gt 100) { $v = 100 }
+    return $v
+}
+
+function Get-SfxPlayer {
+    <#  MediaPlayer ilk kullanimda yuklenir ve onbellekte kalir: tekrar calarken bekleme olmaz. #>
+    param([string]$Path)
+    if ($null -eq $script:SfxPlayers) { $script:SfxPlayers = @{} }
+    if ($script:SfxPlayers.ContainsKey($Path)) { return $script:SfxPlayers[$Path] }
+    try {
+        $pl = New-Object System.Windows.Media.MediaPlayer
+        $pl.Open([uri]$Path)
+        $pl.Volume = ((Get-SfxVolume) / 100.0)
+        $script:SfxPlayers[$Path] = $pl
+        return $pl
+    } catch {
+        Write-Trace ('ses efekti yuklenemedi (' + $Path + '): ' + $_.Exception.Message)
+        return $null
+    }
+}
+
+function Play-Sfx {
+    <#
+        Hazir efekti calar. Susturan durumlar: SesEfektleri=false (Ayarlar -> Bildirim) veya
+        tepside Sessiz mod. Paket eksikse Windows'un sistem sesine duser (yine hazir bir ses).
+    #>
+    param([string]$Name, [switch]$Force)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    # Ustun olan: calisma anindaki anahtar (tepsi/ayar) + config. Ikisi de acik olmali.
+    if (-not $script:SfxOn) { return $false }
+    try { if ((Get-HostConfig).SesEfektleri -eq $false) { return $false } } catch { }
+    if ($script:Silent -and -not $Force) { return $false }
+    $vol = Get-SfxVolume
+    if ($vol -le 0) { return $false }
+    $path = Get-SfxPath -Name $Name
+    if (-not $path) {
+        if ($null -eq $script:SfxMissing) { $script:SfxMissing = @{} }
+        if (-not $script:SfxMissing.ContainsKey($Name)) {
+            $script:SfxMissing[$Name] = $true
+            Write-Trace ('ses efekti pakette yok: ' + $Name + ' (ui\sounds) - sistem sesine dusuluyor')
+        }
+        try {
+            if ($Name -in @('alert', 'reboot', 'warn')) { [System.Media.SystemSounds]::Hand.Play() }
+            elseif ($Name -eq 'ok') { [System.Media.SystemSounds]::Asterisk.Play() }
+            else { [System.Media.SystemSounds]::Beep.Play() }
+        } catch { }
+        return $false
+    }
+    $pl = Get-SfxPlayer -Path $path
+    if (-not $pl) { return $false }
+    try {
+        $pl.Volume = ($vol / 100.0)
+        $pl.Position = [TimeSpan]::Zero
+        $pl.Play()
+        Write-Trace ('ses efekti: ' + $Name)
+        return $true
+    } catch {
+        Write-Trace ('ses efekti calinamadi (' + $Name + '): ' + $_.Exception.Message)
+        return $false
+    }
+}
+
+function Stop-Sfx {
+    <#  Tum efektleri durdurur ve onbellegi bosaltir (cikista cagrilir). #>
+    foreach ($pl in @($script:SfxPlayers.Values)) { try { $pl.Stop(); $pl.Close() } catch { } }
+    $script:SfxPlayers = @{}
+}
+
+function ConvertTo-TtsText {
+    <#
+        Anons metnini Turkce telaffuze hazirlar. Kontrol adlari (last-run.json) ASCII gelir
+        ("Internet erisimi", "DNS cozumlemesi"); bunlar Turkce yazilirsa seslendirici dogru
+        fonemleri uretir ("erisimi" -> "erişimi", "cozumlemesi" -> "çözümlemesi").
+        Ancak genel ASCII->diakritik cevirisi YAPILMAZ: "internet" -> "ınternet" gibi hatalara yol acar.
+    #>
+    param([string]$Text)
+    $t = [string]$Text
+    if ([string]::IsNullOrWhiteSpace($t)) { return '' }
+    foreach ($k in @('Internet erisimi', 'DNS cozumlemesi', 'Google istemci hizmetleri', 'Google Remote Desktop kaydi', 'CRD canli baglantisi', 'CRD kaydi', 'Windows RDP', 'Saat senkronu', 'Uyku modu', 'Ag onarimi', 'Ağ onarımı', 'Uzak masaustu', 'Tunel', 'Belge kaydetme')) {
+        if ($script:TtsFix.ContainsKey($k)) { $t = $t.Replace($k, $script:TtsFix[$k]) }
+    }
+    $t = $t.Trim()
+    if ($t -and ($t -notmatch '[.!?…]$')) { $t = $t + '.' }
+    return $t
+}
+
 function Speak-Text {
     <#
-        Turkce sesli anons. Oncelik dogal KADIN sesi (edge-tts, tr-TR-EmelNeural); edge-tts yoksa
-        Windows'un Turkce sesi (Tolga); Turkce ses yoksa hic okumaz (Ingilizce okumaz).
-        SesliBildirim kapaliysa veya sessiz moddaysa konusmaz.
+        Turkce sesli anons. Konusma motoru onceligi:
+          1) edge-tts -> dogal KADIN Turkce (tr-TR-EmelNeural, Microsoft, bulut, ucretsiz)
+          2) Piper (yerel, dogal ama ERKEK; internetsiz yedek)
+          3) Windows Turkce SAPI sesi (Tolga/Emel)
+          4) Turkce ses yoksa SUSAR - Ingilizce okumaz.
+        -Sfx ile once hazir film efekti calar (net/keskin/parlak), sonra anons gelir.
+        SesliBildirim kapaliysa veya sessiz moddaysa konusmaz (efektin kendi anahtari SesEfektleri).
     #>
-    param([string]$Text, [int]$Volume = 100, [switch]$Force)
+    param([string]$Text, [int]$Volume = 100, [string]$Sfx = '', [switch]$Force)
+    if ($Sfx) { [void](Play-Sfx -Name $Sfx -Force:$Force) }
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
+    if (-not $script:VoiceOn) { return }
     try { $cfg = Get-HostConfig; if ($cfg.SesliBildirim -eq $false) { return } } catch { $cfg = $null }
     if ($script:Silent -and -not $Force) { return }
-    $t = [string]$Text
+    $t = ConvertTo-TtsText $Text
+    if ([string]::IsNullOrWhiteSpace($t)) { return }
     if ($t.Length -gt 160) { $t = $t.Substring(0, 160) }
     try {
         if ($cfg.SesliBildirimEdge -ne $false -and (Test-EdgeTts)) {
             if (Speak-EdgeTts -Text $t) { return }
         }
-    } catch { Write-Trace ('edge-tts yolu hata verdi, SAPI''ya dusuluyor: ' + $_.Exception.Message) }
+    } catch { Write-Trace ('edge-tts yolu hata verdi, yedek motorlara dusuluyor: ' + $_.Exception.Message) }
+    try {
+        if ((Test-Piper) -and (Speak-Piper -Text $t)) { return }
+    } catch { Write-Trace ('yerel Piper yolu hata verdi, SAPI''ya dusuluyor: ' + $_.Exception.Message) }
     Speak-SapiText -Text $t -Volume $Volume
 }
 
@@ -2380,15 +2649,15 @@ function Update-VoiceAlerts {
         $p = $script:VoiceLast
         if ($p.Ok -and -not $snap.Ok) {
             $k = ($snap.Bad | Select-Object -First 2) -join ', '
-            Speak-Text ('Baglanti sorunu' + $(if ($k) { ': ' + $k } else { '' }))
+            Speak-Text ('Bağlantı sorunu var' + $(if ($k) { ': ' + $k } else { '' }) + '.') -Sfx 'alert'
         } elseif (-not $p.Ok -and $snap.Ok) {
-            if ([int]$p.Rung -gt 0) { Speak-Text 'Onarim tamamlandi' } else { Speak-Text 'Baglanti duzeldi' }
+            if ([int]$p.Rung -gt 0) { Speak-Text 'Onarım tamamlandı.' -Sfx 'ok' } else { Speak-Text 'Bağlantı düzeldi.' -Sfx 'recover' }
         } elseif (-not $snap.Ok -and [int]$snap.Rung -gt [int]$p.Rung) {
-            Speak-Text 'Baglanti onariliyor'
+            Speak-Text 'Bağlantı onarılıyor.' -Sfx 'repair'
         }
-        if ([int]$snap.ResetPending -eq 1 -and [int]$p.ResetPending -ne 1) { Speak-Text 'Sistem tekrar baslatiliyor' }
-        elseif ($snap.ForceAlways -and -not $p.ForceAlways) { Speak-Text 'Sistem tekrar baslatiliyor' }
-        if ([int]$snap.Reboots -gt [int]$p.Reboots) { Speak-Text 'Sistem yeniden baslatildi' }
+        if ([int]$snap.ResetPending -eq 1 -and [int]$p.ResetPending -ne 1) { Speak-Text 'Sistem yeniden başlatılıyor.' -Sfx 'reboot' }
+        elseif ($snap.ForceAlways -and -not $p.ForceAlways) { Speak-Text 'Sistem yeniden başlatılıyor.' -Sfx 'reboot' }
+        if ([int]$snap.Reboots -gt [int]$p.Reboots) { Speak-Text 'Sistem yeniden başlatıldı.' -Sfx 'online' }
         $script:VoiceLast = $snap
     } catch { Write-Trace ('sesli uyari gecisi hatasi: ' + $_.Exception.Message) }
 }
@@ -2422,11 +2691,47 @@ function Set-SilentMode {
     }
     if ($script:TrayItems) {
         $found = $false
-        foreach ($it in $script:TrayItems) { if ($it.Text -eq 'Sessiz mod') { $it.Checked = $script:Silent; $found = $true } }
+        foreach ($it in $script:TrayItems) { if ($it.Tag -eq 'silent') { $it.Checked = $script:Silent; $found = $true } }
         if (-not $found) { Write-Trace 'sessiz mod menusu bulunamadi' }
     }
-    Show-Balloon -Title 'Sessiz mod' -Text ('Bildirimler ' + $(if ($script:Silent) { 'KAPATILDI' } else { 'ACILDI' })) -Icon 'Info' -Force
+    Show-Balloon -Title 'Sessiz mod' -Text ('TÜM sesler ' + $(if ($script:Silent) { 'KAPATILDI' } else { 'ACILDI' }) + ' (film efektleri + insan sesi)') -Icon 'Info' -Force
     return $script:Silent
+}
+
+function Set-VoiceMode {
+    <#  Turkce anonsu ac/kapat (config: SesliBildirim); film efektlerinden BAGIMSIZ calisir. #>
+    param([switch]$Toggle, [switch]$On, [switch]$Off)
+    $cur = $true
+    try { $cur = ((Get-HostConfig).SesliBildirim -ne $false) } catch { $cur = $true }
+    $new = $cur
+    if ($Toggle) { $new = -not $cur } elseif ($On) { $new = $true } elseif ($Off) { $new = $false }
+    $script:VoiceOn = [bool]$new
+    try { Save-HostConfig @{ SesliBildirim = [bool]$new } } catch { Write-Trace ('anons ayari yazilamadi: ' + $_.Exception.Message) }
+    if ($script:TrayItems) {
+        $mi = @($script:TrayItems | Where-Object { $_.Tag -eq 'voice' })[0]
+        if ($mi) { $mi.Text = 'Sesli anons - ' + $(if ($new) { 'açık' } else { 'kapalı' }) }
+    }
+    Show-Balloon -Title 'Sesli anons' -Text ('İnsan sesi (Türkçe konuşma) ' + $(if ($new) { 'ACILDI' } else { 'KAPATILDI' }) + '. Film efektleri ayrı anahtarda; ikisini birlikte kapatmak için Sessiz mod.') -Icon 'Info' -Force
+    if ($new) { Speak-Text 'Sesli anons açıldı.' -Sfx 'ok' -Force }
+    return $new
+}
+
+function Set-SfxMode {
+    <#  Uzay filmi efektlerini ac/kapat (config: SesEfektleri) ve tepsi etiketini guncelle. #>
+    param([switch]$Toggle, [switch]$On, [switch]$Off)
+    $cur = $true
+    try { $cur = ((Get-HostConfig).SesEfektleri -ne $false) } catch { $cur = $true }
+    $new = $cur
+    if ($Toggle) { $new = -not $cur } elseif ($On) { $new = $true } elseif ($Off) { $new = $false }
+    $script:SfxOn = [bool]$new
+    try { Save-HostConfig @{ SesEfektleri = [bool]$new } } catch { Write-Trace ('ses efekti ayari yazilamadi: ' + $_.Exception.Message) }
+    if ($script:TrayItems) {
+        $mi = @($script:TrayItems | Where-Object { $_.Tag -eq 'sfx' })[0]
+        if ($mi) { $mi.Text = 'Film efektleri - ' + $(if ($new) { 'açık' } else { 'kapalı' }) }
+    }
+    Show-Balloon -Title 'Film efektleri' -Text ('Uzay filmi efektleri (wav) ' + $(if ($new) { 'ACILDI' } else { 'KAPATILDI - bundan sonra efekt sesi gelmeyecek' }) + '. İnsan sesi ayrı anahtarda; ikisini birlikte kapatmak için Sessiz mod.') -Icon 'Info' -Force
+    if ($new) { Play-Sfx 'ok' | Out-Null }
+    return $new
 }
 
 function Invoke-TrayAction {
@@ -2442,6 +2747,9 @@ function Invoke-TrayAction {
         'toggle' { if ($script:Win.IsVisible) { $script:Win.Hide() } else { $script:Win.Show(); $script:Win.Activate() } }
         'check' { $script:Win.Show(); $script:Win.Activate(); Show-Page 'conn'; Start-ManualCheck }
         'silent' { Set-SilentMode -Toggle | Out-Null }
+        'voice' { Set-VoiceMode -Toggle | Out-Null }
+        'sfx' { Set-SfxMode -Toggle | Out-Null }
+        'testses' { Speak-Text 'Uzak makine bağlantısı düzeldi, her şey yolunda.' -Sfx 'recover' -Force }
         'help' { Start-HelpTour -Restart | Out-Null; Show-Balloon -Title 'Ayar yardımı' -Text 'Ayarlar hakkında bilgiler sırayla gösterilecek (10 konu). Kapatmak için balonu tıklayıp geçebilirsiniz.' -Icon 'Info' -Always }
         'balloon' {
             $next = switch ($script:BalloonMode) { 'critical' { 'all' } 'all' { 'off' } default { 'critical' } }
@@ -2455,11 +2763,11 @@ function Invoke-TrayAction {
             if (Test-Path $d) { Start-Process explorer.exe ('"' + $d + '"') } else { [System.Windows.MessageBox]::Show('Log klasoru yok: ' + $d, 'RemoteWatchdog') | Out-Null }
         }
         'web' { Start-Process 'https://remotedesktop.google.com' }
-        'install' { Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null; Start-Sleep 5; Update-ActionBarColors }
+        'install' { Play-Sfx 'online' | Out-Null; Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null; Start-Sleep 5; Update-ActionBarColors }
         'diag' { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaüstüne yazıldı.', 'RemoteWatchdog') | Out-Null }
         'quit' {
             $r = [System.Windows.MessageBox]::Show('Panel kapatilsin mi? Zamanlanmis watchdog gorevi calismaya devam eder.', 'RemoteWatchdog', 'YesNo', 'Question')
-            if ($r -eq 'Yes') { $script:ExitRequested = $true; $script:Win.Close(); $script:Icon.Visible = $false; $script:Icon.Dispose() }
+            if ($r -eq 'Yes') { Stop-Sfx; $script:ExitRequested = $true; $script:Win.Close(); $script:Icon.Visible = $false; $script:Icon.Dispose() }
         }
         default { Write-Trace ('bilinmeyen tepsi islemi: ' + $Key) }
     }
@@ -2471,7 +2779,10 @@ function New-TrayIcon {
         @{ t = 'Kontrol panelini aç'; k = 'panel' }
         @{ t = 'Şimdi denetle'; k = 'check' }
         @{ t = '-'; k = '' }
-        @{ t = 'Sessiz mod'; k = 'silent' }
+        @{ t = 'Sessiz mod (tüm sesler)'; k = 'silent' }
+        @{ t = 'Sesli anons (insan sesi)'; k = 'voice' }
+        @{ t = 'Film efektleri (wav)'; k = 'sfx' }
+        @{ t = 'Ses testi'; k = 'testses' }
         @{ t = 'Bildirimler (kritik)'; k = 'balloon' }
         @{ t = 'Paneli aç / gizle'; k = 'toggle' }
         @{ t = 'Log klasörünü aç'; k = 'log' }
@@ -2500,6 +2811,18 @@ function New-TrayIcon {
     $script:TrayItems = $ctx.Items
     $miB = @($ctx.Items | Where-Object { $_.Tag -eq 'balloon' })[0]
     if ($miB) { $miB.Text = 'Bildirimler (kapali)' }
+    $miS = @($ctx.Items | Where-Object { $_.Tag -eq 'sfx' })[0]
+    if ($miS) {
+        $sfxOn = $true
+        try { $sfxOn = ((Get-HostConfig).SesEfektleri -ne $false) } catch { $sfxOn = $true }
+        $miS.Text = 'Film efektleri (wav) - ' + $(if ($sfxOn) { 'açık' } else { 'kapalı' })
+    }
+    $miV = @($ctx.Items | Where-Object { $_.Tag -eq 'voice' })[0]
+    if ($miV) {
+        $voiceOn = $true
+        try { $voiceOn = ((Get-HostConfig).SesliBildirim -ne $false) } catch { $voiceOn = $true }
+        $miV.Text = 'Sesli anons (insan sesi) - ' + $(if ($voiceOn) { 'açık' } else { 'kapalı' })
+    }
 }
 
 function Set-WindowIcon {
@@ -2549,12 +2872,13 @@ function Wire-UI {
     (El $script:Win 'BtnInstall').Add_Click({ Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null })
     (El $script:Win 'BtnReboot').Add_Click({
             $r = [System.Windows.MessageBox]::Show('Makine yeniden baslatilsin mi? Kaydedilmemis belge varsa once kaydedilir.', 'RemoteWatchdog', 'YesNo', 'Question')
-            if ($r -eq 'Yes') { Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
+            if ($r -eq 'Yes') { Speak-Text 'Sistem yeniden başlatılıyor.' -Sfx 'reboot'; Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
         })
     (El $script:Win 'BtnForceNow').Add_Click({
             $r = [System.Windows.MessageBox]::Show('Daima zorla kapatma ACILIR ve makine yeniden baslatilir. Kaydedilmemis belge varsa once kaydedilir. Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Warning')
             if ($r -ne 'Yes') { return }
             Save-HostConfig @{ ForceRestartAlways = $true }
+            Speak-Text 'Sistem yeniden başlatılıyor.' -Sfx 'reboot'
             Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait
         })
     (El $script:Win 'BtnSave').Add_Click({ Save-Settings })
@@ -2690,6 +3014,12 @@ $script:StartedAt = Get-Date
 try { Remove-Item -LiteralPath $ShowRequest -Force -ErrorAction SilentlyContinue } catch { }
 $script:BalloonMode = Get-BalloonMode
 Write-Trace ('bildirim modu: ' + $script:BalloonMode + ' | sessiz: ' + $script:Silent)
+$sfxMissing = @(Get-SfxPack | Where-Object { -not $_.Exists } | ForEach-Object { [string]$_.Name })
+Write-Trace ('ses efektleri: ' + $(if ($sfxMissing.Count) { 'EKSIK -> ' + ($sfxMissing -join ', ') + ' (ui\sounds)' } else { 'paket tam (' + @($script:SfxNames).Count + ' efekt)' }) + ' | seviye: ' + (Get-SfxVolume))
+try { $script:SfxOn = ((Get-HostConfig).SesEfektleri -ne $false) } catch { $script:SfxOn = $true }
+try { $script:VoiceOn = ((Get-HostConfig).SesliBildirim -ne $false) } catch { $script:VoiceOn = $true }
+Write-Trace ('ses anahtarlari -> film efektleri (wav): ' + $(if ($script:SfxOn) { 'ACIK' } else { 'KAPALI' }) + ' | insan sesi: ' + $(if ($script:VoiceOn) { 'ACIK' } else { 'KAPALI' }))
+Write-Trace ('konusma motoru: ' + $(if (Test-EdgeTts) { 'edge-tts dogal KADIN Turkce (bulut) + yerel Piper yedegi' } elseif (Test-Piper) { 'Piper (yerel, internetsiz yedek)' } else { 'kurulu Turkce konusma motoru yok' }))
 New-TrayIcon
 Set-WindowIcon
 Wire-UI

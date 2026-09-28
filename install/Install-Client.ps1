@@ -35,6 +35,10 @@ function Warn { param([string]$Text) Write-Host ('    [!] ' + $Text) -Foreground
 
 if (-not (Test-Path -LiteralPath $ClientScript)) { Write-Host ('Dosya bulunamadi: ' + $ClientScript) -ForegroundColor Red; exit 1 }
 
+$SfxDir = Join-Path $Root 'ui\sounds'
+if (Test-Path -LiteralPath $SfxDir) { Ok ('ses paketi bulundu: ' + $SfxDir) }
+else { Warn 'ui\sounds klasoru yok: panel film efektleri yerine Windows sistem sesini kullanir (depodan kopyalayin)' }
+
 Write-Host '=============================================='
 Write-Host ' RemoteWatchdog - ISTEMCI KURULUMU (bu bilgisayar)'
 Write-Host (' Bilgisayar: ' + $env:COMPUTERNAME)

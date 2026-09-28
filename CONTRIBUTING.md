@@ -9,14 +9,20 @@ kendisinden haberdar eder.
 ## Hızlı başlangıç (katkı öncesi)
 
 ```powershell
-# 1) Tüm testler (beklenen: Gecti: 123 | Kaldi: 0)
+# 1) Tüm testler (beklenen: Gecti: 176 | Kaldi: 0)
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-All.ps1
 
-# 2) Arayüz testleri (WPF, STA gerekir; beklenen: Gecti: 27 | Kaldi: 0)
+# 2) Arayüz testleri (WPF, STA gerekir; beklenen: Gecti: 47 | Kaldi: 0)
 powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\tests\Test-UI.ps1
 
 # 3) Paneli açmadan arayüzü kur + PNG üret + kapat (kendi makinenizde de çalışır)
 powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\ui\RemoteWatchdogPanel.ps1 -SelfTest -PreviewPath "$env:TEMP\panel.png"
+
+# 4) Ses paketi tam mı (efekt dosyaları depoda hazır durur; ses tasarımı değiştiyse yeniden üret)
+.\tools\New-SoundPack.ps1 -Verify
+
+# 5) Konuşma motoru (Türkçe anons) kurulu mu; gerekirse kur
+.\tools\Install-Voice.ps1 -Status
 ```
 
 `Test-All.ps1` **gerçek sistem durumunu okur** (`C:\ProgramData\RemoteWatchdog\last-run.json`).
@@ -35,6 +41,11 @@ temiz bir runner'da çalışır, çünkü iş akışı önce `ProgramData\Remote
 | `lib/Settings.ps1` | Ayar tanımları (`$script:Defs`) ve yardım balonu metinleri |
 | `install/*.ps1` | Yönetici kurulum yardımcıları |
 | `tests/*.ps1` | Regresyon paketleri |
+| `ui/sounds/*.wav` | Hazır ses efektleri (film tarzı, üretilmiş WAV; elle düzenlenmez) |
+| `tools/SfxSynth.cs` | Ses motoru: efekt sentezi (attack, inharmonik kısımlar, reverb, limiter) |
+| `tools/New-SoundPack.ps1` | `ui/sounds` paketini üretir/doğrular (`-List`, `-Verify`) |
+| `tools/Install-Voice.ps1` | Yerel Türkçe yedek konuşma motorunu (Piper TTS) kurar ve her iki motorun durumunu raporlar (`-Status`, `-Force`) |
+| `tools/edge_tts_win.py` | edge-tts için Windows uyumlu giriş noktası (aiodns/Selector olay döngüsü düzeltmesi) — doğal kadın Türkçe ses |
 
 ## Kod kuralları
 

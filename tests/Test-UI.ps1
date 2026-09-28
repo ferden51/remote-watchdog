@@ -57,8 +57,19 @@ $script:HostData = Join-Path $env:TEMP 'rw-uitest'
 $script:BalloonMode = 'off'
 $script:NoBalloon = $true
 $script:Silent = $true
+# Ses efektleri (ui\sounds): panel API'si burada da tanimli olsun diye gercek klasore baglanir
+$script:SfxDir = Join-Path $Root 'ui\sounds'
+$script:SfxNames = @('online', 'ok', 'warn', 'alert', 'repair', 'recover', 'reboot', 'scan')
+$script:SfxPlayers = @{}
+$script:SfxMissing = @{}
 
-foreach ($code in (Get-FnCode $PanelPath @('Bx', 'Write-Trace', 'New-Toggle', 'New-Segmented', 'Get-Json'))) { Invoke-Expression $code }
+foreach ($code in (Get-FnCode $PanelPath @('Bx', 'Write-Trace', 'New-Toggle', 'New-Segmented', 'Get-Json', 'Get-FlagBool'))) { Invoke-Expression $code }
+
+Write-Host '-- Bayrak okuma (sessiz mod "0" iken susmamalı) --'
+Ok 'Get-FlagBool "0" -> sessiz degil (eski bool cast, panel her acilista susturuluyordu)' ((Get-FlagBool '0') -eq $false)
+Ok 'Get-FlagBool "1" -> sessiz' ((Get-FlagBool '1') -eq $true)
+Ok 'Get-FlagBool bos deger -> sessiz degil' ((Get-FlagBool '') -eq $false)
+Ok 'Get-FlagBool "true" -> sessiz' ((Get-FlagBool 'true') -eq $true)
 
 # Bu paketin cagirdigi panel/lib fonksiyonlari gercekten tanimli mi? (Bir fonksiyon yuklenmezse
 # PowerShell Ok(...) satirini hic calistirmaz ve test sessizce kaybolur - o yuzden acikca dogrulanir.)
@@ -154,7 +165,7 @@ $mx = [regex]::Match($panelText, "(?s)\`$Xaml = @'\r?\n(.*?)\r?\n'@")
 if (-not $mx.Success) { Ok 'panel XAML bulundu' $false } else {
     Ok 'panel XAML bulundu' $true
     try { $script:Win = [Windows.Markup.XamlReader]::Parse($mx.Groups[1].Value) } catch { Ok 'XAML ayrıştırıldı' $false $_.Exception.Message }
-    $need = @('Bx', 'El', 'Write-Trace', 'Get-Json', 'Read-ConfigFile', 'Get-HostConfig', 'Get-ClientDefaults', 'Get-CurrentValues', 'ConvertTo-DayNames', 'New-Toggle', 'New-TextBox', 'New-Segmented', 'New-SettingRow', 'Add-ActionBar', 'Get-WatchdogTaskState', 'Update-ActionBarColors', 'Resolve-CheckInterval', 'Build-Settings', 'Invoke-SettingsAction', 'Invoke-TrayAction', 'Get-Actions', 'Update-Connections', 'Update-Overview', 'Update-Actions', 'Update-Log', 'Set-LogText', 'Get-LogText', 'Get-LogLineColor', 'Refresh-Icon', 'Get-StatusInfo', 'Show-Balloon', 'Get-BalloonMode', 'Set-BalloonMode', 'Invoke-Script', 'Update-Countdown', 'Get-NextCheck', 'Show-RepairWindow', 'Close-RepairWindow')
+    $need = @('Bx', 'El', 'Write-Trace', 'Get-Json', 'Read-ConfigFile', 'Get-HostConfig', 'Get-ClientDefaults', 'Get-CurrentValues', 'ConvertTo-DayNames', 'New-Toggle', 'New-TextBox', 'New-Segmented', 'New-SettingRow', 'Add-ActionBar', 'Get-WatchdogTaskState', 'Update-ActionBarColors', 'Resolve-CheckInterval', 'Build-Settings', 'Invoke-SettingsAction', 'Invoke-TrayAction', 'Get-Actions', 'Update-Connections', 'Update-Overview', 'Update-Actions', 'Update-Log', 'Set-LogText', 'Get-LogText', 'Get-LogLineColor', 'Refresh-Icon', 'Get-StatusInfo', 'Show-Balloon', 'Get-BalloonMode', 'Set-BalloonMode', 'Invoke-Script', 'Update-Countdown', 'Get-NextCheck', 'Show-RepairWindow', 'Close-RepairWindow', 'Play-Sfx', 'Stop-Sfx', 'Get-SfxPath', 'Get-SfxPlayer', 'Get-SfxVolume', 'Get-SfxPack', 'Set-SfxMode', 'Speak-Text', 'ConvertTo-TtsText', 'Get-PiperVoice', 'Test-Piper', 'Speak-Piper', 'Start-SpeechPoller', 'Stop-Speech', 'Speak-SapiText', 'Update-SpeechPlayback')
     $script:TaskCache = $null
     $script:TaskCacheUntil = [datetime]::MinValue
     foreach ($code in (Get-FnCode $PanelPath $need)) { Invoke-Expression $code }
@@ -255,6 +266,72 @@ if (-not $mx.Success) { Ok 'panel XAML bulundu' $false } else {
     Ok ('gunluk rengi kirmizi = hata (' + $cWarn + ')') ($cWarn -eq '#FFCD5C5C')
     Ok ('gunluk rengi kirmizi = SORUN kontrolu (' + $cBad + ')') ($cBad -eq '#FFCD5C5C')
     Remove-Item -LiteralPath $logDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    Write-Host ''
+    Write-Host '-- Ses efektleri (hazir uzay filmi paketi) --'
+    $pack = @(Get-SfxPack)
+    Ok ('ses paketi tanimi: ' + $pack.Count + ' efekt') ($pack.Count -eq 8)
+    $missingFiles = @($pack | Where-Object { -not $_.Exists })
+    Ok ('ses paketi dosyalari tam (eksik: ' + $missingFiles.Count + ')') ($missingFiles.Count -eq 0)
+    $pAlert = Get-SfxPath -Name 'alert'
+    Ok ('Get-SfxPath dosyayi buluyor: ' + $(if ($pAlert) { Split-Path -Leaf $pAlert } else { 'yok' })) ([bool]$pAlert -and (Test-Path -LiteralPath $pAlert))
+    Ok 'Get-SfxPath bilinmeyen ad icin bos donuyor' ([string]::IsNullOrEmpty((Get-SfxPath -Name 'boyle-bir-efekt-yok')))
+    Ok ('Get-SfxPath yol enjeksiyonunu temizliyor') ([string]::IsNullOrEmpty((Get-SfxPath -Name '..\..\..\windows\win.ini')))
+    Ok ('efekt ses seviyesi ayardan geliyor: ' + (Get-SfxVolume)) ((Get-SfxVolume) -ge 0 -and (Get-SfxVolume) -le 100)
+    $playErr = $null
+    $script:Silent = $false   # sessiz moddayken efekt calinmaz; testte kisa sure acilir
+    try { $null = Play-Sfx -Name 'ok' } catch { $playErr = $_.Exception.Message }
+    $script:Silent = $true
+    Ok ('Play-Sfx hatasiz cagriliyor (oynatma/atlam karari veriyor)' + $(if ($playErr) { ': ' + $playErr } else { '' })) ($null -eq $playErr)
+    Stop-Sfx
+    Ok 'Stop-Sfx onbellegi temizliyor' (@($script:SfxPlayers.Keys).Count -eq 0)
+
+    Write-Host ''
+    Write-Host '-- Anons metni duzeltme (ASCII kontrol adi -> Turkce telaffuz) --'
+    $script:TtsFix = @{
+        'Internet erisimi'            = 'İnternet erişimi'
+        'DNS cozumlemesi'             = 'DNS çözümlemesi'
+        'Google Remote Desktop kaydi' = 'Google Remote Desktop kaydı'
+    }
+    $t1 = ConvertTo-TtsText 'Baglanti sorunu: Internet erisimi, DNS cozumlemesi'
+    Ok ('ASCII kontrol adlari Turkcelestirildi: ' + $t1) (($t1 -match 'İnternet erişimi') -and ($t1 -match 'DNS çözümlemesi'))
+    $t2 = ConvertTo-TtsText 'Bağlantı düzeldi'
+    Ok ('sonuna nokta ekleniyor (prozoi): ' + $t2) ($t2 -eq 'Bağlantı düzeldi.')
+    $t3 = ConvertTo-TtsText 'Onarım tamamlandı.'
+    Ok ('zaten noktali metin degistirilmiyor: ' + $t3) ($t3 -eq 'Onarım tamamlandı.')
+    $t4 = ConvertTo-TtsText 'uzak internet'
+    Ok ('genel ASCII metin OLDUGU GIBI kalir ("internet" -> "ınternet" olmaz): ' + $t4) ($t4 -eq 'uzak internet.')
+
+    Write-Host ''
+    Write-Host '-- Konusma motoru (yerel Piper, dogal Turkce kadin) --'
+    $script:VoiceDir = Join-Path $env:LOCALAPPDATA 'RemoteWatchdog\voice'
+    $script:SpeechBusy = $false; $script:SpeechPlayer = $null; $script:SpeechProc = $null
+    $script:SpeechMp3 = ''; $script:SpeechTxt = ''; $script:SpeechText = ''; $script:SpeechEngine = ''
+    $hasVoice = Test-Piper
+    Write-Host ('  yerel motor: ' + $(if ($hasVoice) { 'KURULU' } else { 'yok (opsiyonel; kurulum: tools\Install-Voice.ps1)' }))
+    if ($hasVoice) {
+        $started = Speak-Piper -Text 'Baglanti duzeldi'
+        Ok 'Speak-Piper anonsu baslatiyor' ($started -eq $true)
+        $wav = $script:SpeechMp3
+        $deadline = (Get-Date).AddSeconds(40)
+        $ready = $false
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 300
+            $done = $true
+            if ($script:SpeechProc) { try { $done = $script:SpeechProc.HasExited } catch { } }
+            if ($done -and (Test-Path -LiteralPath $wav) -and (Get-Item -LiteralPath $wav).Length -gt 0) { $ready = $true; break }
+        }
+        $kb = 0
+        if (Test-Path -LiteralPath $wav) { $kb = [math]::Round((Get-Item -LiteralPath $wav).Length / 1KB, 1) }
+        Ok ('Piper Turkce ses dosyasi uretildi (' + $kb + ' KB)') $ready
+        $ttsErr = $null
+        try { Update-SpeechPlayback } catch { $ttsErr = $_.Exception.Message }
+        Ok ('anons dosyasi acilip caliniyor' + $(if ($ttsErr) { ': ' + $ttsErr } else { '' })) ($null -eq $ttsErr)
+        Stop-Speech
+        Ok 'Stop-Speech anons dosyasini temizliyor' (($script:SpeechBusy -eq $false) -and ([string]$script:SpeechMp3 -eq ''))
+    } else {
+        Ok 'Piper kurulu degil (opsiyonel; panel edge-tts / Turkce SAPI dener)' $true
+    }
 }
 
 Write-Host ''

@@ -270,11 +270,70 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'panel dogal kadin sesi (edge-tts) yolu var' ($panelText -match 'function Speak-EdgeTts')
     Ok 'panel edge-tts dogrulama (Test-EdgeTts) var' ($panelText -match 'function Test-EdgeTts')
     Ok 'panel Turkce SAPI yedegi var' ($panelText -match 'function Speak-SapiText')
+    Ok 'panel yerel konusma motoru (Piper) destegi var' (($panelText -match 'function Get-PiperVoice') -and ($panelText -match 'function Test-Piper') -and ($panelText -match 'function Speak-Piper'))
+    Ok 'konusma onceligi: edge-tts (KADIN) -> Piper -> SAPI' (($panelText -match 'Test-EdgeTts\)\)') -and ($panelText -match '\(Test-Piper\) -and \(Speak-Piper') -and ($panelText -match 'Speak-SapiText -Text \$t'))
+    Ok 'edge-tts Windows sarmalayicisi var (aiodns/Selector duzeltmesi)' (Test-Path -LiteralPath (Join-Path $Root 'tools\edge_tts_win.py'))
+    Ok 'panel sarmalayiciyi tercih ediyor, -m edge_tts sadece yedek yol' (($panelText -match 'edge_tts_win\.py') -and ($panelText -match 'if \(Test-Path -LiteralPath \$wrap\)'))
+    Ok 'sarmalayici olay dongusu politikasini ayarliyor' ((Get-Content -LiteralPath (Join-Path $Root 'tools\edge_tts_win.py') -Raw) -match 'WindowsSelectorEventLoopPolicy')
+    Ok 'konusma motoru araci (tools\Install-Voice.ps1) duruyor' (Test-Path -LiteralPath (Join-Path $Root 'tools\Install-Voice.ps1'))
+    Ok 'anons ureticisi bitmeden dosya calinmiyor (yarim ses yok)' (($panelText -match '\$hasFile -and \$procDone') -and ($panelText -match 'function Start-SpeechPoller'))
+    Ok 'anons sayaci tek kez kuruluyor (her anonssa yeni isleyici eklenmiyor)' ($panelText -notmatch 'Add_Tick\(\{ Update-SpeechPlayback \}\)[\r\n\s]+return \$true')
     Ok 'panel ses gecisi izleyici (Update-VoiceAlerts) var' ($panelText -match 'function Update-VoiceAlerts')
     Ok 'Wire-UI penceresiz calismada net atliyor' ($panelText -match 'Wire-UI atlandi')
     Ok 'host SesliBildirim varsayilani var' ($hostText -match '(?m)^\s{8}SesliBildirim\s*=')
     Ok 'host SesliBildirimEdge varsayilani var' ($hostText -match '(?m)^\s{8}SesliBildirimEdge\s*=')
     Ok 'panel surumu ayarlar sayfasinda gosteriyor' ($panelText -match "TxtVersion")
+
+    # --- Uzay filmi tarzi hazir ses paketi: once NET/KESKIN/PARLAK efekt, sonra anons ---
+    $sfxDir = Join-Path $Root 'ui\sounds'
+    $sfxNames = @('online', 'ok', 'warn', 'alert', 'repair', 'recover', 'reboot', 'scan')
+    Ok 'ses paketi klasoru var (ui\sounds)' (Test-Path -LiteralPath $sfxDir)
+    $sfxBad = @()
+    $sfxTotal = 0
+    foreach ($n in $sfxNames) {
+        $f = Join-Path $sfxDir ($n + '.wav')
+        if (-not (Test-Path -LiteralPath $f)) { $sfxBad += ($n + ' yok'); continue }
+        $len = (Get-Item -LiteralPath $f).Length
+        $sfxTotal += $len
+        if ($len -lt 20000) { $sfxBad += ($n + ' cok kisa'); continue }
+        $bytes = [System.IO.File]::ReadAllBytes($f)
+        $riff = [System.Text.Encoding]::ASCII.GetString($bytes, 0, 4)
+        $wave = [System.Text.Encoding]::ASCII.GetString($bytes, 8, 4)
+        $bits = [BitConverter]::ToInt16($bytes, 34)
+        if ($riff -ne 'RIFF' -or $wave -ne 'WAVE' -or $bits -ne 16) { $sfxBad += ($n + ' WAV bozuk') }
+    }
+    Ok ('ses paketi: ' + $sfxNames.Count + ' efekt hazir (' + [math]::Round($sfxTotal / 1KB) + ' KB)' + $(if ($sfxBad.Count) { ' - sorun: ' + ($sfxBad -join ', ') } else { '' })) ($sfxBad.Count -eq 0)
+    Ok 'ses uretici duruyor (tools\New-SoundPack.ps1)' (Test-Path -LiteralPath (Join-Path $Root 'tools\New-SoundPack.ps1'))
+    Ok 'ses motoru duruyor (tools\SfxSynth.cs)' (Test-Path -LiteralPath (Join-Path $Root 'tools\SfxSynth.cs'))
+    Ok 'panel ses efekti API (Play-Sfx / Get-SfxPath / Stop-Sfx) var' (($panelText -match 'function Play-Sfx') -and ($panelText -match 'function Get-SfxPath') -and ($panelText -match 'function Stop-Sfx'))
+    Ok 'sessiz mod bayragi dogru okunuyor (bool cast, "0" degeri sessiz sayilirdi)' (($panelText -match 'function Get-FlagBool') -and ($panelText -match 'script:Silent = Get-FlagBool'))
+    Ok 'panel efektleri on yukluyor (Get-SfxPlayer onbellegi)' ($panelText -match 'function Get-SfxPlayer')
+    Ok 'panel efekt klasorunu kullaniyor (ui\sounds)' ($panelText.Contains("`$SfxDir = Join-Path `$UiDir 'sounds'"))
+    Ok 'panel efektleri susturma korumasi (SesEfektleri + sessiz mod)' (($panelText -match '\(Get-HostConfig\)\.SesEfektleri -eq \$false') -and ($panelText -match 'script:Silent -and -not \$Force'))
+    $sfxUsed = @()
+    foreach ($pat in @("-Sfx '([a-z]+)'", "Play-Sfx '([a-z]+)'")) {
+        $sfxUsed += @([regex]::Matches($panelText, $pat) | ForEach-Object { $_.Groups[1].Value })
+    }
+    $sfxUsed = @($sfxUsed | Sort-Object -Unique)
+    $sfxUnknown = @($sfxUsed | Where-Object { $sfxNames -notcontains $_ })
+    Ok ('panelde kullanilan efekt adlari pakette var (' + ($sfxUsed -join ', ') + ')') ($sfxUnknown.Count -eq 0)
+    Ok 'tum efektler panelde bir olaya bagli' (@($sfxNames | Where-Object { $sfxUsed -contains $_ }).Count -eq $sfxNames.Count)
+    Ok 'tepside ses efekti anahtari var (sfx)' ($panelText -match "'sfx' \{ Set-SfxMode")
+    Ok 'tepside anons anahtari var (voice) - efektten ayri' (($panelText -match "'voice' \{ Set-VoiceMode") -and ($panelText -match 'function Set-VoiceMode'))
+    Ok 'anons ve efekt farkli ayarlara yaziyor' (($panelText -match 'Save-HostConfig @\{ SesliBildirim = ') -and ($panelText -match 'Save-HostConfig @\{ SesEfektleri = '))
+    Ok 'ses anahtarlari calisma aninda sabitleniyor (kapattiysan ses gelmez)' (($panelText -match 'if \(-not \$script:SfxOn\) \{ return \$false \}') -and ($panelText -match 'if \(-not \$script:VoiceOn\) \{ return \}'))
+    Ok 'tepsi etiketleri etiket yerine Tag ile eslesiyor (Sessiz mod etiketi degisti)' ($panelText -match "if \(\`$it\.Tag -eq 'silent'\)")
+    Ok 'panel acilista iki anahtari da logluyor' ($panelText -match 'ses anahtarlari -> film efektleri')
+    Ok 'tepside ses testi var (testses)' ($panelText -match "'testses'")
+    Ok 'tepsi etiketleri durumu gosteriyor' (($panelText -match 'Film efektleri \(wav\)') -and ($panelText -match 'Sesli anons \(insan sesi\)'))
+    Ok 'anons metinleri Turkce karakter iceriyor (ASCII yazim telaffuzu bozuyordu)' (($panelText -match "Speak-Text 'Bağlantı düzeldi") -and ($panelText -match "Speak-Text 'Onarım tamamlandı"))
+    Ok 'ASCII kontrol adlarini Turkcelestiren katman var' (($panelText -match 'function ConvertTo-TtsText') -and ($panelText -match '\$script:TtsFix = @\{') -and ($panelText -match 'Internet erisimi'))
+    Ok 'panel SesEfektleri varsayilani var' ($panelText -match '(?m)^\s{8}SesEfektleri = \$true; SesEfektleriVolume = 80')
+    Ok 'host SesEfektleri varsayilani var' ($hostText -match '(?m)^\s{8}SesEfektleri\s*=')
+    Ok 'host SesEfektleriVolume varsayilani var' ($hostText -match '(?m)^\s{8}SesEfektleriVolume\s*=')
+    $defs = @(Get-SettingsDefs)
+    Ok 'ayar tanimi: SesEfektleri (bool)' (@($defs | Where-Object { $_.Key -eq 'SesEfektleri' -and $_.Type -eq 'bool' }).Count -eq 1)
+    Ok 'ayar tanimi: SesEfektleriVolume (int)' (@($defs | Where-Object { $_.Key -eq 'SesEfektleriVolume' -and $_.Type -eq 'int' }).Count -eq 1)
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 

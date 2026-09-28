@@ -20,6 +20,9 @@ Bağlantı sorunlarının çoğu "makine açık ama erişilemiyor" şeklindedir 
 | `host/Enable-ConsoleAutoLogon.ps1` | Uzak bilgisayar (admin) | Reboot sonrası konsola otomatik giriş (opt-in, riskli) |
 | `client/RemoteClientWatchdog.ps1` | Kendi bilgisayarın | Uzak hedefe TCP erişim testi, kopma uyarısı, RDP/tarayıcı otomatik açma |
 | `ui/RemoteWatchdogPanel.ps1` | Her iki makinede (kullanıcı oturumu) | Sistem tepsisi kontrol paneli: durum, bekleyen işler, tüm ayarlar, daima zorla kapatma anahtarı, loglar, teşhis raporu |
+| `ui/sounds/*.wav` | Panel (kullanıcı oturumu) | Hazır, gerçekçi "uzay filmi" ses efektleri (üretilmiş WAV; panel çalar, elle düzenlenmez) |
+| `tools/SfxSynth.cs` | Geliştirme | Efekt sentez motoru: <2 ms attack, inharmonik metalik kısımlar, parlak shimmer reverb, sub katmanı, soft limiter |
+| `tools/New-SoundPack.ps1` | Geliştirme | `ui/sounds` paketini yeniden üretir/doğrular (`-List`, `-Verify`) |
 
 ## Kurulum: iki modül
 
@@ -114,13 +117,60 @@ hemen tetikler — algılama ~1 dakikaya iner.
 20 sn'lik sayaç yedekte durur) — kapatıp açmak gerekmez. **Ayarlar kaydedilince** watchdog görevi hemen
 tetiklenir, yeni ayarlar sıradaki döngüyü beklemez.
 
-**Sesli bildirim:** önemli olaylarda kısa Türkçe anons yapılır — bağlantı sorunu / düzeldi,
-onarılıyor / tamamlandı, tekrar başlatılıyor / başlatıldı. Ses doğal **kadın** Türkçe
-(`edge-tts`, `tr-TR-EmelNeural`); kurulu değilse Windows'un Türkçe sesi (`Microsoft Tolga`) kullanılır,
-Türkçe ses yoksa **İngilizce okunmaz**, susar. Ayarlar → Bildirim → `SesliBildirim` (aç/kapa) ve
-`SesliBildirimEdge` (doğal ses açık/kapalı); tepsi *Sessiz mod* açıkken susar.
+**Sesli bildirim (insan sesi):** önemli olaylarda kısa Türkçe anons yapılır — bağlantı sorunu /
+düzeldi, onarılıyor / tamamlandı, tekrar başlatılıyor / başlatıldı. Konuşma motoru sırasıyla dener:
 
-Kurulum (bir kez, doğal ses için): `python -m pip install --user edge-tts`
+1. **edge-tts → doğal KADIN Türkçe (`tr-TR-EmelNeural`)** — Microsoft'un resmî sinir ağı sesi,
+   ücretsiz, en doğal telaffuz. Kurulum: `python -m pip install --user edge-tts`. *İnternet gerekir.*
+   Panel `tools\edge_tts_win.py` sarmalayıcısını kullanır (edge-tts 7.x + aiodns, Windows'ta
+   `WindowsSelectorEventLoopPolicy` gerektiriyor; sarmalayıcı olmadan süreç ses üretmeden çöküyor).
+2. **Piper TTS (yerel yedek)** — doğal ama **erkek**; internetsiz çalışır.
+   Kurulum: `.\tools\Install-Voice.ps1` → `%LOCALAPPDATA%\RemoteWatchdog\voice`
+3. **Windows Türkçe sesi (SAPI)** — Türkçe metin-sesi paketi kuruluysa (Tolga/Emel).
+4. Hiçbiri yoksa **susar** — Türkçe metni İngilizce sesle okumaz.
+
+Ayarlar → Bildirim → `SesliBildirim` (aç/kapa) ve `SesliBildirimEdge` (bulut ses açık/kapalı; kapalıysa
+doğrudan yerel Piper'a düşer); tepsi *Sessiz mod* açıkken susar. Panel açılışta motoru
+`panel.log`'a yazar. Durum kontrolü: `.\tools\Install-Voice.ps1 -Status`
+
+**Film efektleri (`SesEfektleri`, varsayılan açık):** uyarılar ve önemli eylemler artık **iki katmanlı**
+duyurulur — önce hazır bir efekt, hemen ardından Türkçe anons. Efektler depoda `ui/sounds/*.wav`
+olarak durur (ses aygıtı olmayan makinede bile dosya çalınır; çalınamazsa Windows sistem sesine düşer).
+Ses tasarımı istenen hisse göre yapıldı: **net** (2 ms'nin altında attack), **keskin** (4 ms parlak
+transient), **parlak** (inharmonik metalik kısımlar + HP shimmer'lı kısa reverb), **gerçekçi**
+(sub katmanı, soft limiter ile kırpmasız tepe). Panel efektleri ilk kullanımda yükleyip önbellekte
+tutar, bu yüzden olayla ses arasında bekleme olmaz.
+
+| Efekt | Ne zaman | Karakter |
+|---|---|---|
+| `alert` | bağlantı koptu / kritik alarm | 3 darbeli klakson, metalik kenar, sub baskı |
+| `warn` | uyarı: kısmi/başarısız onarım, denetlemede sorun | iki notalı, hafif detoneli gerilimli çınlama |
+| `ok` | onay: onarım tamam, denetleme temiz | tek parlak cam ping |
+| `recover` | bağlantı düzeldi | yükselen shimmer + çift parlak çınlama |
+| `repair` | onarım sürüyor | sonar taraması (yükselen tekrarlı ping) |
+| `reboot` | yeniden başlatma istendi/algılandı | alçalan süpürme + sub, tepede net blip |
+| `online` | sistem çevrimiçi (kurulum/açılış) | iki notalı cam çan + uzun kuyruk |
+| `scan` | elle denetleme başladı | iki mikro blip |
+
+Ayarlar → Bildirim'de **iki ayrı anahtar** vardır ve birbirinden bağımsızdır:
+`SesEfektleri` (**hazır wav**, film efektleri) ve `SesliBildirim` (**insan sesi**, Türkçe anons).
+Tepsi menüsünde ikisi de tek tıkla açılıp kapanır — *Sesli anons (insan sesi)* ve
+*Film efektleri (wav)* (etiketler açık/kapalı durumunu gösterir) — ve *Ses testi* ikisini birden
+denetir. Tepsideki *Sessiz mod* ikisini birlikte susturur. Efekt ses seviyesi:
+`SesEfektleriVolume` (0-100, 0 = efektler kapalı).
+
+> **Telaffuz notu:** anons metinleri **Türkçe karakterlerle** yazılıdır (`Bağlantı düzeldi.`,
+> `Ağ onarılıyor.`) — ASCII yazım (`Baglanti duzeldi`) seslendiricide İngilizce harf gibi okunur ve
+> telaffuzu bozar. Kontrol adları `last-run.json`'dan ASCII geldiği için `ConvertTo-TtsText`
+> sözlükle Türkçeleştirilir (`Internet erisimi` → `İnternet erişimi`); genel ASCII→diakritik çevirisi
+> **yapılmaz** (`internet` → `ınternet` gibi hataları önlemek için). Kısa metinlere sonuna nokta
+> eklenir (prozodi için).
+
+```powershell
+.\tools\New-SoundPack.ps1 -List       # paket durumu (süre + boyut)
+.\tools\New-SoundPack.ps1 -Verify     # dosyalar tam mı (CI testleri de bunu doğrular)
+.\tools\New-SoundPack.ps1             # hepsini yeniden üret (ses tasarımı: tools/SfxSynth.cs)
+```
 
 Panelde dört sekme:
 

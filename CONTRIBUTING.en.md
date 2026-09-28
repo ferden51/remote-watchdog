@@ -8,14 +8,20 @@ server: it finds what broke, repairs it in steps, restarts only when justified, 
 ## Before you start
 
 ```powershell
-# 1) Full suite (expected: Gecti: 123 | Kaldi: 0)
+# 1) Full suite (expected: Gecti: 176 | Kaldi: 0)
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-All.ps1
 
-# 2) UI suite (WPF, needs STA; expected: Gecti: 27 | Kaldi: 0)
+# 2) UI suite (WPF, needs STA; expected: Gecti: 47 | Kaldi: 0)
 powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\tests\Test-UI.ps1
 
 # 3) Build the UI, render a PNG and exit
 powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\ui\RemoteWatchdogPanel.ps1 -SelfTest -PreviewPath "$env:TEMP\panel.png"
+
+# 4) Is the sound pack complete (effects ship as WAV; regenerate when the design changes)
+.\tools\New-SoundPack.ps1 -Verify
+
+# 5) Is the Turkish voice engine (Piper TTS) installed; install it if not
+.\tools\Install-Voice.ps1 -Status
 ```
 
 `Test-All.ps1` reads real system state (`C:\ProgramData\RemoteWatchdog\last-run.json`) and writes
@@ -33,6 +39,11 @@ nothing. It also runs in CI on a clean runner, because the workflow prepares tha
 | `lib/Settings.ps1` | Setting definitions (`$script:Defs`) and help balloon texts |
 | `install/*.ps1` | Administrator installers |
 | `tests/*.ps1` | Regression suites |
+| `ui/sounds/*.wav` | Ready-made sound effects (film style, generated WAV; do not edit by hand) |
+| `tools/SfxSynth.cs` | Sound engine: effect synthesis (attack, inharmonic partials, reverb, limiter) |
+| `tools/New-SoundPack.ps1` | Builds/verifies the `ui/sounds` pack (`-List`, `-Verify`) |
+| `tools/Install-Voice.ps1` | Installs the local Turkish fallback engine (Piper TTS) and reports both engines (`-Status`, `-Force`) |
+| `tools/edge_tts_win.py` | Windows-compatible entry point for edge-tts (aiodns/Selector event-loop fix) — natural female Turkish voice |
 
 ## Code rules
 

@@ -51,6 +51,10 @@ foreach ($f in @($HostScript, $DiagScript, $DocsScript)) {
     if (-not (Test-Path -LiteralPath $f)) { Die ('Dosya bulunamadi: ' + $f + ' (tum klasoru kopyaladin mi?)') }
 }
 
+$SfxDir = Join-Path $Root 'ui\sounds'
+if (Test-Path -LiteralPath $SfxDir) { Ok ('ses paketi bulundu: ' + $SfxDir) }
+else { Warn 'ui\sounds klasoru yok: panel film efektleri yerine Windows sistem sesini kullanir (depodan kopyalayin)' }
+
 if (-not (Is-Admin)) { Warn 'Yonetici degilsin. Zamanlanmis gorev ve servis ayarlari icin gerekli; script kendini yonetici olarak yeniden baslatacak.' }
 
 if ($DryRun) {
