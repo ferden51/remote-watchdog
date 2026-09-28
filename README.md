@@ -115,9 +115,12 @@ hemen tetikler — algılama ~1 dakikaya iner.
 tetiklenir, yeni ayarlar sıradaki döngüyü beklemez.
 
 **Sesli bildirim:** önemli olaylarda kısa Türkçe anons yapılır — bağlantı sorunu / düzeldi,
-onarılıyor / tamamlandı, tekrar başlatılıyor / başlatıldı. SAPI ile çalışır (harici bağımlılık
-yok; Türkçe ses yoksa varsayılan ses okur). Ayarlar → Bildirim → `SesliBildirim` ile açılır/kapanır,
-tepsi *Sessiz mod* açıkken susar.
+onarılıyor / tamamlandı, tekrar başlatılıyor / başlatıldı. Ses doğal **kadın** Türkçe
+(`edge-tts`, `tr-TR-EmelNeural`); kurulu değilse Windows'un Türkçe sesi (`Microsoft Tolga`) kullanılır,
+Türkçe ses yoksa **İngilizce okunmaz**, susar. Ayarlar → Bildirim → `SesliBildirim` (aç/kapa) ve
+`SesliBildirimEdge` (doğal ses açık/kapalı); tepsi *Sessiz mod* açıkken susar.
+
+Kurulum (bir kez, doğal ses için): `python -m pip install --user edge-tts`
 
 Panelde dört sekme:
 

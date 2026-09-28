@@ -20,8 +20,10 @@ panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürü
 - **Ayarlar hemen geçerli:** kaydetme artık watchdog görevini tetikliyor; kesinti sırasında
   değiştirilen ayarlar sıradaki döngüyü beklemiyor.
 - **Sesli bildirim (`SesliBildirim`, varsayılan açık):** tüm önemli olaylarda kısa Türkçe anons
-  (sorun / düzeldi / onarılıyor / tamamlandı / tekrar başlatılıyor / başlatıldı). SAPI, panelsürecinde çalışır (SYSTEM oturumunda ses çıkmaz); sessiz modda susar. Ayarlar → Bildirim'den
-  kapatılabilir.
+  (sorun / düzeldi / onarılıyor / tamamlandı / tekrar başlatılıyor / başlatıldı). Ses **doğal kadın**
+  Türkçe (`edge-tts` `tr-TR-EmelNeural`); kurulu değilse Windows'un Türkçe sesi (`Tolga`), Türkçe
+  ses hiç yoksa İngilizce okumaz (susar). Panelsürecinde çalışır (SYSTEM oturumunda ses çıkmaz);
+  sessiz modda susar. Ayarlar → Bildirim'den kapatılabilir, `SesliBildirimEdge` doğal sesi kapatır.
 - **Wire-UI koruması:** pencere oluşmadan çağrılırsa kriptik hata yerine net şekilde atlanır
   (test ortamında görülen `Dispatcher` null hatası).
 
