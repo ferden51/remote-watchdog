@@ -1279,9 +1279,16 @@ function Install-Watchdog {
             Write-Log 'INFO' ('belge kaydetme gorevi kuruldu: ' + $officeTask + ' (kullanici ' + $env:USERNAME + ', her 2 dk)')
         } catch { Write-Log 'WARN' ('belge kaydetme gorevi kurulamadi: ' + $_.Exception.Message) }
     } else { Write-Log 'WARN' ('bulge kaydetme betigi yok, reboot oncesi belge koruma devre disi: ' + $saver) }
+    # Konsol penceresi olmasin diye wscript ile baslatma: Windows Terminal varsayilan terminal
+    # oldugunda -WindowStyle Hidden yok sayilir ve siyah/mavi ekranlar bir gelip bir gider.
+    $hiddenVbs = Join-Path (Split-Path -Parent $ScriptPath) 'Start-Hidden.vbs'
     $userTask = 'RemoteHostWatchdogUser'
     try {
-        $uAct = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -UserFallback')
+        if (Test-Path -LiteralPath $hiddenVbs) {
+            $uAct = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"' + $hiddenVbs + '" "' + $ScriptPath + '" -UserFallback')
+        } else {
+            $uAct = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -UserFallback')
+        }
         $uTrg1 = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
         $uTrg2 = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
         $uPrn = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
@@ -1291,7 +1298,11 @@ function Install-Watchdog {
     } catch { Write-Log 'WARN' ('kullanici yedek gorevi kurulamadi: ' + $_.Exception.Message) }
     $probeTask = 'RemoteHostFastProbe'
     try {
-        $fAct = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -FastProbe')
+        if (Test-Path -LiteralPath $hiddenVbs) {
+            $fAct = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"' + $hiddenVbs + '" "' + $ScriptPath + '" -FastProbe')
+        } else {
+            $fAct = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -FastProbe')
+        }
         $fTrg = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
         $fPrn = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
         $fStg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 3)
@@ -1331,21 +1342,59 @@ function Test-SystemWatchdogActive {
     } catch { return $false }
 }
 
+function Get-ProbeState {
+    <#  Hizli yoklamanin sonucu: 'ok' | 'bad' | '' (hic calismadi). #>
+    $f = Join-Path $BaseDir 'probe-state.json'
+    if (-not (Test-Path -LiteralPath $f)) { return '' }
+    try { $j = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json; return [string]$j.last } catch { return '' }
+}
+
+function Save-ProbeState {
+    param([string]$Last)
+    $f = Join-Path $BaseDir 'probe-state.json'
+    try {
+        if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
+        ([ordered]@{ last = $Last; at = (Get-Date).ToString('o') } | ConvertTo-Json) | Set-Content -LiteralPath $f -Encoding UTF8
+    } catch { }
+}
+
+function Start-FullCycle {
+    <#  Tam donguyu tetikler: once kullanici yedegi, sonra SYSTEM gorevi, yoksa dogrudan calisir. #>
+    foreach ($tn in @('RemoteHostWatchdogUser', $TaskName)) {
+        try { Start-ScheduledTask -TaskName $tn -ErrorAction Stop; return $tn } catch { }
+    }
+    return ''
+}
+
 function Invoke-FastProbe {
     <#
         Hafif canli yoklama (60 sn gorevi): sadece ag sagligini olcer (~bir kac sn).
-        Saglikliysa sessiz cikar; sorun varsa tam donguyu hemen tetikler (5 dk beklenmez).
+        Saglikliysa sessiz cikar; sorun varsa tam donguyu tetikler. DUSEGECI DE YAKALAR:
+        onceki durum kotuydu (veya son rapor hataliysa) ve ag duzeldiyse tam dongu tetiklenir,
+        boylece "baglanti duzeldi" kaydi ve sesli anons olusur.
     #>
     $global:cfg = Get-Config
     $h = Get-NetworkHealth
-    if ($h.Ip -and $h.Dns -and $h.Https -and $h.Signal) { exit 0 }
-    $eksik = @(@(if (-not $h.Ip) { 'IP' }) + @(if (-not $h.Dns) { 'DNS' }) + @(if (-not $h.Https) { 'HTTPS' }) + @(if (-not $h.Signal) { 'sinyal' }) -join ',')
-    Write-Log 'WARN' ('hizli yoklama sorun gordu (' + $eksik + ') -> tam dongu tetikleniyor')
-    try { Start-ScheduledTask -TaskName 'RemoteHostWatchdogUser' -ErrorAction Stop; exit 0 }
-    catch {
-        try { Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop; exit 0 }
-        catch { Write-Log 'WARN' ('tam dongu gorevle baslatilamadi, dogrudan calisiyor: ' + $_.Exception.Message) }
+    $bad = -not ($h.Ip -and $h.Dns -and $h.Https -and $h.Signal)
+    $prev = Get-ProbeState
+    $raporBozuk = $false
+    $lr = Join-Path $BaseDir 'last-run.json'
+    if (Test-Path -LiteralPath $lr) { try { $raporBozuk = (-not [bool](Get-Content -LiteralPath $lr -Raw -Encoding UTF8 | ConvertFrom-Json).ok) } catch { } }
+    $duzeldi = (-not $bad) -and (($prev -eq 'bad') -or $raporBozuk)
+    if (-not $bad -and -not $duzeldi) {
+        if ($prev -ne 'ok') { Save-ProbeState 'ok' }
+        exit 0
     }
+    if ($bad) {
+        Save-ProbeState 'bad'
+        $eksik = @(@(if (-not $h.Ip) { 'IP' }) + @(if (-not $h.Dns) { 'DNS' }) + @(if (-not $h.Https) { 'HTTPS' }) + @(if (-not $h.Signal) { 'sinyal' }) -join ',')
+        Write-Log 'WARN' ('hizli yoklama sorun gordu (' + $eksik + ') -> tam dongu tetikleniyor')
+    } else {
+        Save-ProbeState 'ok'
+        Write-Log 'INFO' 'hizli yoklama baglanti yeniden geldi -> duzelme kaydi icin tam dongu tetikleniyor'
+    }
+    $gorev = Start-FullCycle
+    if ($gorev) { exit 0 }
     $null = Invoke-Watchdog
     exit 0
 }

@@ -13,6 +13,8 @@ panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürü
   döngüyü üstlenir (`-Uninstall` kaldırır, `-Status` durumunu gösterir).
 - **Hızlı yoklama (`RemoteHostFastProbe`, `-FastProbe`):** 5 dakikalık döngü sorunu geç fark
   ediyordu → her 1 dakikada hafif ağ yoklaması; sorun görürse tam döngüyü hemen tetikler.
+  Düzelmeyi de yakalar: önceki durum kötüyse (veya son rapor hatalıysa) bağlantı geri geldiğinde
+  tam döngü tetiklenir, "bağlantı düzeldi" kaydı ve anonsu oluşur.
 - **Panel canlı yenileme:** bağlantılar ancak kapatıp açınca güncelleniyordu → `last-run.json`
   damga yoklaması (1 sn) ile yazıldığı anda yenileniyor (20 sn sayaç yedek). Not: ilk denemede
   `FileSystemWatcher` kullanıldı, ancak olayları runspace'siz havuz başlığında çalıştırıp süreci
@@ -28,6 +30,9 @@ panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürü
   (test ortamında görülen `Dispatcher` null hatası).
 - **Tepsi menüsünden panel açılışı:** "Paneli başlat" `-WindowStyle Normal` ile çalıştırıyordu;
   ekranda ikinci bir komut penceresi açılıyor, kapatılınca program da kapanıyordu → gizli başlatma.
+- **Siyah/mavi ekranlar (gidi-gelen konsol):** Windows Terminal varsayılan terminal olduğunda
+  görev konsolunu Terminal barındırıyor, `-WindowStyle Hidden` yok sayılıyordu → kullanıcı
+  görevleri artık `wscript.exe` + yeni `host/Start-Hidden.vbs` ile başlatılıyor (pencere hiç oluşmuyor).
 - **Panel erken kapanması:** `ShutdownMode=OnExplicitShutdown` yapıldı; son pencere kapansa bile
   tepsi ve izleme ayakta kalır. Ayrıca arayüzdispatcher hata yakalayıcısı `add_UnhandledException`
   ile kuruluyor (`.UnhandledException.Add(...)` PowerShell'de null dönüyordu ve iz bırakmıyordu).

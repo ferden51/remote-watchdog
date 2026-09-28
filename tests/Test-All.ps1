@@ -243,6 +243,16 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok "host yedek gorevi (RemoteHostWatchdogUser) kuruluyor" ($hostText -match "RemoteHostWatchdogUser")
     Ok 'host -FastProbe anahtari var' ($hostText -match '\[switch\]\$FastProbe')
     Ok 'host hizli yoklama karari (Invoke-FastProbe) var' ($hostText -match 'function Invoke-FastProbe')
+    Ok 'host hizli yoklama durumu (Get/Save-ProbeState) var' (($hostText -match 'function Get-ProbeState') -and ($hostText -match 'function Save-ProbeState'))
+    Ok 'host hizli yoklama DUSEGECI de yakalıyor' ($hostText -match 'baglanti yeniden geldi')
+    Ok 'host tam dongu tetikleyici (Start-FullCycle) var' ($hostText -match 'function Start-FullCycle')
+    $hiddenVbs = Join-Path (Split-Path -Parent $Host_) 'Start-Hidden.vbs'
+    Ok 'gizli baslatma (Start-Hidden.vbs) dosyasi var' (Test-Path -LiteralPath $hiddenVbs)
+    if (Test-Path -LiteralPath $hiddenVbs) {
+        $vbsText = Get-Content -LiteralPath $hiddenVbs -Raw
+        Ok 'gizli baslatici pencereyi gizli aciyor (Run ... 0)' ($vbsText -match 'shell\.Run\s+cmd,\s*0,')
+    }
+    Ok 'kullanici yedek gorevi wscript ile baslatiliyor' ($hostText -match "wscript\.exe' -Argument \('""' \+ \`$hiddenVbs")
     Ok "host hizli yoklama gorevi (RemoteHostFastProbe) kuruluyor" ($hostText -match "RemoteHostFastProbe")
     Ok 'panel last-run.json damga yoklamasi (1 sn) var' ($panelText -match 'JsonLastWrite')
     Ok 'panel ayar kaydedince watchdog tetikliyor' ($panelText -match 'Start-ScheduledTask -TaskName \$tn')

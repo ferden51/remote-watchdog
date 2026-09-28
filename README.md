@@ -180,6 +180,11 @@ Repo **private** olduğu için indirme için GitHub kimlik doğrulaması gerekir
 Kurulumdan sonra: `Get-ScheduledTask RemoteHostWatchdog`, log: `C:\ProgramData\RemoteWatchdog\host-watchdog.log`,
 config: `C:\ProgramData\RemoteWatchdog\config.json`.
 
+**Konsol penceresi çıkmaması:** Windows Terminal varsayılan terminal olduğunda, zamanlanmış görevden
+açılan konsol penceresi Terminal tarafından barındırılır ve `-WindowStyle Hidden` yok sayılır
+(siyah/mavi ekranlar bir gelip bir gider). Bu yüzden kullanıcı görevleri (`RemoteHostWatchdogUser`,
+`RemoteHostFastProbe`) `wscript.exe` + `host/Start-Hidden.vbs` ile başlatılır — pencere hiç oluşmaz.
+
 ### Profil seçimi: masaüstü (sürekli açık) vs dizüstü
 
 Varsayılan **sunucu modu**: uyku, hibernasyon, disk zaman aşımı kapatılır, Fast Startup kapanır, ağ adaptörü
