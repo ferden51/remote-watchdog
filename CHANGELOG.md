@@ -4,7 +4,7 @@ Bu dosya sürüm bazlı değişiklikleri tutar. Sürüm numarası depodaki `VERS
 panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürümleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
-## [Yayınlanmadı]
+## [1.1.0] - 2026-09-28
 
 ### Eklenen
 - **Renkli günlük:** günlük satırları kurala göre renkleniyor — **yeşil** = stabil durum (`TAMAM`),
@@ -119,5 +119,6 @@ panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürü
 - Bağlantılar sayfasında üst bar + sayaç yüzünden dikey kaydırma çubuğu (217 px) → 0 px.
 - Pencere simgesi PowerShell amblemi iken proje simgesine (`ui/app.ico`) çevrildi.
 
+[1.1.0]: https://github.com/ferden51/remote-watchdog/releases/tag/v1.1.0
 [1.0.1]: https://github.com/ferden51/remote-watchdog/releases/tag/v1.0.1
 [1.0.0]: https://github.com/ferden51/remote-watchdog/releases/tag/v1.0.0
