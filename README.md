@@ -100,6 +100,11 @@ Bu iki görev `RemoteHostWatchdog.ps1 -Install` ile kurulur (`-Uninstall` ile ka
 başlatılamaz; o yüzden onarım için ayrı görevler vardır. `last-run.json` içindeki `repairWatch: 1`
 alanı, 60 sn'lik izleyicinin kurulu olduğunu gösterir.
 
+**Kullanıcı yedeği (`RemoteHostWatchdogUser`):** kurumsal yönetim SYSTEM görevlerini siliyorsa diye
+aynı kurulum kullanıcı seviyesinde ikinci bir görev de kaydeder (`-UserFallback` ile çalışır).
+SYSTEM görevi sağlam ve verisi tazeyken sessiz çıkar (çift çalışma yok); SYSTEM yoksa/eskimişse tam
+döngüyü üstlenir (kontrol + onarım + alarm + restart politikası).
+
 Panelde dört sekme:
 
 **1. Durum** — sistem ayakta mı, uzak makinenin her kontrolünün sonucu, bu makinenin (istemci) kontrolü,

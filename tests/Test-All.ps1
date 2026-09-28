@@ -237,6 +237,10 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok ('panel ve host ayni VERSION dosyasini okuyor (panel=' + $panelVer + ', host=' + $hostVer + ')') (($panelVer -and $hostVer) -and ($panelVer -eq $hostVer))
     Ok 'panel -Version anahtari var' ($panelText -match '\[switch\]\$Version')
     Ok 'host -Version anahtari var' ((Get-Content -LiteralPath $Host_ -Raw -Encoding UTF8) -match '\[switch\]\$Version')
+    $hostText = Get-Content -LiteralPath $Host_ -Raw -Encoding UTF8
+    Ok 'host -UserFallback anahtari var' ($hostText -match '\[switch\]\$UserFallback')
+    Ok 'host yedek gorev karari (Test-SystemWatchdogActive) var' ($hostText -match 'function Test-SystemWatchdogActive')
+    Ok "host yedek gorevi (RemoteHostWatchdogUser) kuruluyor" ($hostText -match "RemoteHostWatchdogUser")
     Ok 'panel surumu ayarlar sayfasinda gosteriyor' ($panelText -match "TxtVersion")
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

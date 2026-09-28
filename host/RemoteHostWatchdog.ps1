@@ -6,6 +6,7 @@
 
     .\RemoteHostWatchdog.ps1 -Check     sadece rapor, hicbir sey degistirmez
     .\RemoteHostWatchdog.ps1            bir onarim dongusu
+    .\RemoteHostWatchdog.ps1 -UserFallback  SYSTEM gorevi saglamsa cikis, yoksa/eskise tam dongu (kullanici yedegi)
     .\RemoteHostWatchdog.ps1 -Install   zamanlanmis gorev + servis ayarlari (admin)
     .\RemoteHostWatchdog.ps1 -Uninstall
     .\RemoteHostWatchdog.ps1 -Status
@@ -31,6 +32,7 @@ param(
     [switch]$ForceReboot,
     [switch]$RepairNetwork,
     [switch]$RepairWatch,
+    [switch]$UserFallback,
     [switch]$Version,
     [int]$Rung = 0
 )
@@ -1273,6 +1275,16 @@ function Install-Watchdog {
             Write-Log 'INFO' ('belge kaydetme gorevi kuruldu: ' + $officeTask + ' (kullanici ' + $env:USERNAME + ', her 2 dk)')
         } catch { Write-Log 'WARN' ('belge kaydetme gorevi kurulamadi: ' + $_.Exception.Message) }
     } else { Write-Log 'WARN' ('bulge kaydetme betigi yok, reboot oncesi belge koruma devre disi: ' + $saver) }
+    $userTask = 'RemoteHostWatchdogUser'
+    try {
+        $uAct = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -UserFallback')
+        $uTrg1 = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+        $uTrg2 = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
+        $uPrn = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+        $uStg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 1)
+        Register-ScheduledTask -TaskName $userTask -Action $uAct -Trigger @($uTrg1, $uTrg2) -Principal $uPrn -Settings $uStg -Force | Out-Null
+        Write-Log 'INFO' ('kullanici yedek gorevi kuruldu: ' + $userTask + ' (kullanici ' + $env:USERNAME + ', her ' + $IntervalMinutes + ' dk; SYSTEM gorevi saglamsa bekler, silinirse devreye girer)')
+    } catch { Write-Log 'WARN' ('kullanici yedek gorevi kurulamadi: ' + $_.Exception.Message) }
     Write-Host ('Kuruldu. Elle calistirmak icin: Start-ScheduledTask -TaskName ' + $TaskName)
     Write-Host 'Sunucu modu: BIOS icinde "Restore on AC Power Loss = Power On" ve "Wake on LAN" acik olmali.'
 }
@@ -1284,7 +1296,25 @@ function Uninstall-Watchdog {
     if (Get-ScheduledTask -TaskName 'RemoteHostRepair' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostRepair' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostRepair' }
     if (Get-ScheduledTask -TaskName 'RemoteHostRepairWatch' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostRepairWatch' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostRepairWatch' }
     if (Get-ScheduledTask -TaskName 'RemoteHostOfficeSaver' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostOfficeSaver' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostOfficeSaver' }
+    if (Get-ScheduledTask -TaskName 'RemoteHostWatchdogUser' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostWatchdogUser' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostWatchdogUser' }
     Write-Host ('Config/loglar korundu: ' + $BaseDir)
+}
+
+function Test-SystemWatchdogActive {
+    <#
+        SYSTEM gorevi saglam mi: gorev var VE last-run.json taze (2 dongu + 2 dk icinde).
+        Yedek gorev (-UserFallback) cift calismayi onlemek icin bunu kontrol eder.
+    #>
+    param([int]$StaleMinutes = 0)
+    if ($StaleMinutes -le 0) { $StaleMinutes = ([int]$IntervalMinutes * 2 + 2) }
+    $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $t) { return $false }
+    $lr = Join-Path $BaseDir 'last-run.json'
+    if (-not (Test-Path -LiteralPath $lr)) { return $false }
+    try {
+        $age = (Get-Date) - (Get-Item -LiteralPath $lr).LastWriteTime
+        return ($age.TotalMinutes -lt $StaleMinutes)
+    } catch { return $false }
 }
 
 function Show-Status {
@@ -1296,6 +1326,8 @@ function Show-Status {
     } else { Write-Host 'zamanlanmis gorev YOK (-Install calistir)' }
     $state = Get-State
     Write-Host ('ardisik basarisiz dongu: ' + $state.ConsecutiveFailures + ' | son basari: ' + $state.LastOkUtc + ' | son alarm: ' + $state.AlertKey)
+    $ut = Get-ScheduledTask -TaskName 'RemoteHostWatchdogUser' -ErrorAction SilentlyContinue
+    Write-Host ('kullanici yedegi: ' + $(if ($ut) { $ut.State } else { 'YOK' }) + ' | SYSTEM devrede: ' + (Test-SystemWatchdogActive))
     Write-Host ('=== son loglar (' + $LogFile + ') ===')
     if (Test-Path -LiteralPath $LogFile) { Get-Content -LiteralPath $LogFile -Tail 40 | ForEach-Object { Write-Host $_ } } else { Write-Host 'log yok' }
 }
@@ -1315,6 +1347,12 @@ if ($ListHolidays) {
     exit 0
 }
 if ($Install) { Install-Watchdog; exit 0 }
+if ($UserFallback) {
+    if (Test-SystemWatchdogActive) { exit 0 }
+    Write-Log 'WARN' 'SYSTEM gorevi yok veya veri eski -> kullanici yedegi devrede (tam dongu calisiyor)'
+    $null = Invoke-Watchdog
+    exit 0
+}
 if ($RepairWatch) {
     # Hafif izleyici: her 60 sn bir kez calisir. Istek dosyasi yoksa aninda cikar (gunluk/JSON dokunulmaz).
     $wReq = Read-RepairRequest

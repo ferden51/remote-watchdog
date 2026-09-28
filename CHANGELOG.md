@@ -4,6 +4,26 @@ Bu dosya sürüm bazlı değişiklikleri tutar. Sürüm numarası depodaki `VERS
 panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürümleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [Yayınlanmadı]
+
+### Eklenen
+- **Kullanıcı-seviyesi yedek görev (`RemoteHostWatchdogUser`):** kurumsal yönetim SYSTEM
+  görevlerini silerse izleme durmasın diye `-Install` artık kullanıcı görevini de kaydediyor.
+  Görev `-UserFallback` ile çalışır: SYSTEM sağlam + veri tazeyken sessiz çıkar, yoksa tam
+  döngüyü üstlenir (`-Uninstall` kaldırır, `-Status` durumunu gösterir).
+
+### Düzeltilen
+- **IP erişimi probu tek adrese bakıyordu:** kurumsal duvarda `1.1.1.1` kapalıysa satır sürekli
+  kırmızı kalıyordu → `9.9.9.9 → 1.1.1.1 → 8.8.8.8` yedek listesi; panel aktif IP'yi gösterir
+  (`iphost` metriği).
+- **TIME_WAIT sayacı port numarasını okuyordu:** `netstat -s` çıktısındaki ilk TIME_WAIT satırının
+  portu (örn. 58631) sayaç sanılıyordu → `netstat -ano` satır sayımına geçildi (host + teşhis raporu).
+- **"Ağ adaptörü/link olayı" boot kayıtlarını sayıyordu:** System `27/32` ID'leri çekirdek-boot
+  kaynaklıydı → `Kernel-Boot` sağlayıcısı filtrelendi.
+- **Teşhis raporu DNS hatası hep 0 gösteriyordu:** kanal adı yanlıştı
+  (`DNS-Client Events/Operational` → `DNS-Client/Operational`).
+- **IP erişimi etiketi yazım hatası:** `(DNS bağığı değil)` → `(DNS bagimsiz, dogrudan IP)`.
+
 ## [1.0.1] - 2026-09-28
 
 ### Düzeltilen
