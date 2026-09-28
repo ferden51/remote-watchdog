@@ -255,6 +255,15 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host gunluk arsiv klasoru (LogDir) tanimli' ($hostText -match "\`$LogDir = Join-Path \`$BaseDir 'log'")
     Ok 'host LogGunDays varsayilani 30' ($hostText -match '(?m)^\s{8}LogGunDays\s*=\s*30')
     Ok 'host LogDosyaMB varsayilani 2' ($hostText -match '(?m)^\s{8}LogDosyaMB\s*=\s*2')
+    $setupPath = Join-Path (Split-Path -Parent $Panel) 'Panel-Setup.ps1'
+    Ok 'panel kurulum betigi (Panel-Setup.ps1) var' (Test-Path -LiteralPath $setupPath)
+    if (Test-Path -LiteralPath $setupPath) {
+        $setupText = Get-Content -LiteralPath $setupPath -Raw -Encoding UTF8
+        Ok 'kurulum betigi Start Menu kisayolu olusturuyor' ($setupText -match "GetFolderPath\('Programs'\)")
+        Ok 'kurulum betigi masaustu kisayolu olusturuyor' ($setupText -match "GetFolderPath\('Desktop'\)")
+        Ok 'kisayol wscript ile pencere acmadan basliyor' ($setupText -match 'wscript\.exe')
+    }
+    Ok 'panel -Install mutex oncesi calisiyor' ($panelText -match "Panel-Setup\.ps1'\) -Action")
     if (Get-Command Get-LogColor -ErrorAction SilentlyContinue) {
         Ok ('host rengi yesil = stabil: ' + (Get-LogColor -Level 'CHECK' -Text 'TAMAM     Internet')) ($null -ne (Get-LogColor -Level 'CHECK' -Text 'TAMAM     Internet'))
         Ok 'host rengi kirmizi = hata' ((Get-LogColor -Level 'WARN') -eq 'Red')

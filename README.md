@@ -65,8 +65,9 @@ Repo private olduğu için `irm` ile tek satır indirme yetki ister; USB/OneDriv
 
 ```powershell
 .\RemoteWatchdogPanel.ps1                 # tray'de başlar (simgeye çift tıkla = panel)
-.\RemoteWatchdogPanel.ps1 -Install        # oturum açılışında otomatik başlat
+.\RemoteWatchdogPanel.ps1 -Install        # oturum açılışında otomatik başlat + Başlat menüsü/masaüstü kısayolu
 .\RemoteWatchdogPanel.ps1 -SelfTest       # arayüzü kurup doldurup kapatır (test için)
+.\ui\Panel-Setup.ps1 -Action Status       # kurulum durumu (Run kaydı, görev, kısayollar)
 ```
 
 Tepsisindeki simge **duruma göre renklenir**: yeşil (ayakta), kırmızı (sorun), gri (veri yok). Simgeye tıkla,

@@ -156,6 +156,12 @@ Add-Type -AssemblyName System.Drawing
 
 $script:MutexAcquired = $false
 $script:OtherInstance = $null
+# Kurulum/kaldirma her zaman calismali: panel zaten acikken de -Install/-Uninstall islesin
+# (aksi halde mutex'te cikip hicbir sey yapmiyordu - kisayol olusmuyordu).
+if ($Install -or $Uninstall) {
+    & (Join-Path $PSScriptRoot 'Panel-Setup.ps1') -Action $(if ($Uninstall) { 'Uninstall' } else { 'Install' })
+    exit 0
+}
 try {
     $script:MutexAcquired = $script:Mutex.WaitOne(0)
 } catch { $script:MutexAcquired = $true }
@@ -2983,6 +2989,47 @@ function Wire-UI {
     Update-ActionBarColors
 }
 
+function New-PanelShortcuts {
+    <#
+        Baslat menusu + masaustu kisayolu. Hedef wscript + Start-Panel.vbs: konsol penceresi
+        acilmaz (Windows Terminal -WindowStyle Hidden'i yok sayiyor), tiklaninca panel acar.
+    #>
+    $vbs = Join-Path $UiDir 'Start-Panel.vbs'
+    if (-not (Test-Path -LiteralPath $vbs)) { return @() }
+    $ico = Join-Path $UiDir 'app.ico'
+    $targets = @(
+        (Join-Path ([Environment]::GetFolderPath('Programs')) 'RemoteWatchdog Kontrol Paneli.lnk'),
+        (Join-Path ([Environment]::GetFolderPath('Desktop')) 'RemoteWatchdog Kontrol Paneli.lnk')
+    )
+    $made = @()
+    try {
+        $ws = New-Object -ComObject WScript.Shell
+        foreach ($p in $targets) {
+            try {
+                if (-not (Test-Path -LiteralPath (Split-Path -Parent $p))) { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $p) | Out-Null }
+                $lnk = $ws.CreateShortcut($p)
+                $lnk.TargetPath = (Join-Path $env:SystemRoot 'System32\wscript.exe')
+                $lnk.Arguments = '"' + $vbs + '"'
+                $lnk.WorkingDirectory = $UiDir
+                if (Test-Path -LiteralPath $ico) { $lnk.IconLocation = $ico + ',0' }
+                $lnk.Description = 'RemoteWatchdog kontrol paneli (tepsi simgesi)'
+                $lnk.WindowStyle = 7
+                $lnk.Save()
+                $made += $p
+            } catch { Write-Trace ('kisayol olusturulamadi (' + $p + '): ' + $_.Exception.Message) }
+        }
+    } catch { Write-Trace ('kisayol hatasi: ' + $_.Exception.Message) }
+    return $made
+}
+
+function Remove-PanelShortcuts {
+    $paths = @(
+        (Join-Path ([Environment]::GetFolderPath('Programs')) 'RemoteWatchdog Kontrol Paneli.lnk'),
+        (Join-Path ([Environment]::GetFolderPath('Desktop')) 'RemoteWatchdog Kontrol Paneli.lnk')
+    )
+    foreach ($p in $paths) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+}
+
 if ($Install) {
     $cmd = 'powershell.exe -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '"'
     New-ItemProperty -Path $RunKey -Name $RunName -Value $cmd -PropertyType String -Force | Out-Null
@@ -2997,15 +3044,14 @@ if ($Install) {
         Register-ScheduledTask -TaskName 'RemoteHostPanel' -Action $pa -Trigger @($pt1, $pt2) -Principal $pp -Settings $ps -Force -ErrorAction Stop | Out-Null
         Write-Host 'Gorev kuruldu: RemoteHostPanel (oturum acilinda + her 5 dk, pencere gostermeden)'
     } catch { Write-Host ('Panel gorevi kurulamadi: ' + $_.Exception.Message) -ForegroundColor Yellow }
+    $made = @(New-PanelShortcuts)
+    if ($made.Count -gt 0) { Write-Host ('Kisayol olusturuldu: ' + ($made -join ', ')) } else { Write-Host 'Kisayol olusturulamadi.' -ForegroundColor Yellow }
     Write-Host ('Panelin restart sonrasi da acik gelmesi icin konsolda otomatik giris gerekir: host\Enable-ConsoleAutoLogon.ps1')
     exit 0
 }
 if ($Uninstall) {
-    Remove-ItemProperty -Path $RunKey -Name $RunName -ErrorAction SilentlyContinue
-    if (Get-ScheduledTask -TaskName 'RemoteHostPanel' -ErrorAction SilentlyContinue) {
-        try { Unregister-ScheduledTask -TaskName 'RemoteHostPanel' -Confirm:$false -ErrorAction Stop; Write-Host 'Gorev kaldirildi: RemoteHostPanel' } catch { }
-    }
-    Write-Host 'Oturum acilista baslatma kaldirildi.'
+    Remove-PanelShortcuts
+    Write-Host 'Kisayollar kaldirildi (kurulum isleri icin: Panel-Setup.ps1 -Action Uninstall)'
     exit 0
 }
 

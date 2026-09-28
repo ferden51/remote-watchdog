@@ -6,7 +6,16 @@ panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürü
 
 ## [1.2.1] - 2026-09-28
 
+### Eklenen
+- **Başlat menüsü + masaüstü kısayolu:** `ui\Panel-Setup.ps1` (panel `-Install`/`-Uninstall` bunu
+  çağırır) `RemoteWatchdog Kontrol Paneli.lnk` oluşturur. Hedef `wscript.exe` + `Start-Panel.vbs`
+  olduğu için tıklandığında **konsol penceresi açılmaz**, panel doğrudan açılır; proje simgesi kullanılır.
+  Durum için `ui\Panel-Setup.ps1 -Action Status`.
+
 ### Düzeltilen
+- **`-Install` panel açıkken hiçbir şey yapmıyordu:** ikinci örnek mutex'te çıkıp `-Install`
+  bloğuna hiç ulaşmıyordu (bu yüzden kısayol/görev kurulumu sessizce atlanıyordu) → kurulum
+  işlemleri mutex kontrolünün **önüne** alındı ve ayrı betiğe taşındı.
 - **Günlük artık sadece ~1 gün tutuyordu:** `Write-Log` her satırda dosyanın tamamını okuyup
   5000 satırda son 4000'e kırpıyordu; 5 dakikalık döngü + 1 dakikalık yoklama günde ~4400 satır
   üretiyor, yani tarih penceresi bir güne düşüyordu → **boyut tabanlı rotasyon** (`LogDosyaMB`,
