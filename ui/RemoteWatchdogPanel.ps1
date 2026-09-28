@@ -57,7 +57,7 @@ $ShowRequest = Join-Path $env:TEMP 'RemoteWatchdog-show.flag'
 $script:Win = $null
 $script:Icon = $null
 $script:Silent = [bool]((Get-ItemProperty -Path $RunKey -Name ($RunName + 'Silent') -ErrorAction SilentlyContinue).($RunName + 'Silent'))
-$script:BalloonMode = 'critical'
+$script:BalloonMode = 'off'
 $script:Background = [bool]$Background
 $script:LastState = ''
 $script:LastColor = $null
@@ -399,18 +399,18 @@ $Xaml = @'
       <Setter Property="Background" Value="{StaticResource Card}"/>
       <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
       <Setter Property="BorderThickness" Value="1"/>
-      <Setter Property="CornerRadius" Value="10"/>
-      <Setter Property="Padding" Value="14"/>
+      <Setter Property="CornerRadius" Value="9"/>
+      <Setter Property="Padding" Value="11"/>
     </Style>
 
     <Style x:Key="H1" TargetType="TextBlock">
       <Setter Property="Foreground" Value="{StaticResource Tx}"/>
-      <Setter Property="FontSize" Value="20"/>
+      <Setter Property="FontSize" Value="17"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
     </Style>
     <Style x:Key="H2" TargetType="TextBlock">
       <Setter Property="Foreground" Value="{StaticResource Tx}"/>
-      <Setter Property="FontSize" Value="15"/>
+      <Setter Property="FontSize" Value="13.5"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
     </Style>
     <Style x:Key="H3" TargetType="TextBlock">
@@ -420,7 +420,7 @@ $Xaml = @'
     </Style>
     <Style x:Key="Body" TargetType="TextBlock">
       <Setter Property="Foreground" Value="{StaticResource Tx}"/>
-      <Setter Property="FontSize" Value="12.5"/>
+      <Setter Property="FontSize" Value="12"/>
     </Style>
     <Style x:Key="Small" TargetType="TextBlock">
       <Setter Property="Foreground" Value="{StaticResource Mut}"/>
@@ -437,9 +437,9 @@ $Xaml = @'
       <Setter Property="Foreground" Value="{StaticResource Tx}"/>
       <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
       <Setter Property="BorderThickness" Value="1"/>
-      <Setter Property="Padding" Value="14,7"/>
+      <Setter Property="Padding" Value="12,5"/>
       <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="FontSize" Value="12.5"/>
+      <Setter Property="FontSize" Value="12"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
@@ -504,7 +504,7 @@ $Xaml = @'
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="bd" Background="Transparent" CornerRadius="8" Padding="12,10">
+            <Border x:Name="bd" Background="Transparent" CornerRadius="8" Padding="10,7">
               <ContentPresenter HorizontalAlignment="Left" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
@@ -525,14 +525,14 @@ $Xaml = @'
       <Setter Property="BorderThickness" Value="1"/>
       <Setter Property="Padding" Value="9,6"/>
       <Setter Property="CaretBrush" Value="{StaticResource Tx}"/>
-      <Setter Property="FontSize" Value="12.5"/>
+      <Setter Property="FontSize" Value="12"/>
     </Style>
     <Style x:Key="Combo" TargetType="ComboBox">
       <Setter Property="Background" Value="#0E1013"/>
       <Setter Property="Foreground" Value="{StaticResource Tx}"/>
       <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
       <Setter Property="Padding" Value="8,5"/>
-      <Setter Property="FontSize" Value="12.5"/>
+      <Setter Property="FontSize" Value="12"/>
     </Style>
 
     <DataTemplate x:Key="StatusCard">
@@ -550,7 +550,7 @@ $Xaml = @'
     </DataTemplate>
 
     <DataTemplate x:Key="ActionRow">
-      <Border Style="{StaticResource CardStyle}" Margin="0,0,0,10" Padding="16,13">
+      <Border Style="{StaticResource CardStyle}" Margin="0,0,0,5" Padding="12,6" ToolTip="{Binding Sub}">
         <Grid>
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="4"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
@@ -580,26 +580,26 @@ $Xaml = @'
     </DataTemplate>
 
     <DataTemplate x:Key="ConnRow">
-      <Border Style="{StaticResource CardStyle}" Margin="0,0,0,10" Padding="16,13">
+      <Border Style="{StaticResource CardStyle}" Margin="0,0,0,5" Padding="12,6" ToolTip="{Binding Sub}">
         <Grid>
           <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="Auto"/><ColumnDefinition Width="215"/><ColumnDefinition Width="120"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/><ColumnDefinition Width="300"/><ColumnDefinition Width="104"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
 
-          <Border Grid.Column="0" Width="4" CornerRadius="2" Background="{Binding Brush}" Margin="0,1,14,1"/>
+          <Border Grid.Column="0" Width="4" CornerRadius="2" Background="{Binding Brush}" Margin="0,1,11,1"/>
 
-          <StackPanel Grid.Column="1" VerticalAlignment="Center">
+          <StackPanel Grid.Column="1" VerticalAlignment="Center" Orientation="Horizontal">
             <TextBlock Text="{Binding Name}" Style="{StaticResource H2}" TextTrimming="CharacterEllipsis"/>
-            <TextBlock Text="{Binding Sub}" Style="{StaticResource Small}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
+            <TextBlock Text="{Binding Sub}" Style="{StaticResource Small}" Margin="8,0,0,0" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
           </StackPanel>
 
-          <Border Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Left" CornerRadius="6" Padding="10,4" Background="{Binding PillBg}">
+          <Border Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Left" CornerRadius="6" Padding="9,3" Background="{Binding PillBg}">
             <TextBlock Text="{Binding StateText}" Foreground="{Binding StateFg}" FontWeight="SemiBold" FontSize="12"/>
           </Border>
 
-          <TextBlock Grid.Column="3" Text="{Binding Measure}" Style="{StaticResource Mono}" VerticalAlignment="Center" Margin="14,0,14,0" TextWrapping="Wrap"/>
+          <TextBlock Grid.Column="3" Text="{Binding Measure}" Style="{StaticResource Mono}" VerticalAlignment="Center" Margin="11,0,11,0" TextTrimming="CharacterEllipsis" ToolTip="{Binding Measure}"/>
 
-          <Button Grid.Column="4" Tag="{Binding Key}" MinWidth="118" VerticalAlignment="Center" Content="{Binding Action}">
+          <Button Grid.Column="4" Tag="{Binding Key}" MinWidth="104" VerticalAlignment="Center" Content="{Binding Action}">
             <Button.Style>
               <Style TargetType="Button" BasedOn="{StaticResource Btn}">
                 <Style.Triggers>
@@ -627,35 +627,35 @@ $Xaml = @'
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
 
     <!-- UST BAR -->
-    <Border Grid.Row="0" Background="{StaticResource Side}" BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Padding="22,16">
+    <Border Grid.Row="0" Background="{StaticResource Side}" BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Padding="16,10">
       <Grid>
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
         <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-          <Border Width="34" Height="34" CornerRadius="9" Background="#1D2733" Margin="0,0,12,0">
-            <Ellipse x:Name="StatusDot" Width="12" Height="12" Fill="#98A0AA" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          <Border Width="28" Height="28" CornerRadius="8" Background="#1D2733" Margin="0,0,10,0">
+            <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="#98A0AA" HorizontalAlignment="Center" VerticalAlignment="Center"/>
           </Border>
           <StackPanel VerticalAlignment="Center">
-            <TextBlock Text="RemoteWatchdog" Style="{StaticResource H1}" FontSize="17"/>
+            <TextBlock Text="RemoteWatchdog" Style="{StaticResource H1}" FontSize="15"/>
             <TextBlock x:Name="TxtSubtitle" Text=" kontrol yukleniyor..." Style="{StaticResource Small}"/>
           </StackPanel>
         </StackPanel>
 
         <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-          <Border x:Name="RoleBadge" Background="#1D2733" CornerRadius="14" Padding="12,6" Margin="0,0,10,0">
-            <TextBlock x:Name="TxtRole" Text="" Foreground="{StaticResource Ok}" FontWeight="SemiBold" FontSize="11.5"/>
+          <Border x:Name="RoleBadge" Background="#1D2733" CornerRadius="12" Padding="10,3" Margin="0,0,8,0">
+            <TextBlock x:Name="TxtRole" Text="" Foreground="{StaticResource Ok}" FontWeight="SemiBold" FontSize="11"/>
           </Border>
-          <Border x:Name="Pill" Background="#1D2733" CornerRadius="14" Padding="14,6">
-            <TextBlock x:Name="TxtPill" Text="..." Foreground="{StaticResource Mut}" FontWeight="SemiBold" FontSize="12.5"/>
+          <Border x:Name="Pill" Background="#1D2733" CornerRadius="12" Padding="11,3">
+            <TextBlock x:Name="TxtPill" Text="..." Foreground="{StaticResource Mut}" FontWeight="SemiBold" FontSize="12"/>
           </Border>
-          <Border x:Name="NextBadge" Background="#1D2733" CornerRadius="14" Padding="12,6" Margin="10,0,0,0">
-            <TextBlock x:Name="TxtNext" Text="Otomatik: -" Foreground="{StaticResource Mut}" FontWeight="SemiBold" FontSize="11.5"/>
+          <Border x:Name="NextBadge" Background="#1D2733" CornerRadius="12" Padding="10,3" Margin="8,0,0,0">
+            <TextBlock x:Name="TxtNext" Text="Otomatik: -" Foreground="{StaticResource Mut}" FontWeight="SemiBold" FontSize="11"/>
           </Border>
         </StackPanel>
         <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
-          <Button x:Name="BtnCheck" Content="Şimdi denetle" Style="{StaticResource BtnAccent}" Margin="0,0,8,0"/>
-          <Button x:Name="BtnRepairNet" Content="Ağı / interneti onar" Style="{StaticResource Btn}" Margin="0,0,8,0" ToolTip="Ağ katmanını sırayla onarır: DNS → DHCP → adaptör/sürücü → winsock. Her kademeden sonra tekrar ölçer, düzelince durur."/>
+          <Button x:Name="BtnCheck" Content="Şimdi denetle" Style="{StaticResource BtnAccent}" Margin="0,0,6,0"/>
+          <Button x:Name="BtnRepairNet" Content="Ağı onar" Style="{StaticResource Btn}" Margin="0,0,6,0" ToolTip="Ağ katmanını sırayla onarır: DNS → DHCP → adaptör/sürücü → winsock. Her kademeden sonra tekrar ölçer, düzelince durur."/>
           <Button x:Name="BtnReboot" Content="Yeniden başlat" Style="{StaticResource BtnDanger}"/>
         </StackPanel>
       </Grid>
@@ -663,10 +663,10 @@ $Xaml = @'
 
     <!-- GOVDE -->
     <Grid Grid.Row="1">
-      <Grid.ColumnDefinitions><ColumnDefinition Width="212"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <Grid.ColumnDefinitions><ColumnDefinition Width="180"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
 
       <!-- KENAR CUBUGU -->
-      <Border Grid.Column="0" Background="{StaticResource Side}" BorderBrush="{StaticResource Line}" BorderThickness="0,0,1,0" Padding="14,18">
+      <Border Grid.Column="0" Background="{StaticResource Side}" BorderBrush="{StaticResource Line}" BorderThickness="0,0,1,0" Padding="12,14">
         <Grid>
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <StackPanel Grid.Row="0">
@@ -693,16 +693,16 @@ $Xaml = @'
       <!-- ICERIK -->
       <Grid Grid.Column="1">
         <!-- BAGLANTILAR -->
-        <ScrollViewer x:Name="PageConn" VerticalScrollBarVisibility="Auto" Padding="22,20">
+        <ScrollViewer x:Name="PageConn" VerticalScrollBarVisibility="Auto" Padding="14,6">
           <StackPanel>
             <TextBlock Text="Bağlantılar" Style="{StaticResource H1}" Margin="0,0,0,4"/>
-            <TextBlock x:Name="TxtConnSub" Text="" Style="{StaticResource Small}" Margin="0,0,0,16"/>
+            <TextBlock x:Name="TxtConnSub" Text="" Style="{StaticResource Small}" Margin="0,0,0,6"/>
             <ItemsControl x:Name="ConnList"/>
           </StackPanel>
         </ScrollViewer>
 
         <!-- GENEL -->
-        <ScrollViewer x:Name="PageOverview" VerticalScrollBarVisibility="Auto" Padding="22,20">
+        <ScrollViewer x:Name="PageOverview" VerticalScrollBarVisibility="Auto" Padding="14,6">
           <StackPanel>
             <TextBlock Text="Genel durum" Style="{StaticResource H1}" Margin="0,0,0,4"/>
             <TextBlock x:Name="TxtOverviewSub" Text="" Style="{StaticResource Small}" Margin="0,0,0,16"/>
@@ -755,7 +755,7 @@ $Xaml = @'
         </ScrollViewer>
 
         <!-- GUNLUK -->
-        <Grid x:Name="PageLog" Visibility="Collapsed" Margin="22,20">
+        <Grid x:Name="PageLog" Visibility="Collapsed" Margin="16,12">
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
           <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,12">
             <TextBlock Text="Günlük" Style="{StaticResource H1}" Margin="0,0,16,0" VerticalAlignment="Center"/>
@@ -2105,7 +2105,7 @@ function Show-Balloon {
 function Get-BalloonMode {
     $v = (Get-ItemProperty -Path $RunKey -Name ($RunName + 'Balloon') -ErrorAction SilentlyContinue).($RunName + 'Balloon')
     if ($v -in @('off', 'critical', 'all')) { return [string]$v }
-    return 'critical'
+    return 'off'
 }
 
 function Set-BalloonMode {
@@ -2205,6 +2205,26 @@ function New-TrayIcon {
     Refresh-Icon
     $script:Icon.add_MouseDoubleClick({ Invoke-TrayAction 'panel' })
     $script:TrayItems = $ctx.Items
+    $miB = @($ctx.Items | Where-Object { $_.Tag -eq 'balloon' })[0]
+    if ($miB) { $miB.Text = 'Bildirimler (kapali)' }
+}
+
+function Set-WindowIcon {
+    <#  Pencere simgesi: PowerShell amblemi yerine proje simgesi (ui\app.ico). Dosya yoksa varsayilan kalir. #>
+    $w = $script:Win
+    if (-not $w) { return }
+    try {
+        $ico = Join-Path (Split-Path -Parent $PSCommandPath) 'app.ico'
+        if (-not (Test-Path -LiteralPath $ico)) { return }
+        $bmp = New-Object System.Windows.Media.Imaging.BitmapImage
+        $bmp.BeginInit()
+        $bmp.UriSource = New-Object System.Uri($ico)
+        $bmp.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        $bmp.EndInit()
+        $bmp.Freeze()
+        $w.Icon = $bmp
+        $w.Tag = 'icon-ok'
+    } catch { Write-Trace ('pencere simgesi yuklenemedi: ' + $_.Exception.Message) }
 }
 
 function Wire-UI {
@@ -2318,16 +2338,9 @@ function Wire-UI {
     $script:HelpTimer = $null
     $script:HelpIndex = -1
     $script:HelpTopics = $null
-    $helpSeen = (Get-ItemProperty -Path $RunKey -Name ($RunName + 'Help') -ErrorAction SilentlyContinue).($RunName + 'Help')
-    if ($helpSeen -ne (Get-Date -Format 'yyyy-MM-dd')) {
-        $script:FirstRunTimer = New-Object System.Windows.Threading.DispatcherTimer
-        $script:FirstRunTimer.Interval = [TimeSpan]::FromSeconds(25)
-        $script:FirstRunTimer.Add_Tick({
-                $script:FirstRunTimer.Stop()
-                Start-HelpTour | Out-Null
-            })
-        $script:FirstRunTimer.Start()
-    }
+    # Otomatik yardim turu kaldirildi: program ozelliklerini kendiliginden gostermiyor.
+    # Istediginde tepsi menusunden "Ayar yardimi" ile elle baslatilabilir.
+    Write-Trace 'otomatik yardim turu kapali (tepsi menusu > Ayar yardimi ile elle acilir)'
 
     Update-ActionBarColors
 }
@@ -2364,6 +2377,7 @@ try { Remove-Item -LiteralPath $ShowRequest -Force -ErrorAction SilentlyContinue
 $script:BalloonMode = Get-BalloonMode
 Write-Trace ('bildirim modu: ' + $script:BalloonMode + ' | sessiz: ' + $script:Silent)
 New-TrayIcon
+Set-WindowIcon
 Wire-UI
 Show-Page 'conn'
 Update-Connections
@@ -2409,6 +2423,25 @@ if ($SelfTest) {
         } else {
             Write-Host ('Baglanti alt satiri: ' + [string](El $script:Win 'TxtConnSub').Text) -ForegroundColor Green
         }
+        # Sayfa kaydirma olcumu: baglantilar sayfasi dikey kaydirma cubugu gostermemeli (kullanici istegi)
+        try {
+            $w.UpdateLayout()
+            Start-Sleep -Milliseconds 250
+            $sv = El $script:Win 'PageConn'
+            $sh = [int][math]::Ceiling($sv.ScrollableHeight)
+            Write-Host ('Sayfa kaydirma (1080x720): baglantilar dikey=' + $sh + ' px | yatay=' + [int][math]::Ceiling($sv.ScrollableWidth) + ' px')
+            if ($sh -gt 0) { Write-Host ('SELFTEST UYARI: baglantilar sayfasi ' + $sh + ' px tasma -> dikey kaydirma cubugu cikiyor') -ForegroundColor Red }
+            else { Write-Host 'Baglantilar sayfasi dikey kaydirma cubugu yok (tam sigdi)' -ForegroundColor Green }
+            if ([math]::Ceiling($sv.ScrollableWidth) -gt 0) { Write-Host 'SELFTEST UYARI: ust bar yatay tasma yapiyor (dugme kisiyor olabilir)' -ForegroundColor Red }
+            $hdr = $script:Win.FindName('BtnReboot')
+            if ($hdr) {
+                $r = $hdr.PointToScreen((New-Object System.Windows.Point(0, 0)))
+                $right = [System.Windows.SystemParameters]::PrimaryScreenWidth
+                Write-Host ('Ust bar sag kenar: yeniden baslat dugmesi x=' + [int]$r.X + ' / ekran ' + [int]$right + ' -> ' + $(if ($r.X -lt $right) { 'ekran icinde' } else { 'KIRPILDI' }))
+                if ($r.X -ge $right) { Write-Host 'SELFTEST UYARI: ust bar ekrandan tasma yapiyor' -ForegroundColor Red }
+            }
+            Write-Host ('Pencere simgesi: ' + $(if ([string]$script:Win.Tag -eq 'icon-ok') { 'proje simgesi (PowerShell amblemi degil)' } else { 'varsayilan' }))
+        } catch { Write-Host ('Sayfa kaydirma olcumu hatasi: ' + $_.Exception.Message) -ForegroundColor Red }
         $bx = $script:CheckBusy
         $bs = $script:CheckBusySince
         $script:CheckBusy = $true
