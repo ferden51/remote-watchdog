@@ -222,6 +222,18 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host rapor modu (-Check) yeniden baslatma degerlendirmesi yapmiyor (B13)' ($hostText -match "rapor modu \(-Check\): yeniden baslatma degerlendirmesi")
     $state = Get-State
     Ok 'Get-State varsayilan sayaclari sifir' (([int]$state.ConsecutiveFailures -eq 0) -and ([int]$state.NetRepairRung -eq 0))
+    # --- Surumleme: VERSION tek kaynak, panel ve host ayni surumu okumali ---
+    $verFile = Join-Path $Root 'VERSION'
+    $verText = ''
+    if (Test-Path -LiteralPath $verFile) { $verText = ([System.IO.File]::ReadAllText($verFile)).Trim() }
+    $verOk = ($verText -match '^\d+\.\d+\.\d+$')
+    Ok ('VERSION dosyasi semantik surum biciminde: ' + $(if ($verText) { $verText } else { 'YOK' })) $verOk
+    $panelVer = ([regex]::Match($panelText, "\`$script:AppVersion = '([^']*)'")).Groups[1].Value
+    $hostVer = ([regex]::Match((Get-Content -LiteralPath $Host_ -Raw -Encoding UTF8), "\`$script:AppVersion = '([^']*)'")).Groups[1].Value
+    Ok ('panel ve host ayni VERSION dosyasini okuyor (panel=' + $panelVer + ', host=' + $hostVer + ')') (($panelVer -and $hostVer) -and ($panelVer -eq $hostVer))
+    Ok 'panel -Version anahtari var' ($panelText -match '\[switch\]\$Version')
+    Ok 'host -Version anahtari var' ((Get-Content -LiteralPath $Host_ -Raw -Encoding UTF8) -match '\[switch\]\$Version')
+    Ok 'panel surumu ayarlar sayfasinda gosteriyor' ($panelText -match "TxtVersion")
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 

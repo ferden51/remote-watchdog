@@ -127,8 +127,9 @@ function Set-StateJson { param($Obj) [System.IO.File]::WriteAllText($tmpJson, ($
 Set-StateJson ([ordered]@{ generated = (Get-Date).ToString('o'); taskInstalled = 'unknown'; checks = @() })
 Ok ('gecici JSON okundu: taskInstalled=' + [string](Get-Json $tmpJson).taskInstalled) ([string](Get-Json $tmpJson).taskInstalled -eq 'unknown')
 $s1 = Get-StatusTaskState -Status (Read-Status -Path $tmpJson) -VisibleTask $null
-Ok ('taze veri + görünmeyen görev -> kurulu sayıldı: ' + $s1.Installed + ' | renk=' + $s1.Color) ($s1.Installed -eq $true -and $s1.Color -eq 'Ok')
+Ok ('taze veri + görünmeyen görev -> kurulu sayıldı: ' + $s1.Installed + ' | renk=' + $s1.Color) ($s1.Installed -eq $true)
 Ok ('metin SYSTEM bilgisini içeriyor: ' + $s1.Text) ($s1.Text -match 'SYSTEM')
+Ok ('JSON taskState=Running olsa bile "çalışıyor" denmiyor (host JSON kontrol bitince yazıyor): ' + $s1.Short) ($s1.Running -eq $false -and $s1.Short -match 'hazır')
 $staleObj = [ordered]@{ generated = (Get-Date).AddHours(-6).ToString('o'); taskInstalled = 'unknown'; checks = @() }
 $staleObj | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tmpJson -Encoding UTF8
 $s2 = Get-StatusTaskState -Status (Read-Status -Path $tmpJson) -VisibleTask $null
@@ -140,7 +141,10 @@ Ok ('JSON açıkça false -> kurulu değil: ' + $s3.Installed) ($s3.Installed -e
 $trueObj = [ordered]@{ generated = (Get-Date).ToString('o'); taskInstalled = $true; checks = @() }
 $trueObj | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tmpJson -Encoding UTF8
 $s4 = Get-StatusTaskState -Status (Read-Status -Path $tmpJson) -VisibleTask $null
-Ok ('JSON true -> çalışıyor: ' + $s4.Installed) ($s4.Installed -eq $true -and $s4.Color -eq 'Ok')
+Ok ('JSON true -> kurulu ve çalışmıyor: ' + $s4.Installed) ($s4.Installed -eq $true -and $s4.Running -eq $false)
+$visibleTask = [pscustomobject]@{ State = 'Ready' }
+$s5 = Get-StatusTaskState -Status (Read-Status -Path $tmpJson) -VisibleTask $visibleTask
+Ok ('görünen görev Ready -> kısa metin "Görev: hazır": ' + $s5.Short) ($s5.Short -match 'hazır' -and $s5.Running -eq $false)
 Remove-Item -LiteralPath $tmpJson -Force -ErrorAction SilentlyContinue
 
 Write-Host ''
@@ -216,6 +220,32 @@ if (-not $mx.Success) { Ok 'panel XAML bulundu' $false } else {
     try { $null = Show-RepairWindow } catch { $err4 = $_ }
     Ok ('X ile kapandıktan sonra ikinci pencere açıldı' + $(if ($err4) { ': ' + $err4.Exception.Message } else { '' })) ((-not $err4) -and [bool]$script:RepairWin -and [bool]$script:RepairLiveBox -and ($script:RepairWin -ne $first))
     Close-RepairWindow
+
+    Write-Host ''
+    Write-Host '-- Günlük: iki dosya zaman sıralı birleşmeli --'
+    $logDir = Join-Path $script:HostData 'logtest'
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $HostLog = Join-Path $logDir 'host-watchdog.log'
+    $ClientLog = Join-Path $logDir 'client-watchdog.log'
+    @(
+        '2026-09-28 08:00:00 [INFO] host-1',
+        '2026-09-28 08:00:03 [INFO] host-2'
+    ) | Set-Content -LiteralPath $HostLog -Encoding UTF8
+    @(
+        '2026-09-28 08:00:01 [INFO] client-1',
+        '2026-09-28 08:00:02 [INFO] client-2',
+        '2026-09-28 08:00:04 [INFO] client-3'
+    ) | Set-Content -LiteralPath $ClientLog -Encoding UTF8
+    $err5 = $null
+    try { Update-Log } catch { $err5 = $_ }
+    $logTxt = [string](El $script:Win 'TxtLog').Text
+    $body = @($logTxt -split "`n" | Where-Object { $_ -match '^\[(host|istemci)\]' })
+    $order = @($body | ForEach-Object { [regex]::Match($_, '\[(host|istemci)\] \d{4}-\d{2}-\d{2} (\d{2}:\d{2}:\d{2})').Groups[2].Value } | Where-Object { $_ })
+    $sortedOk = $true
+    for ($i = 1; $i -lt $order.Count; $i++) { if ($order[$i] -lt $order[$i - 1]) { $sortedOk = $false } }
+    Ok ('günlük birleşik ve zaman sıralı (' + $order.Count + ' satır: ' + ($order -join ' < ') + ')' + $(if ($err5) { ': ' + $err5.Exception.Message } else { '' })) ((-not $err5) -and ($order.Count -eq 5) -and $sortedOk)
+    Ok ('her satır kaynağı etiketli (host/istemci)') (@($body | Where-Object { $_ -match '\[host\]' }).Count -eq 2 -and @($body | Where-Object { $_ -match '\[istemci\]' }).Count -eq 3)
+    Remove-Item -LiteralPath $logDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host ''

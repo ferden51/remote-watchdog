@@ -89,10 +89,17 @@ function Get-StatusTaskState {
     <#
         Zamanlanmis gorevin durumunu tek yerde hesaplar.
         Normal kullanici SYSTEM'e ait gorevi GOREMEYEBILIR; bu durumda JSON'daki
-        taskInstalled + veri tazeligi kullanilir.
+        taskInstalled + veri yasi kullanilir.
+
+        ONEMLI: Host kontrolu BITIRDIKTEN SONRA JSON'u yazdig icin JSON'daki taskState
+        her zaman "Running" olur. Bu deger ancak veri cok tazeyse (calisma su an suruyor)
+        anlamlidir; veri yaslandiginda gorev "hazir" (Ready) durumundadir.
     #>
     param($Status, $VisibleTask)
     $fresh = Test-StatusFresh -Status $Status
+    $ageMin = 999
+    if ($Status -and ([string]$Status.generated) -ne '') { $ageMin = Get-RwDateMinutesAgo $Status.generated }
+    $justRan = ($ageMin -ge 0 -and $ageMin -le 1.5)
     $says = $null
     if ($Status -and $Status.PSObject.Properties.Name -contains 'taskInstalled') { $says = $Status.taskInstalled }
     if ($VisibleTask) {
@@ -101,18 +108,22 @@ function Get-StatusTaskState {
             Installed = $true; Visible = $true; Running = $running; Fresh = $fresh
             Text = $(if ($running) { 'Zamanlanmış görev: ÇALIŞIYOR' } else { 'Zamanlanmış görev: kurulu, şu an çalışmıyor' })
             Color = $(if ($running) { 'Ok' } else { 'Warn' })
+            Short = $(if ($running) { 'Görev: çalışıyor' } else { 'Görev: hazır' })
         }
     }
     if ($says -eq $true -or ($says -eq 'unknown' -and $fresh)) {
+        $runNow = $false
         return [pscustomobject]@{
-            Installed = $true; Visible = $false; Running = $true; Fresh = $fresh
-            Text = 'Zamanlanmış görev: ÇALIŞIYOR (SYSTEM hesabında, bu oturumda görünmüyor)'
-            Color = 'Ok'
+            Installed = $true; Visible = $false; Running = $runNow; Fresh = $fresh
+            Text = $(if ($runNow) { 'Zamanlanmış görev: ÇALIŞIYOR (SYSTEM hesabında, bu oturumda görünmüyor)' } else { 'Zamanlanmış görev: kurulu, şu an çalışmıyor (son kontrol ' + [int][math]::Floor($ageMin) + ' dk önce - SYSTEM hesabında)' })
+            Color = $(if ($runNow) { 'Ok' } else { 'Warn' })
+            Short = $(if ($runNow) { 'Görev: çalışıyor' } else { 'Görev: hazır' })
         }
     }
     return [pscustomobject]@{
         Installed = $false; Visible = $true; Running = $false; Fresh = $fresh
-        Text = 'Watchdog: kurulu değil — Install-Host.ps1 ile kurun'
+        Text = 'Watchdog: kurulu değil - Install-Host.ps1 ile kurun'
         Color = 'Bad'
+        Short = 'Görev: kurulu değil'
     }
 }

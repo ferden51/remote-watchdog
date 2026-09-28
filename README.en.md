@@ -156,8 +156,8 @@ what lets the panel and the watchdog be updated independently on two different m
 ## Tests
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-All.ps1        # 118 checks, read-only
-powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\tests\Test-UI.ps1    # 23 checks, WPF
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-All.ps1        # 123 checks, read-only
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\tests\Test-UI.ps1    # 27 checks, WPF
 powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\ui\RemoteWatchdogPanel.ps1 -SelfTest -PreviewPath out.png
 ```
 

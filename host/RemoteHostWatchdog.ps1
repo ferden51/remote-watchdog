@@ -31,6 +31,7 @@ param(
     [switch]$ForceReboot,
     [switch]$RepairNetwork,
     [switch]$RepairWatch,
+    [switch]$Version,
     [int]$Rung = 0
 )
 
@@ -43,6 +44,9 @@ foreach ($lib in @('Common.ps1', 'Contract.ps1')) {
     . $libPath
 }
 $ScriptPath = $PSCommandPath
+$VersionFile = Join-Path (Split-Path -Parent (Split-Path -Parent $ScriptPath)) 'VERSION'
+$script:AppVersion = '0.0.0'
+if (Test-Path -LiteralPath $VersionFile) { try { $script:AppVersion = ([System.IO.File]::ReadAllText($VersionFile)).Trim() } catch { } }
 $BaseDir = Join-Path $env:ProgramData 'RemoteWatchdog'
 $LogFile = Join-Path $BaseDir 'host-watchdog.log'
 $StateFile = Join-Path $BaseDir 'host-state.json'
@@ -1125,6 +1129,7 @@ function Write-JsonStatus {
         generated = (Get-Date).ToString('o')
         host = $env:COMPUTERNAME
         user = $env:USERNAME
+        version = $script:AppVersion
         role = 'host'
         ok = $AllOk
         badCount = $BadCount
@@ -1294,6 +1299,7 @@ function Show-Status {
 }
 
 if ($Status) { Show-Status; exit 0 }
+if ($Version) { Write-Host ('RemoteHostWatchdog ' + $script:AppVersion); exit 0 }
 if ($Uninstall) { Uninstall-Watchdog; exit 0 }
 if ($AddHoliday) { $global:cfg = Get-Config; Add-HolidayToFile -Dates (@($AddHoliday -split '[,;\s]+' | Where-Object { $_ })); exit 0 }
 if ($RemoveHoliday) { $global:cfg = Get-Config; Remove-HolidayFromFile -Dates (@($RemoveHoliday -split '[,;\s]+' | Where-Object { $_ })); exit 0 }

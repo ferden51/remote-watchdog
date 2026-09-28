@@ -24,7 +24,8 @@ param(
     [string]$PreviewPath = '',
     [switch]$ShowWindow,
     [switch]$ClickTest,
-    [switch]$RepairTest
+    [switch]$RepairTest,
+    [switch]$Version
 )
 
 $ErrorActionPreference = 'Continue'
@@ -53,6 +54,10 @@ $ClientLog = Join-Path $ClientData 'client-watchdog.log'
 $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $RunName = 'RemoteWatchdogTray'
 $ShowRequest = Join-Path $env:TEMP 'RemoteWatchdog-show.flag'
+$VersionFile = Join-Path $Root 'VERSION'
+$script:AppVersion = '0.0.0'
+if (Test-Path -LiteralPath $VersionFile) { try { $script:AppVersion = ([System.IO.File]::ReadAllText($VersionFile)).Trim() } catch { } }
+if ($Version) { Write-Host ('RemoteWatchdogPanel ' + $script:AppVersion); exit 0 }
 
 $script:Win = $null
 $script:Icon = $null
@@ -738,7 +743,7 @@ $Xaml = @'
         </ScrollViewer>
 
         <!-- AYARLAR -->
-        <ScrollViewer x:Name="PageSettings" VerticalScrollBarVisibility="Auto" Padding="22,20" Visibility="Collapsed">
+        <ScrollViewer x:Name="PageSettings" VerticalScrollBarVisibility="Auto" Padding="14,6" Visibility="Collapsed">
           <StackPanel>
               <TextBlock Text="Ayarlar" Style="{StaticResource H1}" Margin="0,0,0,4"/>
               <TextBlock Text="Kaydettiginizde config.json guncellenir; bir sonraki denetimde gecerli olur." Style="{StaticResource Small}" Margin="0,0,0,6"/>
@@ -751,6 +756,7 @@ $Xaml = @'
               <Button x:Name="BtnReload" Content="Formu yenile" Style="{StaticResource Btn}"/>
               <TextBlock x:Name="TxtSaved" Text="" Style="{StaticResource Small}" VerticalAlignment="Center" Margin="14,0,0,0" Foreground="{StaticResource Ok}"/>
             </StackPanel>
+            <TextBlock x:Name="TxtVersion" Text="" Style="{StaticResource Small}" Margin="0,14,0,0" Foreground="{StaticResource Mut}"/>
           </StackPanel>
         </ScrollViewer>
 
@@ -1506,10 +1512,32 @@ function Update-Overview {
         } else { [void]$env.Add('last-run.json bulunamadi: ' + $HostJson) }
         (El $script:Win 'TxtEnv').Text = ($env -join "`n")
 
-        (El $script:Win 'TxtBlackout').Text = $(if ($hj -and $hj.inBlackout) { 'Blackout: AKTIF' } else { 'Blackout: kapali' })
-        (El $script:Win 'TxtTaskState').Text = 'Gorev: ' + $(if ($hj) { $hj.taskState } else { 'yok' })
+        # Blackout: ayar acik mi + su an aktif mi ayri gosterilir ("kapali" belirsizligi olmasin)
+        $cfgH = Get-HostConfig
+        $boOn = $true
+        if ($cfgH.PSObject.Properties.Name -contains 'BlackoutEnabled') { $boOn = [bool]$cfgH.BlackoutEnabled }
+        $bs = 18; $be = 8
+        if ($hj -and $hj.config) {
+            if ($hj.config.PSObject.Properties.Name -contains 'blackoutStart') { $bs = $hj.config.blackoutStart }
+            if ($hj.config.PSObject.Properties.Name -contains 'blackoutEnd') { $be = $hj.config.blackoutEnd }
+        }
+        $haftaSonu = ''
+        if ($hj -and $hj.config -and @($hj.config.blackoutFullDays).Count) { $haftaSonu = ' · hafta sonu tam gün' }
+        $boTxt = if (-not $boOn) { 'Blackout: devre dışı' }
+        elseif ($hj -and $hj.inBlackout) { 'Blackout: etkin · şu an AKTİF (' + $bs + ':00→' + $be + ':00)' }
+        else { 'Blackout: etkin · şu an yok (' + $bs + ':00→' + $be + ':00)' + $haftaSonu + ')' }
+        (El $script:Win 'TxtBlackout').Text = $boTxt
+        (El $script:Win 'TxtBlackout').ToolTip = 'Blackout = zorla kapatma + restart penceresi. Etkin/kapali ayarı, "şu an AKTİF/yok" ise içinde bulunulan zamanı gösterir. Ayarlar: BlackoutStart/BlackoutEnd, BlackoutFullDays.'
+        $stSide = Get-WatchdogTaskState
+        (El $script:Win 'TxtTaskState').Text = [string]$stSide.Short
+        (El $script:Win 'TxtTaskState').ToolTip = [string]$stSide.Text
         $up = '-'
-        if ($hj) { $up = ([math]::Round(([double]$hj.uptimeMinutes) / 60.0, 1)).ToString() + ' sa' }
+        if ($hj) {
+            $up = ([math]::Round(([double]$hj.uptimeMinutes) / 60.0, 1)).ToString() + ' sa'
+            $bootTxt = ''
+            try { $bootTxt = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToString('dd.MM HH:mm') } catch { }
+            if ($bootTxt) { $up += ' (açılış ' + $bootTxt + ')' }
+        }
         (El $script:Win 'TxtUptime').Text = 'Uptime: ' + $up
 
         try { Update-ActionBarColors } catch { Write-Trace ('genel durum renk guncelleme hatasi: ' + $_.Exception.Message) }
@@ -1630,14 +1658,42 @@ function Update-ActionBarColors {
 }
 
 function Update-Log {
-    $lines = New-Object System.Collections.ArrayList
-    foreach ($lf in @($HostLog, $ClientLog)) {
-        if (Test-Path -LiteralPath $lf) {
-            [void]$lines.Add('===== ' + $lf + ' =====')
-            foreach ($l in @(Get-Content -LiteralPath $lf -Tail 200 -ErrorAction SilentlyContinue)) { [void]$lines.Add([string]$l) }
+    <#  Host + istemci gunlukleri TEK listede, zaman damgasi sirali birlestirilir (blok blok degil). #>
+    $entries = New-Object System.Collections.ArrayList
+    $sources = @(
+        @{ Path = $HostLog; Tag = 'host' },
+        @{ Path = $ClientLog; Tag = 'istemci' }
+    )
+    $counts = @{}
+    foreach ($src in $sources) {
+        if (-not (Test-Path -LiteralPath $src.Path)) { continue }
+        $lastTs = [datetime]::MinValue
+        $seq = 0
+        foreach ($l in @(Get-Content -LiteralPath $src.Path -Tail 300 -ErrorAction SilentlyContinue)) {
+            $txt = [string]$l
+            $ts = $lastTs
+            if ($txt -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') {
+                try { $ts = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) } catch { $ts = $lastTs }
+            }
+            if ($ts -gt $lastTs) { $lastTs = $ts }
+            [void]$entries.Add([pscustomobject]@{ Ts = $ts; Tag = $src.Tag; Seq = $seq; Text = $txt })
+            $seq++
         }
+        $counts[$src.Tag] = $seq
     }
-    if ($lines.Count -eq 0) { [void]$lines.Add('(log dosyasi yok)') }
+    $lines = New-Object System.Collections.ArrayList
+    if ($entries.Count -eq 0) {
+        [void]$lines.Add('(log dosyasi yok)')
+    } else {
+        $sorted = @($entries | Sort-Object -Property Ts, Tag, Seq)
+        $cap = 400
+        $start = [math]::Max(0, $sorted.Count - $cap)
+        $shown = @($sorted[$start..($sorted.Count - 1)])
+        [void]$lines.Add(('===== ' + (Get-Date).ToString('dd.MM.yyyy HH:mm:ss') + '  |  zaman sıralı birleşik görünüm  |  ' + $shown.Count + ' satır' +
+            $(if ($start -gt 0) { ' (son ' + $cap + ')' } else { '' }) +
+            '  |  host=' + [int]$counts['host'] + ' istemci=' + [int]$counts['istemci'] + ' ====='))
+        foreach ($e in $shown) { [void]$lines.Add('[' + $e.Tag + '] ' + $e.Text) }
+    }
     (El $script:Win 'TxtLog').Text = ($lines -join "`n")
     (El $script:Win 'TxtLog').ScrollToEnd()
 }
@@ -2202,6 +2258,7 @@ function New-TrayIcon {
     $script:Icon = New-Object System.Windows.Forms.NotifyIcon
     $script:Icon.ContextMenuStrip = $ctx
     $script:Icon.Visible = $true
+    $script:Icon.Text = ('RemoteWatchdog ' + $script:AppVersion)
     Refresh-Icon
     $script:Icon.add_MouseDoubleClick({ Invoke-TrayAction 'panel' })
     $script:TrayItems = $ctx.Items
@@ -2379,6 +2436,8 @@ Write-Trace ('bildirim modu: ' + $script:BalloonMode + ' | sessiz: ' + $script:S
 New-TrayIcon
 Set-WindowIcon
 Wire-UI
+$vt = El $script:Win 'TxtVersion'
+if ($vt) { $vt.Text = ('RemoteWatchdog ' + $script:AppVersion + '  -  panel/host surumu ayni olmali; guncellemede kurulumu da yenileyin') }
 Show-Page 'conn'
 Update-Connections
 Update-Overview
