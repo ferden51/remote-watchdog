@@ -2390,7 +2390,8 @@ function Invoke-TrayAction {
     switch ($Key) {
         'panel' { $script:Win.Show(); $script:Win.Activate(); Show-Page 'conn'; Update-Connections }
         'panelstart' {
-            Invoke-Script -Path $ScriptPath -WindowStyle Normal
+            # Konsol penceresi acilmasin: Normal yerine Hidden (acik konsol kapatilinca program da kapaniyordu)
+            Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-STA', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ScriptPath + '"')) -WindowStyle Hidden | Out-Null
             Start-Sleep 3
             Update-Connections
         }
@@ -2594,12 +2595,14 @@ function Wire-UI {
         })
     # Dispatcher uzerinde tek merkezî hata yakalayici (Window'da add_DispatcherUnhandledException
     # metodu YOKTUR; Dispatcher.UnhandledException kullanilir). Dosya sonunda tekrar KAYDEDILMEZ.
-    try { $script:Win.Dispatcher.UnhandledException.Add({
-                param($s, $e)
-                Write-Trace ('YAKALANAMAYAN HATA: ' + $e.Exception.GetType().Name + ' - ' + $e.Exception.Message + ' | iz: ' + (($e.Exception.StackTrace -split "`r?`n" | Select-Object -First 3) -join ' <- '))
-                [System.Windows.MessageBox]::Show('Panelde bir hata olustu: ' + $e.Exception.Message + "`n`nAyrinti: C:\ProgramData\RemoteWatchdog\panel.log", 'RemoteWatchdog') | Out-Null
-                $e.Handled = $true
-            })
+    try {
+        $handler = [System.Windows.Threading.DispatcherUnhandledExceptionEventHandler] {
+            param($s, $e)
+            Write-Trace ('YAKALANAMAYAN HATA: ' + $e.Exception.GetType().Name + ' - ' + $e.Exception.Message + ' | iz: ' + (($e.Exception.StackTrace -split "`r?`n" | Select-Object -First 3) -join ' <- '))
+            try { [System.Windows.MessageBox]::Show('Panelde bir hata olustu: ' + $e.Exception.Message + "`n`nAyrinti: C:\ProgramData\RemoteWatchdog\panel.log", 'RemoteWatchdog') | Out-Null } catch { }
+            $e.Handled = $true
+        }
+        $script:Win.Dispatcher.add_UnhandledException($handler)
     } catch { Write-Trace ('dispatcher hata yakalayici kurulamadi: ' + $_.Exception.Message) }
     $script:ShowTimer.Start()
     $script:HelpTimer = $null
@@ -2917,4 +2920,8 @@ if ($SelfTest) {
 }
 
 if ($TrayOnly -or $script:Background) { $script:Win.Hide() } else { $script:Win.Show() }
-try { [System.Windows.Threading.Dispatcher]::Run() } finally { try { $script:Mutex.ReleaseMutex() } catch { } }
+# Son pencere kapansa bile tepsi/izleme ayakta kalsin (kapalisa program kapanirdi)
+try { $script:Win.ShutdownMode = [System.Windows.ShutdownMode]::OnExplicitShutdown } catch { }
+try { [System.Windows.Threading.Dispatcher]::Run() }
+catch { Write-Trace ('dispatcher durdu: ' + $_.Exception.Message) }
+finally { try { $script:Mutex.ReleaseMutex() } catch { } }
