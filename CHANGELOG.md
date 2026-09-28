@@ -26,6 +26,11 @@ panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürü
   sessiz modda susar. Ayarlar → Bildirim'den kapatılabilir, `SesliBildirimEdge` doğal sesi kapatır.
 - **Wire-UI koruması:** pencere oluşmadan çağrılırsa kriptik hata yerine net şekilde atlanır
   (test ortamında görülen `Dispatcher` null hatası).
+- **Tepsi menüsünden panel açılışı:** "Paneli başlat" `-WindowStyle Normal` ile çalıştırıyordu;
+  ekranda ikinci bir komut penceresi açılıyor, kapatılınca program da kapanıyordu → gizli başlatma.
+- **Panel erken kapanması:** `ShutdownMode=OnExplicitShutdown` yapıldı; son pencere kapansa bile
+  tepsi ve izleme ayakta kalır. Ayrıca arayüzdispatcher hata yakalayıcısı `add_UnhandledException`
+  ile kuruluyor (`.UnhandledException.Add(...)` PowerShell'de null dönüyordu ve iz bırakmıyordu).
 
 ### Düzeltilen
 - **IP erişimi probu tek adrese bakıyordu:** kurumsal duvarda `1.1.1.1` kapalıysa satır sürekli
