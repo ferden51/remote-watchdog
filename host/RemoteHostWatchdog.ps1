@@ -1377,29 +1377,26 @@ function Get-ProbeState {
 function Save-ProbeState {
     <#
         Sonucu ve zamani yazar; -Beat ile "yoklama calisiyor" log zamani da guncellenir.
-        Atomik yazar (gecici dosya + tasima) ve birkac kez dener: es zamanli yoklamalarda
-        dosya kilitlenip yazma sessizce basarisiz oldugu icin (beat hic guncellenmiyordu).
+        Dogrudan yazar; es zamanli yoklamalarda nadiren olusabilen yazma hatasinda birkac kez
+        tekrar dener ve sonunda gunluk satirina yazar (sessizce yutmaz).
     #>
     param([string]$Last, [switch]$Beat)
     $f = Join-Path $BaseDir 'probe-state.json'
-    try {
-        if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
-        $old = Get-ProbeStateInfo
-        $beat = (Get-Date).ToString('o')
-        if ($old -and ($old.PSObject.Properties.Name -contains 'beat') -and $old.beat -and -not $Beat) { $beat = [string]$old.beat }
-        $json = [ordered]@{ last = $Last; at = (Get-Date).ToString('o'); beat = $beat } | ConvertTo-Json
-        for ($i = 0; $i -lt 4; $i++) {
-            $tmp = $f + '.' + $PID + '.tmp'
-            try {
-                Set-Content -LiteralPath $tmp -Value $json -Encoding UTF8 -ErrorAction Stop
-                Move-Item -LiteralPath $tmp -Destination $f -Force -ErrorAction Stop
-                return
-            } catch {
-                try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }
-                Start-Sleep -Milliseconds (120 * ($i + 1))
-            }
+    $old = Get-ProbeStateInfo
+    # DİKKAT: değişken adı $beatDeger olmalı; PowerShell 5.1'de $beat/$Beat farkı yok sayılır
+    # ("-not $Beat" ifadesi yerel $beat değişkenine baglanip hata veriyordu).
+    $beatDeger = (Get-Date).ToString('o')
+    if ($old -and ($old.PSObject.Properties.Name -contains 'beat') -and $old.beat -and (-not $Beat)) { $beatDeger = [string]$old.beat }
+    $json = [ordered]@{ last = $Last; at = (Get-Date).ToString('o'); beat = $beatDeger } | ConvertTo-Json
+    for ($i = 0; $i -lt 3; $i++) {
+        try {
+            Set-Content -LiteralPath $f -Value $json -Encoding UTF8 -ErrorAction Stop
+            return
+        } catch {
+            Start-Sleep -Milliseconds (150 * ($i + 1))
         }
-    } catch { }
+    }
+    Write-Log 'WARN' 'probe-state.json yazilamadi (dosya kilitli olabilir)'
 }
 
 function Test-ProbeBeatDue {

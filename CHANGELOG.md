@@ -12,6 +12,10 @@ panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürü
   Panel günlük sekmesi `RichTextBox`'a geçti (satır bazlı renk), konsol çıktısı da aynı kuralı kullanıyor.
 - **Hızlı yoklama izi:** yoklama artık "çalışıyor" satırını 10 dakikada bir yazar ve
   `probe-state.json` dosyasını her koşuda günceller (yoklamanın çalıştığı görülebilir olsun diye).
+- **Düzeltilen**
+- **probe-state hiç yazılmıyordu:** `Save-ProbeState` içinde PowerShell 5.1'in `$beat`/`$Beat`
+  isim çakışması (`-not $Beat` yerel `$beat` değişkenine bağlanıyor) hatayı tetikliyor, `catch`
+  yutuyordu → değişken adı ayrıldı, yazma 3 kez yeniden deneniyor ve hata artık günlüğe yazılıyor.
 - **Kullanıcı-seviyesi yedek görev (`RemoteHostWatchdogUser`):** kurumsal yönetim SYSTEM
   görevlerini silerse izleme durmasın diye `-Install` artık kullanıcı görevini de kaydediyor.
   Görev `-UserFallback` ile çalışır: SYSTEM sağlam + veri tazeyken sessiz çıkar, yoksa tam
