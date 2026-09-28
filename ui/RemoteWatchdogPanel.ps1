@@ -782,9 +782,13 @@ $Xaml = @'
             <Button x:Name="BtnLogOpen" Content="Dosyayı aç" Style="{StaticResource Btn}"/>
           </StackPanel>
           <Border Grid.Row="1" Style="{StaticResource CardStyle}" Background="#0C0E11">
-            <TextBox x:Name="TxtLog" Background="Transparent" Foreground="#C9D1D9" BorderThickness="0"
+            <RichTextBox x:Name="TxtLog" Background="Transparent" Foreground="#C9D1D9" BorderThickness="0"
                      FontFamily="Cascadia Mono, Consolas" FontSize="11.5" IsReadOnly="True"
-                     TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+              <RichTextBox.Document>
+                <FlowDocument PageWidth="6000" />
+              </RichTextBox.Document>
+            </RichTextBox>
           </Border>
         </Grid>
       </Grid>
@@ -1672,6 +1676,47 @@ function Update-ActionBarColors {
     }
 }
 
+function Get-LogLineColor {
+    <#
+        Gunluk renk kurali (host konsol ile ayni):
+          yesil   = stabil durum    ([CHECK] TAMAM)
+          kirmizi = hata / sorun    ([WARN], [ALERT], [ERROR], [CHECK] SORUN)
+          mavi    = bilgilendirme   ([INFO], [CHECK] ATLANDI)
+    #>
+    param([string]$Line)
+    $t = [string]$Line
+    if ($t -match '\[(WARN|ALERT|ERROR|FAIL)\]') { return [System.Windows.Media.Brushes]::IndianRed }
+    if ($t -match '\[CHECK\]\s+SORUN') { return [System.Windows.Media.Brushes]::IndianRed }
+    if ($t -match '\[CHECK\]\s+TAMAM') { return [System.Windows.Media.Brushes]::MediumSeaGreen }
+    if ($t -match '\[(INFO|CHECK)\]') { return [System.Windows.Media.Brushes]::CornflowerBlue }
+    if ($t -match '=====') { return [System.Windows.Media.Brushes]::LightGray }
+    return [System.Windows.Media.Brushes]::Gainsboro
+}
+
+function Set-LogText {
+    <#  Renkli gunlugu RichTextBox'a yazar (satir satir, kelime kelime degil). #>
+    param([string[]]$Lines)
+    $tb = El $script:Win 'TxtLog'
+    if (-not $tb) { return }
+    try {
+        $tb.Document.Blocks.Clear()
+        foreach ($l in @($Lines)) {
+            $p = New-Object System.Windows.Documents.Paragraph
+            $r = New-Object System.Windows.Documents.Run([string]$l)
+            $r.Foreground = Get-LogLineColor $l
+            $p.Inlines.Add($r)
+            $tb.Document.Blocks.Add($p) | Out-Null
+        }
+        $tb.ScrollToEnd()
+    } catch { Write-Trace ('renkli gunluk yazilamadi: ' + $_.Exception.Message) }
+}
+
+function Get-LogText {
+    $tb = El $script:Win 'TxtLog'
+    if (-not $tb) { return '' }
+    try { return ([System.Windows.Documents.TextRange]::new($tb.Document.ContentStart, $tb.Document.ContentEnd)).Text } catch { return '' }
+}
+
 function Update-Log {
     <#  Host + istemci gunlukleri TEK listede, zaman damgasi sirali birlestirilir (blok blok degil). #>
     $entries = New-Object System.Collections.ArrayList
@@ -1709,8 +1754,7 @@ function Update-Log {
             '  |  host=' + [int]$counts['host'] + ' istemci=' + [int]$counts['istemci'] + ' ====='))
         foreach ($e in $shown) { [void]$lines.Add('[' + $e.Tag + '] ' + $e.Text) }
     }
-    (El $script:Win 'TxtLog').Text = ($lines -join "`n")
-    (El $script:Win 'TxtLog').ScrollToEnd()
+    Set-LogText -Lines $lines
 }
 
 
@@ -2534,7 +2578,7 @@ function Wire-UI {
             try { $btnReload.Content = 'Formu yenile'; $btnReload.IsEnabled = $true; if ($statusBox) { $statusBox.Foreground = Bx 'Ok' } } catch { }
         })
     (El $script:Win 'BtnLogRefresh').Add_Click({ Update-Log })
-    (El $script:Win 'BtnLogCopy').Add_Click({ try { [System.Windows.Clipboard]::SetText((El $script:Win 'TxtLog').Text) } catch { } })
+    (El $script:Win 'BtnLogCopy').Add_Click({ try { [System.Windows.Clipboard]::SetText((Get-LogText)) } catch { } })
     (El $script:Win 'BtnLogOpen').Add_Click({ if (Test-Path $HostLog) { Start-Process notepad.exe $HostLog } })
     $w.add_Closing({
             param($s, $e)

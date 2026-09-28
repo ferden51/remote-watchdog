@@ -66,6 +66,24 @@ function Test-Admin {
     return (New-Object Security.Principal.WindowsPrincipal $id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Get-LogColor {
+    <#
+        Konsol renk kurali (ayarlar sayfasinda da ayni kural):
+          yesil  = stabil durum   (CHECK TAMAM)
+          kirmizi= hata / sorun   (WARN, ALERT, ERROR, CHECK SORUN)
+          mavi   = bilgilendirme (INFO, CHECK ATLANDI)
+    #>
+    param([string]$Level = 'INFO', [string]$Text = '')
+    $l = ([string]$Level).ToUpperInvariant()
+    if ($l -in @('WARN', 'ALERT', 'ERROR', 'FAIL')) { return 'Red' }
+    if ($l -eq 'CHECK') {
+        if ($Text -match 'TAMAM') { return 'Green' }
+        if ($Text -match 'SORUN') { return 'Red' }
+        return 'Cyan'
+    }
+    return 'Blue'
+}
+
 function Write-Log {
     param([string]$Level = 'INFO', [string]$Message)
     $line = '{0} [{1}] {2}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $Level.ToUpperInvariant(), $Message
@@ -75,7 +93,7 @@ function Write-Log {
         $all = @(Get-Content -LiteralPath $LogFile -Encoding UTF8)
         if ($all.Count -gt 5000) { $all[($all.Count - 4000)..($all.Count - 1)] | Set-Content -LiteralPath $LogFile -Encoding UTF8 }
     } catch { }
-    Write-Host $line
+    Write-Host $line -ForegroundColor (Get-LogColor -Level $Level -Text $Message)
 }
 
 function Get-Config {
@@ -1342,28 +1360,82 @@ function Test-SystemWatchdogActive {
     } catch { return $false }
 }
 
+function Get-ProbeStateInfo {
+    <#  probe-state.json icerigi (nesne veya $null). #>
+    $f = Join-Path $BaseDir 'probe-state.json'
+    if (-not (Test-Path -LiteralPath $f)) { return $null }
+    try { return (Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { return $null }
+}
+
 function Get-ProbeState {
     <#  Hizli yoklamanin sonucu: 'ok' | 'bad' | '' (hic calismadi). #>
-    $f = Join-Path $BaseDir 'probe-state.json'
-    if (-not (Test-Path -LiteralPath $f)) { return '' }
-    try { $j = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json; return [string]$j.last } catch { return '' }
+    $j = Get-ProbeStateInfo
+    if (-not $j) { return '' }
+    return [string]$j.last
 }
 
 function Save-ProbeState {
-    param([string]$Last)
+    <#
+        Sonucu ve zamani yazar; -Beat ile "yoklama calisiyor" log zamani da guncellenir.
+        Atomik yazar (gecici dosya + tasima) ve birkac kez dener: es zamanli yoklamalarda
+        dosya kilitlenip yazma sessizce basarisiz oldugu icin (beat hic guncellenmiyordu).
+    #>
+    param([string]$Last, [switch]$Beat)
     $f = Join-Path $BaseDir 'probe-state.json'
     try {
         if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
-        ([ordered]@{ last = $Last; at = (Get-Date).ToString('o') } | ConvertTo-Json) | Set-Content -LiteralPath $f -Encoding UTF8
+        $old = Get-ProbeStateInfo
+        $beat = (Get-Date).ToString('o')
+        if ($old -and ($old.PSObject.Properties.Name -contains 'beat') -and $old.beat -and -not $Beat) { $beat = [string]$old.beat }
+        $json = [ordered]@{ last = $Last; at = (Get-Date).ToString('o'); beat = $beat } | ConvertTo-Json
+        for ($i = 0; $i -lt 4; $i++) {
+            $tmp = $f + '.' + $PID + '.tmp'
+            try {
+                Set-Content -LiteralPath $tmp -Value $json -Encoding UTF8 -ErrorAction Stop
+                Move-Item -LiteralPath $tmp -Destination $f -Force -ErrorAction Stop
+                return
+            } catch {
+                try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }
+                Start-Sleep -Milliseconds (120 * ($i + 1))
+            }
+        }
     } catch { }
 }
 
+function Test-ProbeBeatDue {
+    <#  "Yoklama calisiyor" logu 10 dakikada bir yazilsin mi? #>
+    $j = Get-ProbeStateInfo
+    if (-not $j -or -not ($j.PSObject.Properties.Name -contains 'beat') -or -not $j.beat) { return $true }
+    try { return (((Get-Date) - [datetime]::Parse([string]$j.beat, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -ge 10) } catch { return $true }
+}
+
+function Test-CycleRunning {
+    <#  Su an baska bir tam dongu calisiyor mu? (ayni anda tek dongu kurali) #>
+    try {
+        $m = New-Object System.Threading.Mutex($false, 'Local\RemoteWatchdogCycle')
+        $got = $m.WaitOne(0)
+        if ($got) { $m.ReleaseMutex() }
+        $m.Dispose()
+        return (-not $got)
+    } catch { return $false }
+}
+
 function Start-FullCycle {
-    <#  Tam donguyu tetikler: once kullanici yedegi, sonra SYSTEM gorevi, yoksa dogrudan calisir. #>
-    foreach ($tn in @('RemoteHostWatchdogUser', $TaskName)) {
-        try { Start-ScheduledTask -TaskName $tn -ErrorAction Stop; return $tn } catch { }
-    }
-    return ''
+    <#
+        Tam donguyu baslatir. Zamanlanmis gorev yerine gizli ayri surec kullanilir: gorev
+        icinden Start-ScheduledTask cagrisi bu ortamda takilip dongunun hic baslamamasina
+        yol aciyordu. Zaten bir dongu calisiyorsa dokunmaz.
+    #>
+    if (Test-CycleRunning) { return 'zaten calisiyor' }
+    $hiddenVbs = Join-Path (Split-Path -Parent $ScriptPath) 'Start-Hidden.vbs'
+    try {
+        if (Test-Path -LiteralPath $hiddenVbs) {
+            Start-Process -FilePath 'wscript.exe' -ArgumentList ('"' + $hiddenVbs + '" "' + $ScriptPath + '" -UserFallback') -WindowStyle Hidden | Out-Null
+        } else {
+            Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath, '-UserFallback') -WindowStyle Hidden | Out-Null
+        }
+        return 'baslatildi'
+    } catch { return ('hata: ' + $_.Exception.Message) }
 }
 
 function Invoke-FastProbe {
@@ -1382,7 +1454,9 @@ function Invoke-FastProbe {
     if (Test-Path -LiteralPath $lr) { try { $raporBozuk = (-not [bool](Get-Content -LiteralPath $lr -Raw -Encoding UTF8 | ConvertFrom-Json).ok) } catch { } }
     $duzeldi = (-not $bad) -and (($prev -eq 'bad') -or $raporBozuk)
     if (-not $bad -and -not $duzeldi) {
-        if ($prev -ne 'ok') { Save-ProbeState 'ok' }
+        $beat = Test-ProbeBeatDue
+        Save-ProbeState 'ok' -Beat:$beat
+        if ($beat) { Write-Log 'INFO' 'hizli yoklama calisiyor (her 1 dk) - ag saglikli' }
         exit 0
     }
     if ($bad) {
@@ -1394,8 +1468,7 @@ function Invoke-FastProbe {
         Write-Log 'INFO' 'hizli yoklama baglanti yeniden geldi -> duzelme kaydi icin tam dongu tetikleniyor'
     }
     $gorev = Start-FullCycle
-    if ($gorev) { exit 0 }
-    $null = Invoke-Watchdog
+    Write-Log 'INFO' ('tam dongu tetikleme sonucu: ' + $gorev)
     exit 0
 }
 
@@ -1468,5 +1541,13 @@ if ($ForceReboot) {
     shutdown.exe /r /t $cfg.RebootDelaySeconds /c 'RemoteHostWatchdog: kullanici restart istedi' 2>&1 | Out-Null
     exit 0
 }
-$null = Invoke-Watchdog
-exit 0
+    $cycleLock = $null
+    try { $cycleLock = New-Object System.Threading.Mutex($false, 'Local\RemoteWatchdogCycle') } catch { }
+    if ($cycleLock) {
+        $owns = $false
+        try { $owns = $cycleLock.WaitOne(0) } catch { $owns = $true }
+        if (-not $owns) { Write-Log 'INFO' 'baska bir tam dongu calisiyor, bu calisma atlandi'; exit 0 }
+    }
+    $null = Invoke-Watchdog
+    if ($cycleLock) { try { $cycleLock.ReleaseMutex() } catch { } }
+    exit 0

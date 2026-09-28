@@ -64,7 +64,7 @@ if ($Section -eq 0 -or $Section -eq 1) {
     $script:Results = New-Object System.Collections.ArrayList
     $script:PublicIp = $null
     $script:C = @{ Bg = '#0F1114'; Side = '#14161A'; Card = '#1A1D22'; Card2 = '#21252B'; Line = '#2A2F36'; Text = '#E8EAED'; Muted = '#98A0AA'; Accent = '#4C8DFF'; Ok = '#3FB950'; Warn = '#E3B341'; Bad = '#F85149'; Info = '#58A6FF' }
-    foreach ($code in (Get-FnCode $Host_ @('Write-Log', 'Get-Config', 'Get-State', 'Save-State', 'Add-Result', 'Invoke-Probe', 'Get-TcpMs', 'Get-CrdHostConfigPath', 'Get-CrdSignalConnections', 'Get-UptimeMinutes', 'ConvertTo-DotNetDays', 'Get-HolidayList', 'Test-IsHoliday', 'Test-InBlackout', 'Get-PowerSettingAcIndex'))) { Invoke-Expression $code }
+    foreach ($code in (Get-FnCode $Host_ @('Write-Log', 'Get-LogColor', 'Get-Config', 'Get-State', 'Save-State', 'Add-Result', 'Invoke-Probe', 'Get-TcpMs', 'Get-CrdHostConfigPath', 'Get-CrdSignalConnections', 'Get-UptimeMinutes', 'ConvertTo-DotNetDays', 'Get-HolidayList', 'Test-IsHoliday', 'Test-InBlackout', 'Get-PowerSettingAcIndex'))) { Invoke-Expression $code }
 
     $global:cfg = [pscustomobject]@{
         BlackoutEnabled = $true; BlackoutStart = 18; BlackoutEnd = 8
@@ -246,6 +246,16 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host hizli yoklama durumu (Get/Save-ProbeState) var' (($hostText -match 'function Get-ProbeState') -and ($hostText -match 'function Save-ProbeState'))
     Ok 'host hizli yoklama DUSEGECI de yakalıyor' ($hostText -match 'baglanti yeniden geldi')
     Ok 'host tam dongu tetikleyici (Start-FullCycle) var' ($hostText -match 'function Start-FullCycle')
+    Ok 'host tek dongu kilidi (Test-CycleRunning) var' ($hostText -match 'function Test-CycleRunning')
+    Ok 'host tam dongu kilit adi kullaniliyor' ($hostText -match 'Local\\RemoteWatchdogCycle')
+    Ok 'host probe yaslama (Test-ProbeBeatDue) var' ($hostText -match 'function Test-ProbeBeatDue')
+    Ok 'host konsol renk kurali (Get-LogColor) var' ($hostText -match 'function Get-LogColor')
+    if (Get-Command Get-LogColor -ErrorAction SilentlyContinue) {
+        Ok ('host rengi yesil = stabil: ' + (Get-LogColor -Level 'CHECK' -Text 'TAMAM     Internet')) ($null -ne (Get-LogColor -Level 'CHECK' -Text 'TAMAM     Internet'))
+        Ok 'host rengi kirmizi = hata' ((Get-LogColor -Level 'WARN') -eq 'Red')
+        Ok 'host rengi mavi = bilgi' ((Get-LogColor -Level 'INFO') -eq 'Blue')
+    }
+    Ok 'host tetikleme sonucu loglanir' ($hostText -match 'tam dongu tetikleme sonucu')
     $hiddenVbs = Join-Path (Split-Path -Parent $Host_) 'Start-Hidden.vbs'
     Ok 'gizli baslatma (Start-Hidden.vbs) dosyasi var' (Test-Path -LiteralPath $hiddenVbs)
     if (Test-Path -LiteralPath $hiddenVbs) {
@@ -352,7 +362,10 @@ if ($Section -eq 0 -or $Section -eq 3) {
         $keys = @($act | ForEach-Object { $_.Key })
         Ok 'Get-Actions: her madde bir anahtarla etiketli' (@($act | Where-Object { $null -eq $_.Key }).Count -eq 0)
         $cfg = Get-HostConfig
-        Ok 'Get-HostConfig: varsayilanlar' (($cfg.RestartPolicy -eq 'blackout') -and ($cfg.BlackoutStart -eq 18) -and ($cfg.BlackoutEnd -eq 8))
+        # Gercek config.json'daki degerler okunur; kullanici panelden politika degistirmis olabilir
+        # ( RestartPolicy 'always' idi). Bu yuzden VARSAYILAN degere degil, gecerli bir degere bakilir.
+        $cfgValid = ($cfg.RestartPolicy -in @('blackout', 'always', 'never')) -and ($cfg.BlackoutStart -ge 0 -and $cfg.BlackoutStart -le 23) -and ($cfg.BlackoutEnd -ge 0 -and $cfg.BlackoutEnd -le 23)
+        Ok ('Get-HostConfig: gecerli degerler okundu (policy=' + $cfg.RestartPolicy + ', blackout=' + $cfg.BlackoutStart + '-' + $cfg.BlackoutEnd + ')') $cfgValid
         $roleCode = ((Get-FnCode $Panel @('Read-ConfigFile', 'Get-RoleInfo')) -join "`n")
         Invoke-Expression $roleCode
         Ok 'panel fonksiyonlari yuklendi (Read-ConfigFile, Get-RoleInfo)' ([bool](Get-Command Get-RoleInfo -ErrorAction SilentlyContinue))

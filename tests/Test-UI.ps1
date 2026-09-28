@@ -154,7 +154,7 @@ $mx = [regex]::Match($panelText, "(?s)\`$Xaml = @'\r?\n(.*?)\r?\n'@")
 if (-not $mx.Success) { Ok 'panel XAML bulundu' $false } else {
     Ok 'panel XAML bulundu' $true
     try { $script:Win = [Windows.Markup.XamlReader]::Parse($mx.Groups[1].Value) } catch { Ok 'XAML ayrıştırıldı' $false $_.Exception.Message }
-    $need = @('Bx', 'El', 'Write-Trace', 'Get-Json', 'Read-ConfigFile', 'Get-HostConfig', 'Get-ClientDefaults', 'Get-CurrentValues', 'ConvertTo-DayNames', 'New-Toggle', 'New-TextBox', 'New-Segmented', 'New-SettingRow', 'Add-ActionBar', 'Get-WatchdogTaskState', 'Update-ActionBarColors', 'Resolve-CheckInterval', 'Build-Settings', 'Invoke-SettingsAction', 'Invoke-TrayAction', 'Get-Actions', 'Update-Connections', 'Update-Overview', 'Update-Actions', 'Update-Log', 'Refresh-Icon', 'Get-StatusInfo', 'Show-Balloon', 'Get-BalloonMode', 'Set-BalloonMode', 'Invoke-Script', 'Update-Countdown', 'Get-NextCheck', 'Show-RepairWindow', 'Close-RepairWindow')
+    $need = @('Bx', 'El', 'Write-Trace', 'Get-Json', 'Read-ConfigFile', 'Get-HostConfig', 'Get-ClientDefaults', 'Get-CurrentValues', 'ConvertTo-DayNames', 'New-Toggle', 'New-TextBox', 'New-Segmented', 'New-SettingRow', 'Add-ActionBar', 'Get-WatchdogTaskState', 'Update-ActionBarColors', 'Resolve-CheckInterval', 'Build-Settings', 'Invoke-SettingsAction', 'Invoke-TrayAction', 'Get-Actions', 'Update-Connections', 'Update-Overview', 'Update-Actions', 'Update-Log', 'Set-LogText', 'Get-LogText', 'Get-LogLineColor', 'Refresh-Icon', 'Get-StatusInfo', 'Show-Balloon', 'Get-BalloonMode', 'Set-BalloonMode', 'Invoke-Script', 'Update-Countdown', 'Get-NextCheck', 'Show-RepairWindow', 'Close-RepairWindow')
     $script:TaskCache = $null
     $script:TaskCacheUntil = [datetime]::MinValue
     foreach ($code in (Get-FnCode $PanelPath $need)) { Invoke-Expression $code }
@@ -238,13 +238,22 @@ if (-not $mx.Success) { Ok 'panel XAML bulundu' $false } else {
     ) | Set-Content -LiteralPath $ClientLog -Encoding UTF8
     $err5 = $null
     try { Update-Log } catch { $err5 = $_ }
-    $logTxt = [string](El $script:Win 'TxtLog').Text
+    $logTxt = Get-LogText
     $body = @($logTxt -split "`n" | Where-Object { $_ -match '^\[(host|istemci)\]' })
     $order = @($body | ForEach-Object { [regex]::Match($_, '\[(host|istemci)\] \d{4}-\d{2}-\d{2} (\d{2}:\d{2}:\d{2})').Groups[2].Value } | Where-Object { $_ })
     $sortedOk = $true
     for ($i = 1; $i -lt $order.Count; $i++) { if ($order[$i] -lt $order[$i - 1]) { $sortedOk = $false } }
     Ok ('günlük birleşik ve zaman sıralı (' + $order.Count + ' satır: ' + ($order -join ' < ') + ')' + $(if ($err5) { ': ' + $err5.Exception.Message } else { '' })) ((-not $err5) -and ($order.Count -eq 5) -and $sortedOk)
     Ok ('her satır kaynağı etiketli (host/istemci)') (@($body | Where-Object { $_ -match '\[host\]' }).Count -eq 2 -and @($body | Where-Object { $_ -match '\[istemci\]' }).Count -eq 3)
+    # Renk kurali: yesil=TAMAM, kirmizi=WARN/ALERT/SORUN, mavi=INFO
+    $cInfo = (Get-LogLineColor '2026-09-28 08:00:00 [INFO] bilgi').ToString()
+    $cOk = (Get-LogLineColor '2026-09-28 08:00:00 [CHECK] TAMAM     Internet | google204=204').ToString()
+    $cWarn = (Get-LogLineColor '2026-09-28 08:00:00 [WARN] SORUN: ').ToString()
+    $cBad = (Get-LogLineColor '2026-09-28 08:00:00 [CHECK] SORUN     Ag katmani | ip=False').ToString()
+    Ok ('gunluk rengi mavi = bilgi (' + $cInfo + ')') ($cInfo -eq '#FF6495ED')
+    Ok ('gunluk rengi yesil = stabil (' + $cOk + ')') ($cOk -eq '#FF3CB371')
+    Ok ('gunluk rengi kirmizi = hata (' + $cWarn + ')') ($cWarn -eq '#FFCD5C5C')
+    Ok ('gunluk rengi kirmizi = SORUN kontrolu (' + $cBad + ')') ($cBad -eq '#FFCD5C5C')
     Remove-Item -LiteralPath $logDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 

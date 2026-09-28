@@ -138,7 +138,10 @@ restart koşulları (başarısız deneme sayısı, gecikme, minimum uptime, ağ 
 belge koruma anahtarları, Telegram token/chat id, alarm tekrar aralığı, healthchecks adresi, istemci hedefleri.
 Kaydet dediğinde `config.json` güncellenir, bir sonraki denetimde geçerli olur.
 
-**4. Günlük** — host ve istemci loglarının son 120 satırı; *Yenile*, *Log dosyasını aç*, *Tümünü kopyala*,
+**4. Günlük** — host ve istemci loglarının son satırları zaman sıralı birleşik ve **renkli**:
+**yeşil** = stabil durum (`TAMAM`), **kırmızı** = hata/sorun (`WARN`, `ALERT`, `SORUN`),
+**mavi** = bilgilendirme (`INFO`, `ATLANDI`); aynı kural konsol çıktısında da geçerlidir.
+*Yenile*, *Log dosyasını aç*, *Tümünü kopyala*,
 *Teşhis raporu üret*.
 
 
