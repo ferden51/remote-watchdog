@@ -53,6 +53,7 @@ $script:AppVersion = '0.0.0'
 if (Test-Path -LiteralPath $VersionFile) { try { $script:AppVersion = ([System.IO.File]::ReadAllText($VersionFile)).Trim() } catch { } }
 $BaseDir = Join-Path $env:ProgramData 'RemoteWatchdog'
 $LogFile = Join-Path $BaseDir 'host-watchdog.log'
+$LogDir = Join-Path $BaseDir 'log'
 $StateFile = Join-Path $BaseDir 'host-state.json'
 $ConfigFile = Join-Path $BaseDir 'config.json'
 $TaskName = 'RemoteHostWatchdog'
@@ -84,14 +85,46 @@ function Get-LogColor {
     return 'Blue'
 }
 
+function Remove-OldLogFiles {
+    <#  LogGunDays gunden eski arsivleri siler (sadece rotasyonda calisir, maliyeti dusuk). #>
+    $days = 30
+    try { $days = [int]$global:cfg.LogGunDays } catch { }
+    if ($days -le 0) { return }
+    try {
+        $cut = (Get-Date).AddDays(-$days)
+        foreach ($f in @(Get-ChildItem -LiteralPath $LogDir -Filter 'host-watchdog-*.log' -ErrorAction SilentlyContinue)) {
+            if ($f.LastWriteTime -lt $cut) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+        }
+    } catch { }
+}
+
+function Rotate-LogIfNeeded {
+    <#
+        Gunluk + boyut tabanli rotasyon. Eskiden her satir yaziminda TUM dosya okunup 5000
+        satirda son 4000'e kirpiliyordu: 4400 satir/gun ile yalnizca ~1 gun saklaniyordu.
+        Simdi dosya LogDosyaMB'yi asinca log/ klasorune gun-tarihli arsiv tasinir ve
+        LogGunDays gun eskisi silinir (ayni zamanda her yazimda dosya okunmaz, log ucuzlar).
+    #>
+    $maxBytes = 2MB
+    try { $maxBytes = [int]$global:cfg.LogDosyaMB * 1MB } catch { }
+    if ($maxBytes -lt 256KB) { $maxBytes = 2MB }
+    try {
+        if (-not (Test-Path -LiteralPath $LogFile)) { return }
+        if ((Get-Item -LiteralPath $LogFile).Length -lt $maxBytes) { return }
+        if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Force -Path $LogDir | Out-Null }
+        $arch = Join-Path $LogDir ('host-watchdog-' + (Get-Date).ToString('yyyyMMdd-HHmmss') + '.log')
+        Move-Item -LiteralPath $LogFile -Destination $arch -Force -ErrorAction Stop
+        Remove-OldLogFiles
+    } catch { }
+}
+
 function Write-Log {
     param([string]$Level = 'INFO', [string]$Message)
     $line = '{0} [{1}] {2}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $Level.ToUpperInvariant(), $Message
     try {
         if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
         Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8
-        $all = @(Get-Content -LiteralPath $LogFile -Encoding UTF8)
-        if ($all.Count -gt 5000) { $all[($all.Count - 4000)..($all.Count - 1)] | Set-Content -LiteralPath $LogFile -Encoding UTF8 }
+        Rotate-LogIfNeeded
     } catch { }
     Write-Host $line -ForegroundColor (Get-LogColor -Level $Level -Text $Message)
 }
@@ -131,6 +164,8 @@ function Get-Config {
         NotifyRepeatHours = 4
         SesliBildirim = $true
         SesliBildirimEdge = $true
+        LogGunDays = 30
+        LogDosyaMB = 2
         SesEfektleri = $true
         SesEfektleriVolume = 80
         ForceRestartAlways = $false
@@ -1402,10 +1437,10 @@ function Save-ProbeState {
 }
 
 function Test-ProbeBeatDue {
-    <#  "Yoklama calisiyor" logu 10 dakikada bir yazilsin mi? #>
+    <#  "Yoklama calisiyor" logu 30 dakikada bir yazilsin mi? (gunluk kirliligini onler) #>
     $j = Get-ProbeStateInfo
     if (-not $j -or -not ($j.PSObject.Properties.Name -contains 'beat') -or -not $j.beat) { return $true }
-    try { return (((Get-Date) - [datetime]::Parse([string]$j.beat, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -ge 10) } catch { return $true }
+    try { return (((Get-Date) - [datetime]::Parse([string]$j.beat, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes -ge 30) } catch { return $true }
 }
 
 function Test-CycleRunning {
@@ -1455,7 +1490,7 @@ function Invoke-FastProbe {
     if (-not $bad -and -not $duzeldi) {
         $beat = Test-ProbeBeatDue
         Save-ProbeState 'ok' -Beat:$beat
-        if ($beat) { Write-Log 'INFO' 'hizli yoklama calisiyor (her 1 dk) - ag saglikli' }
+        if ($beat) { Write-Log 'INFO' 'hizli yoklama calisiyor (her 1 dk, gunluk 30 dakikada bir) - ag saglikli' }
         exit 0
     }
     if ($bad) {

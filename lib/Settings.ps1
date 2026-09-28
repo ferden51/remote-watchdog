@@ -60,6 +60,8 @@ function Get-SettingsDefs { return @(
     @{ Sec = 'Bildirim'; Key = 'SesliBildirimEdge'; Title = 'Bulut yedeği (edge-tts; Microsoft ucu kapalıysa üretmez)'; Type = 'bool' }
     @{ Sec = 'Bildirim'; Key = 'SesEfektleri'; Title = 'Film efektleri (hazır wav: net, keskin, parlak)'; Type = 'bool' }
     @{ Sec = 'Bildirim'; Key = 'SesEfektleriVolume'; Title = 'Efekt ses seviyesi (0-100, 0 = efektler kapalı)'; Type = 'int' }
+    @{ Sec = 'Bildirim'; Key = 'LogGunDays'; Title = 'Günlük kaç gün saklansın (0 = sadece mevcut dosya)'; Type = 'int' }
+    @{ Sec = 'Bildirim'; Key = 'LogDosyaMB'; Title = 'Günlük dosyası kaç MB olunca arşivlensin'; Type = 'int' }
 
     @{ Sec = 'TATIL'; Type = 'section' }
     @{ Sec = 'Tatil'; Key = 'HolidayMode'; Title = 'Tatil modu (full = tam blackout)'; Type = 'enum'; Options = @('full', 'default', 'none') }

@@ -4,6 +4,18 @@ Bu dosya sürüm bazlı değişiklikleri tutar. Sürüm numarası depodaki `VERS
 panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürümleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.2.1] - 2026-09-28
+
+### Düzeltilen
+- **Günlük artık sadece ~1 gün tutuyordu:** `Write-Log` her satırda dosyanın tamamını okuyup
+  5000 satırda son 4000'e kırpıyordu; 5 dakikalık döngü + 1 dakikalık yoklama günde ~4400 satır
+  üretiyor, yani tarih penceresi bir güne düşüyordu → **boyut tabanlı rotasyon** (`LogDosyaMB`,
+  varsayılan 2 MB) ve **gün bazlı saklama** (`LogGunDays`, varsayılan 30 gün) eklendi
+  (`log/host-watchdog-<tarih>.log` arşivleri, eski olanlar otomatik silinir). Yan fayda: log yazımı
+  artık her satırda dosyayı okumuyor.
+- **Yoklama günlüğü:** "hizli yoklama çalışıyor" satırı 10 dakikada bir yerine **30 dakikada bir**
+  yazılıyor (günlük kirliliğini azaltır); yoklama yine **her 1 dakikada** çalışır.
+
 ## [1.2.0] - 2026-09-28
 
 ### Eklenen

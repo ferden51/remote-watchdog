@@ -64,7 +64,7 @@ if ($Section -eq 0 -or $Section -eq 1) {
     $script:Results = New-Object System.Collections.ArrayList
     $script:PublicIp = $null
     $script:C = @{ Bg = '#0F1114'; Side = '#14161A'; Card = '#1A1D22'; Card2 = '#21252B'; Line = '#2A2F36'; Text = '#E8EAED'; Muted = '#98A0AA'; Accent = '#4C8DFF'; Ok = '#3FB950'; Warn = '#E3B341'; Bad = '#F85149'; Info = '#58A6FF' }
-    foreach ($code in (Get-FnCode $Host_ @('Write-Log', 'Get-LogColor', 'Get-Config', 'Get-State', 'Save-State', 'Add-Result', 'Invoke-Probe', 'Get-TcpMs', 'Get-CrdHostConfigPath', 'Get-CrdSignalConnections', 'Get-UptimeMinutes', 'ConvertTo-DotNetDays', 'Get-HolidayList', 'Test-IsHoliday', 'Test-InBlackout', 'Get-PowerSettingAcIndex'))) { Invoke-Expression $code }
+    foreach ($code in (Get-FnCode $Host_ @('Write-Log', 'Get-LogColor', 'Rotate-LogIfNeeded', 'Remove-OldLogFiles', 'Get-Config', 'Get-State', 'Save-State', 'Add-Result', 'Invoke-Probe', 'Get-TcpMs', 'Get-CrdHostConfigPath', 'Get-CrdSignalConnections', 'Get-UptimeMinutes', 'ConvertTo-DotNetDays', 'Get-HolidayList', 'Test-IsHoliday', 'Test-InBlackout', 'Get-PowerSettingAcIndex'))) { Invoke-Expression $code }
 
     $global:cfg = [pscustomobject]@{
         BlackoutEnabled = $true; BlackoutStart = 18; BlackoutEnd = 8
@@ -250,6 +250,11 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host tam dongu kilit adi kullaniliyor' ($hostText -match 'Local\\RemoteWatchdogCycle')
     Ok 'host probe yaslama (Test-ProbeBeatDue) var' ($hostText -match 'function Test-ProbeBeatDue')
     Ok 'host konsol renk kurali (Get-LogColor) var' ($hostText -match 'function Get-LogColor')
+    Ok 'host gunluk rotasyonu (Rotate-LogIfNeeded) var' ($hostText -match 'function Rotate-LogIfNeeded')
+    Ok 'host eski gunluk temizligi (Remove-OldLogFiles) var' ($hostText -match 'function Remove-OldLogFiles')
+    Ok 'host gunluk arsiv klasoru (LogDir) tanimli' ($hostText -match "\`$LogDir = Join-Path \`$BaseDir 'log'")
+    Ok 'host LogGunDays varsayilani 30' ($hostText -match '(?m)^\s{8}LogGunDays\s*=\s*30')
+    Ok 'host LogDosyaMB varsayilani 2' ($hostText -match '(?m)^\s{8}LogDosyaMB\s*=\s*2')
     if (Get-Command Get-LogColor -ErrorAction SilentlyContinue) {
         Ok ('host rengi yesil = stabil: ' + (Get-LogColor -Level 'CHECK' -Text 'TAMAM     Internet')) ($null -ne (Get-LogColor -Level 'CHECK' -Text 'TAMAM     Internet'))
         Ok 'host rengi kirmizi = hata' ((Get-LogColor -Level 'WARN') -eq 'Red')

@@ -338,7 +338,7 @@ function Get-HostConfig {
         ServerMode = $true; DisableFastStartup = $true; OfficeSaveBeforeReboot = $true
         OfficeSaveTimeoutSeconds = 120; OfficeAbortRebootIfStillOpen = $true; OfficeAbortRebootIfUnsaved = $true
         TelegramToken = ''; TelegramChatId = ''; HeartbeatUrl = ''; AlertRepeatHours = 12; NotifyRepeatHours = 4
-        SesliBildirim = $true; SesliBildirimEdge = $true
+        SesliBildirim = $true; SesliBildirimEdge = $true; LogGunDays = 30; LogDosyaMB = 2
         SesEfektleri = $true; SesEfektleriVolume = 80
     }
     if (Test-Path -LiteralPath $HostConfig) {

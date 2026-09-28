@@ -233,6 +233,12 @@ Repo **private** olduğu için indirme için GitHub kimlik doğrulaması gerekir
 Kurulumdan sonra: `Get-ScheduledTask RemoteHostWatchdog`, log: `C:\ProgramData\RemoteWatchdog\host-watchdog.log`,
 config: `C:\ProgramData\RemoteWatchdog\config.json`.
 
+**Günlük saklama:** `host-watchdog.log` `LogDosyaMB` (varsayılan 2 MB) dolunca
+`C:\ProgramData\RemoteWatchdog\log\host-watchdog-<tarih>.log` arşivine taşınır; `LogGunDays`
+(varsayılan **30 gün**) günden eski arşivler silinir. Eskiden dosya 5000 satırda kırpılıyordu;
+5 dakikalık döngü + 1 dakikalık yoklama günde ~4400 satır ürettiği için tarih penceresi
+**sadece ~1 güne** düşüyordu. Artık günlerce birikir ve log yazımı her satırda dosyayı okumaz.
+
 **Konsol penceresi çıkmaması:** Windows Terminal varsayılan terminal olduğunda, zamanlanmış görevden
 açılan konsol penceresi Terminal tarafından barındırılır ve `-WindowStyle Hidden` yok sayılır
 (siyah/mavi ekranlar bir gelip bir gider). Bu yüzden kullanıcı görevleri (`RemoteHostWatchdogUser`,
