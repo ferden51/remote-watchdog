@@ -14,7 +14,9 @@ panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürü
 - **Hızlı yoklama (`RemoteHostFastProbe`, `-FastProbe`):** 5 dakikalık döngü sorunu geç fark
   ediyordu → her 1 dakikada hafif ağ yoklaması; sorun görürse tam döngüyü hemen tetikler.
 - **Panel canlı yenileme:** bağlantılar ancak kapatıp açınca güncelleniyordu → `last-run.json`
-  dosya izleyici ile yazıldığı anda yenileniyor (20 sn sayaç yedek).
+  damga yoklaması (1 sn) ile yazıldığı anda yenileniyor (20 sn sayaç yedek). Not: ilk denemede
+  `FileSystemWatcher` kullanıldı, ancak olayları runspace'siz havuz başlığında çalıştırıp süreci
+  çökertiyordu (`PSInvalidOperation`) → yoklamaya dönüldü.
 - **Ayarlar hemen geçerli:** kaydetme artık watchdog görevini tetikliyor; kesinti sırasında
   değiştirilen ayarlar sıradaki döngüyü beklemiyor.
 - **Sesli bildirim (`SesliBildirim`, varsayılan açık):** tüm önemli olaylarda kısa Türkçe anons

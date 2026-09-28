@@ -79,6 +79,7 @@ $script:IntervalCacheMin = 0
 $script:IntervalCacheSrc = ''
 $script:IntervalCacheUntil = [datetime]::MinValue
 $script:ConnSummary = @{ Ok = 0; Bad = 0; Info = 0; LastRun = $null }
+$script:JsonLastWrite = [datetime]::MinValue
 # --- Canli ag onarim izleme (basliktaki "Agi / interneti onar" dugmesi) ---
 $script:RepairRunning = $false
 $script:RepairSawDone = $false
@@ -2437,21 +2438,8 @@ function Wire-UI {
         })
     $script:Timer.Start()
 
-    # last-run.json izleyicisi: watchdog yazdigi anda arayuzu yeniler (20 sn sayaci yedek kalir).
-    # Olaylar arka planda gelir; UI guncellemesi dispatcher uzerinden yapilir.
-    $script:JsonRefresh = {
-        try { $script:Win.Dispatcher.Invoke([System.Action]{ Update-Connections; Update-Overview; Update-Actions; Update-VoiceAlerts; Refresh-Icon }) }
-        catch { Write-Trace ('json izleyici hatasi: ' + $_.Exception.Message) }
-    }
-    try {
-        $script:JsonWatcher = New-Object System.IO.FileSystemWatcher
-        $script:JsonWatcher.Path = $HostData
-        $script:JsonWatcher.Filter = 'last-run.json'
-        $script:JsonWatcher.NotifyFilter = [System.IO.NotifyFilters]::LastWrite
-        $script:JsonWatcher.Add_Changed($script:JsonRefresh)
-        $script:JsonWatcher.Add_Created($script:JsonRefresh)
-        $script:JsonWatcher.EnableRaisingEvents = $true
-    } catch { Write-Trace ('json izleyici kurulamadi: ' + $_.Exception.Message) }
+    # last-run.json damgasi: 1 sn sayaci degisince aninda yeniler (FileSystemWatcher thread
+    # havuzunda runspace'siz calisip sureci olduruyordu - PSInvalidOperation - o yuzden yoklama).
 
     # 1 sn'lik sayac: sonraki otomatik denetimin kalan suresini (sn) gosterir, elle denetleme bitisini yakalar
     $script:Tick = New-Object System.Windows.Threading.DispatcherTimer
@@ -2461,6 +2449,17 @@ function Wire-UI {
                 if ($script:CheckBusy) {
                     if (Test-ManualCheckRunning) { Update-Countdown } else { Complete-ManualCheck }
                 } else { Update-Countdown }
+                try {
+                    $lw = [System.IO.File]::GetLastWriteTime($HostJson)
+                    if ($lw -gt $script:JsonLastWrite) {
+                        $script:JsonLastWrite = $lw
+                        Update-Connections
+                        Update-Overview
+                        Update-Actions
+                        Update-VoiceAlerts
+                        Refresh-Icon
+                    }
+                } catch { Write-Trace ('damga yoklama hatasi: ' + $_.Exception.Message) }
             } catch { Write-Trace ('sayac hatasi: ' + $_.Exception.Message) }
         })
     $script:Tick.Start()

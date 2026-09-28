@@ -244,7 +244,7 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host -FastProbe anahtari var' ($hostText -match '\[switch\]\$FastProbe')
     Ok 'host hizli yoklama karari (Invoke-FastProbe) var' ($hostText -match 'function Invoke-FastProbe')
     Ok "host hizli yoklama gorevi (RemoteHostFastProbe) kuruluyor" ($hostText -match "RemoteHostFastProbe")
-    Ok 'panel last-run.json izleyicisi (FileSystemWatcher) var' ($panelText -match 'FileSystemWatcher')
+    Ok 'panel last-run.json damga yoklamasi (1 sn) var' ($panelText -match 'JsonLastWrite')
     Ok 'panel ayar kaydedince watchdog tetikliyor' ($panelText -match 'Start-ScheduledTask -TaskName \$tn')
     Ok 'panel sesli bildirim (Speak-Text) var' ($panelText -match 'function Speak-Text')
     Ok 'panel ses gecisi izleyici (Update-VoiceAlerts) var' ($panelText -match 'function Update-VoiceAlerts')

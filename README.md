@@ -110,8 +110,8 @@ kurulum her 1 dakikada çalışan hafif bir yoklama da kaydeder (`-FastProbe`). 
 bakar (IP/DNS/HTTPS/sinyal, birkaç saniye); sağlıklıysa sessiz çıkar, sorun görürse tam döngüyü
 hemen tetikler — algılama ~1 dakikaya iner.
 
-**Canlı panel:** `last-run.json` değiştiği anda panel kendini yeniler (dosya izleyici; 20 sn'lik
-sayaç yedekte durur) — kapatıp açmak gerekmez. **Ayarlar kaydedilince** watchdog görevi hemen
+**Canlı panel:** `last-run.json` değiştiği anda panel kendini yeniler (1 sn damga yoklaması;
+20 sn'lik sayaç yedekte durur) — kapatıp açmak gerekmez. **Ayarlar kaydedilince** watchdog görevi hemen
 tetiklenir, yeni ayarlar sıradaki döngüyü beklemez.
 
 **Sesli bildirim:** önemli olaylarda kısa Türkçe anons yapılır — bağlantı sorunu / düzeldi,
