@@ -122,6 +122,7 @@ $script:TtsFix = @{
 $script:SpeechProc = $null
 $script:SpeechText = ''
 $script:SpeechEngine = ''
+$script:SpeechQueue = New-Object System.Collections.ArrayList
 $script:VoiceLast = $null
 $script:VoiceNoTr = $false
 # --- Uzay filmi tarzi hazir ses efektleri (ui\sounds\*.wav); on yuklenir, aninda calar ---
@@ -1444,7 +1445,7 @@ function Invoke-ConnAction {
         'settings' { Show-Page 'settings'; Build-Settings }
         'reboot' {
             $r = [System.Windows.MessageBox]::Show('Makine yeniden baslatilsin mi? Kaydedilmemis belge varsa once kaydedilir.', 'RemoteWatchdog', 'YesNo', 'Question')
-            if ($r -eq 'Yes') { Speak-Text 'Sistem yeniden başlatılıyor.' -Sfx 'reboot'; Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
+            if ($r -eq 'Yes') { Announce-Reboot; Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
         }
         default { }
     }
@@ -2115,7 +2116,7 @@ function Invoke-SettingsAction {
         'openconfig' { if (Test-Path -LiteralPath $HostConfig) { Start-Process notepad.exe $HostConfig } }
         'forcereboot' {
             $r = [System.Windows.MessageBox]::Show('Daima zorla kapatma ACILIR ve makine yeniden baslatilir. Kaydedilmemis belge varsa once kaydedilir. Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Warning')
-            if ($r -eq 'Yes') { Write-ConfigFile -Path $HostConfig -Values @{ ForceRestartAlways = $true }; Speak-Text 'Sistem yeniden başlatılıyor.' -Sfx 'reboot'; Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
+            if ($r -eq 'Yes') { Write-ConfigFile -Path $HostConfig -Values @{ ForceRestartAlways = $true }; Announce-Reboot; Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
         }
         default { }
     }
@@ -2303,6 +2304,45 @@ function Test-EdgeTts {
     return [bool]$script:EdgeOk
 }
 
+function Announce-Reboot {
+    <#
+        Restart anonsu: konusur VE dosyaya yazar (restart paneli de oldurdugu icin anons
+        kaybolmasin; yeni panel acilinda Speak-PendingVoice okuyup konusur).
+    #>
+    param([switch]$NoPending)
+    $txt = 'Sistem yeniden başlatılıyor.'
+    if (-not $NoPending) { Save-PendingVoice -Text $txt -Sfx 'reboot' }
+    Speak-Text $txt -Sfx 'reboot'
+}
+
+function Save-PendingVoice {
+    <#
+        Restart anonsu icin: metin dosyaya yazilir. Restart paneli de oldurdugu icin anons
+        kaybolur; yeni panel acilinda dosyadan okunup konusulur (30 dk'dan eskiyse birakilir).
+    #>
+    param([string]$Text, [string]$Sfx = 'reboot')
+    try {
+        if (-not (Test-Path -LiteralPath $HostData)) { New-Item -ItemType Directory -Force -Path $HostData | Out-Null }
+        ([ordered]@{ text = [string]$Text; sfx = [string]$Sfx; at = (Get-Date).ToString('o') } | ConvertTo-Json) |
+            Set-Content -LiteralPath (Join-Path $HostData 'pending-voice.json') -Encoding UTF8
+    } catch { Write-Trace ('bekleyen anons yazilamadi: ' + $_.Exception.Message) }
+}
+
+function Speak-PendingVoice {
+    <#  Panel acilinda bekleyen reboot anonsunu konusur ve dosyayi siler. #>
+    $f = Join-Path $HostData 'pending-voice.json'
+    if (-not (Test-Path -LiteralPath $f)) { return }
+    $j = $null
+    try { $j = Get-Json $f } catch { }
+    Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+    if (-not $j -or -not $j.text) { return }
+    $ageMin = 999
+    try { $ageMin = ((Get-Date) - [datetime]::Parse([string]$j.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes } catch { }
+    if ($ageMin -gt 30) { Write-Trace ('bekleyen reboot anonsu cok eski (' + [int]$ageMin + ' dk), konusulmadi'); return }
+    Write-Trace ('bekleyen reboot anonsu konusuluyor: ' + $j.text)
+    Speak-Text -Text ([string]$j.text) -Sfx ([string]$j.sfx) -Force
+}
+
 function Stop-Speech {
     if ($script:SpeechTimer) { try { $script:SpeechTimer.Stop() } catch { } }
     if ($script:SpeechPlayer) { try { $script:SpeechPlayer.Stop(); $script:SpeechPlayer.Close() } catch { } }
@@ -2315,6 +2355,31 @@ function Stop-Speech {
     $script:SpeechText = ''
     $script:SpeechEngine = ''
     $script:SpeechBusy = $false
+    Show-NextQueued
+}
+
+function Add-SpeechQueue {
+    <#
+        Konusma sirasinda gelen olayi KUYRUGA alir (ses kaybolmaz).
+        Ayni metin arka arkaya geliyorsa tekilleştirilir (spam olmaz), kuyruk 8 ile sınırlıdır.
+    #>
+    param([string]$Text, [int]$Volume = 100)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    foreach ($q in $script:SpeechQueue) { if ($q.Text -eq $Text) { return $false } }
+    [void]$script:SpeechQueue.Add([pscustomobject]@{ Text = [string]$Text; Volume = $Volume; At = (Get-Date) })
+    while ($script:SpeechQueue.Count -gt 8) { $script:SpeechQueue.RemoveAt(0) }
+    Write-Trace ('anons kuyruga alindi (' + $script:SpeechQueue.Count + ' bekliyor): ' + $Text)
+    return $true
+}
+
+function Show-NextQueued {
+    <#  Konusma bittiğinde sıradaki anonsu okur; kuyruk yoksa çıkar. #>
+    if ($script:SpeechBusy) { return }
+    if ($script:SpeechQueue.Count -eq 0) { return }
+    $item = $script:SpeechQueue[0]
+    $script:SpeechQueue.RemoveAt(0)
+    Start-Sleep -Milliseconds 250
+    Speak-Text -Text $item.Text -Volume $item.Volume
 }
 
 function Start-SpeechPoller {
@@ -2619,6 +2684,9 @@ function Speak-Text {
     $t = ConvertTo-TtsText $Text
     if ([string]::IsNullOrWhiteSpace($t)) { return }
     if ($t.Length -gt 160) { $t = $t.Substring(0, 160) }
+    # Konusma surerken gelen olay: motorlara dusulmez (cakisma/sessiz yutulma olurdu),
+    # kuyruga alinir ve mevcut anons bitince okunur.
+    if ($script:SpeechBusy) { [void](Add-SpeechQueue -Text $t -Volume $Volume); return }
     try {
         if ($cfg.SesliBildirimEdge -ne $false -and (Test-EdgeTts)) {
             if (Speak-EdgeTts -Text $t) { return }
@@ -2661,8 +2729,8 @@ function Update-VoiceAlerts {
         } elseif (-not $snap.Ok -and [int]$snap.Rung -gt [int]$p.Rung) {
             Speak-Text 'Bağlantı onarılıyor.' -Sfx 'repair'
         }
-        if ([int]$snap.ResetPending -eq 1 -and [int]$p.ResetPending -ne 1) { Speak-Text 'Sistem yeniden başlatılıyor.' -Sfx 'reboot' }
-        elseif ($snap.ForceAlways -and -not $p.ForceAlways) { Speak-Text 'Sistem yeniden başlatılıyor.' -Sfx 'reboot' }
+        if ([int]$snap.ResetPending -eq 1 -and [int]$p.ResetPending -ne 1) { Announce-Reboot }
+        elseif ($snap.ForceAlways -and -not $p.ForceAlways) { Announce-Reboot }
         if ([int]$snap.Reboots -gt [int]$p.Reboots) { Speak-Text 'Sistem yeniden başlatıldı.' -Sfx 'online' }
         $script:VoiceLast = $snap
     } catch { Write-Trace ('sesli uyari gecisi hatasi: ' + $_.Exception.Message) }
@@ -2878,13 +2946,13 @@ function Wire-UI {
     (El $script:Win 'BtnInstall').Add_Click({ Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null })
     (El $script:Win 'BtnReboot').Add_Click({
             $r = [System.Windows.MessageBox]::Show('Makine yeniden baslatilsin mi? Kaydedilmemis belge varsa once kaydedilir.', 'RemoteWatchdog', 'YesNo', 'Question')
-            if ($r -eq 'Yes') { Speak-Text 'Sistem yeniden başlatılıyor.' -Sfx 'reboot'; Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
+            if ($r -eq 'Yes') { Announce-Reboot; Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
         })
     (El $script:Win 'BtnForceNow').Add_Click({
             $r = [System.Windows.MessageBox]::Show('Daima zorla kapatma ACILIR ve makine yeniden baslatilir. Kaydedilmemis belge varsa once kaydedilir. Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Warning')
             if ($r -ne 'Yes') { return }
             Save-HostConfig @{ ForceRestartAlways = $true }
-            Speak-Text 'Sistem yeniden başlatılıyor.' -Sfx 'reboot'
+            Announce-Reboot
             Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait
         })
     (El $script:Win 'BtnSave').Add_Click({ Save-Settings })
@@ -2893,7 +2961,8 @@ function Wire-UI {
             $statusBox = $script:Win.FindName('TxtSaved')
             try { $btnReload.Content = 'Yenileniyor...'; $btnReload.IsEnabled = $false } catch { }
             try {
-                Build-Settings
+Build-Settings
+try { Speak-PendingVoice } catch { Write-Trace ('bekleyen anons hatasi: ' + $_.Exception.Message) }
                 $cnt = @((El $script:Win 'SettingsPanel').Children).Count
                 if ($cnt -lt 10) { Write-Trace ('Formu yenile: ayar satiri az (' + $cnt + ')') }
                 $top = $script:Win.FindName('TxtSettingsStatus')

@@ -264,6 +264,15 @@ if ($Section -eq 0 -or $Section -eq 1) {
         Ok 'kisayol wscript ile pencere acmadan basliyor' ($setupText -match 'wscript\.exe')
     }
     Ok 'panel -Install mutex oncesi calisiyor' ($panelText -match "Panel-Setup\.ps1'\) -Action")
+    Ok 'panel ses KUYRUGU var (Add-SpeechQueue)' ($panelText -match 'function Add-SpeechQueue')
+    Ok 'panel kuyruk bosaltma (Show-NextQueued) var' ($panelText -match 'function Show-NextQueued')
+    Ok 'panel konusma sirasinda olayi kuyruga aliyor' ($panelText -match 'if \(\$script:SpeechBusy\) \{ \[void\]\(Add-SpeechQueue')
+    Ok 'panel reboot anonsu kaydediliyor (Save-PendingVoice)' ($panelText -match 'function Save-PendingVoice')
+    Ok 'panel acilista bekleyen anons konusuluyor (Speak-PendingVoice)' ($panelText -match 'function Speak-PendingVoice')
+    Ok 'panel acilista bekleyen anons cagriliyor' ($panelText -match 'Speak-PendingVoice')
+    $panelBytes = [System.IO.File]::ReadAllBytes($Panel)
+    $hasBom = ($panelBytes.Length -gt 2 -and $panelBytes[0] -eq 0xEF -and $panelBytes[1] -eq 0xBB -and $panelBytes[2] -eq 0xBF)
+    Ok 'panel dosyasi BOM ile saklanir (PowerShell 5.1 Turkce karakterleri aksi halde bozar)' $hasBom
     if (Get-Command Get-LogColor -ErrorAction SilentlyContinue) {
         Ok ('host rengi yesil = stabil: ' + (Get-LogColor -Level 'CHECK' -Text 'TAMAM     Internet')) ($null -ne (Get-LogColor -Level 'CHECK' -Text 'TAMAM     Internet'))
         Ok 'host rengi kirmizi = hata' ((Get-LogColor -Level 'WARN') -eq 'Red')

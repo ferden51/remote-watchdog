@@ -4,6 +4,22 @@ Bu dosya sürüm bazlı değişiklikleri tutar. Sürüm numarası depodaki `VERS
 panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürümleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.2.2] - 2026-09-29
+
+### Eklenen
+- **Anons kuyruğu:** konuşma sürerken gelen olay **sessizce kayboluyordu** — motorlar meşgulde
+  `false` dönüyor, `Speak-Text` Windows SAPI'ye düşüyordu; bu makinede Türkçe SAPI olmadığı için
+  olay **hiç seslenmeden kayboluyordu** (ayrıca ses çakışması riski). Artık meşgulken olay
+  kuyruğa alınır, mevcut anons bitince **sırayla** okunur (aynı metin tekilleştirilir, en fazla 8).
+- **Restart anonsu kurtarıldı:** restart paneli de öldürdüğü için "Sistem yeniden başlatılıyor"
+  anonsu her zaman kayboluyordu → anons `pending-voice.json`'a yazılıyor, panel yeniden
+  açıldığında `Speak-PendingVoice` ile konuşuluyor (30 dk'dan eskiyse okunmuyor).
+
+### Düzeltilen
+- **Panel dosyası BOM'suz kaydedilirse betik bozuluyor:** UTF-8 BOM olmayan dosyayı Windows
+  PowerShell 5.1 ANSI okuyor, Türkçe karakterler bozulup tırnak kaçıyor (29 sözdizimi hatası).
+  Regresyon testi eklendi (BOM varlığı denetleniyor).
+
 ## [1.2.1] - 2026-09-28
 
 ### Eklenen
