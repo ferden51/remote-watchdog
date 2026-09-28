@@ -271,8 +271,11 @@ function Test-TcpPortFast {
 }
 
 function Get-NetworkHealth {
-    $h = [ordered]@{ Ip = $false; Dns = $false; Https = $false; Signal = $false; Dhcp = $false; TimeWait = 0; Link = ''; IpMs = -1; SignalMs = -1; HttpsMs = -1; DnsMs = -1 }
-    $h.IpMs = Get-TcpMs -HostName '1.1.1.1' -Port 443 -TimeoutMs 3000
+    $h = [ordered]@{ Ip = $false; Dns = $false; Https = $false; Signal = $false; Dhcp = $false; TimeWait = 0; Link = ''; IpMs = -1; IpHost = ''; SignalMs = -1; HttpsMs = -1; DnsMs = -1 }
+    foreach ($probeIp in @('9.9.9.9', '1.1.1.1', '8.8.8.8')) {
+        $ms = Get-TcpMs -HostName $probeIp -Port 443 -TimeoutMs 3000
+        if ($ms -ge 0) { $h.IpMs = $ms; $h.IpHost = $probeIp; break }
+    }
     $h.Ip = ($h.IpMs -ge 0)
     $h.SignalMs = Get-TcpMs -HostName 'mtalk.google.com' -Port 443 -TimeoutMs 3000
     $h.Signal = ($h.SignalMs -ge 0)
@@ -428,7 +431,7 @@ function Test-NetworkLayer {
     $detail = 'ip=' + $h.Ip + ', dns=' + $h.Dns + ', https=' + $h.Https + ', sinyal=' + $h.Signal + ', dhcp=' + $h.Dhcp + ', timewait=' + $h.TimeWait + ', link=' + $h.Link
     if ($h.TimeWait -gt 15000) { Write-Log 'WARN' ('TCP TIME_WAIT sayisi yuksek: ' + $h.TimeWait + ' -> soket yigini sizmis olabilir') }
     $ok = ($h.Ip -and $h.Dns -and $h.Https)
-    $metrics = [ordered]@{ ip443 = $(if ($h.Ip) { $h.IpMs } else { -1 }); ip443state = $(if ($h.Ip) { 'acik' } else { 'kapali' }); dnsms = $h.DnsMs; dnsstate = $(if ($h.Dns) { 'cozuldu' } else { 'cozulemedi' }); httpsms = $h.HttpsMs; httpsstate = $(if ($h.Https) { 'acik' } else { 'kapali' }); signalms = $h.SignalMs; signalstate = $(if ($h.Signal) { 'acik' } else { 'kapali' }); timewait = $h.TimeWait; dhcp = $h.Dhcp; link = $h.Link }
+    $metrics = [ordered]@{ ip443 = $(if ($h.Ip) { $h.IpMs } else { -1 }); iphost = $(if ($h.IpHost) { $h.IpHost } else { 'yok' }); ip443state = $(if ($h.Ip) { 'acik' } else { 'kapali' }); dnsms = $h.DnsMs; dnsstate = $(if ($h.Dns) { 'cozuldu' } else { 'cozulemedi' }); httpsms = $h.HttpsMs; httpsstate = $(if ($h.Https) { 'acik' } else { 'kapali' }); signalms = $h.SignalMs; signalstate = $(if ($h.Signal) { 'acik' } else { 'kapali' }); timewait = $h.TimeWait; dhcp = $h.Dhcp; link = $h.Link }
     $repair = @()
     if ($ok) {
         if ([int]$state.NetRepairRung -gt 0) { $repair += 'saga likli, onarim merdiveni sifirlandi (son: ' + $state.NetRepairRung + '. kademe)' }

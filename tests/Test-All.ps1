@@ -121,8 +121,12 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Eq 'tatil listesi: dosya yoksa configten okur' '2026-01-01' ($hl2 -join ',')
     $global:cfg.HolidaysFile = $holFile
 
-    $ms = Get-TcpMs -HostName '1.1.1.1' -Port 443 -TimeoutMs 3000
-    Ok ('TCP olcum: 1.1.1.1:443 acik (' + $ms + ' ms)') ($ms -ge 0)
+    $ms = -1; $msHost = ''
+    foreach ($pip in @('9.9.9.9', '1.1.1.1', '8.8.8.8')) {
+        $t = Get-TcpMs -HostName $pip -Port 443 -TimeoutMs 3000
+        if ($t -ge 0) { $ms = $t; $msHost = $pip; break }
+    }
+    Ok ('TCP olcum: dogrudan IP:443 acik (' + $msHost + ', ' + $ms + ' ms)') ($ms -ge 0)
     $closed = Get-TcpMs -HostName '127.0.0.1' -Port 9 -TimeoutMs 1500
     Ok 'TCP olcum: kapali port -1 doner' ($closed -eq -1)
     $conns = Get-CrdSignalConnections -Ports @(443, 5222)

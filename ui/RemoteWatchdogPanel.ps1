@@ -1199,7 +1199,8 @@ function Get-Connections {
         }
         if ($mt.ContainsKey('ip443state')) {
             $lvl = if ($mt['ip443state'] -eq 'acik') { 'ok' } else { 'bad' }
-            Add-Conn 'IP erişimi' '1.1.1.1:443 (DNS bagimsiz, dogrudan IP)' $lvl $(if ($lvl -eq 'ok') { 'BAGLI' } else { 'YOK' }) ([string]$mt['ip443'] + ' ms')
+            $ipHost = 'dogrudan IP'; if ($mt.ContainsKey('iphost') -and [string]$mt['iphost'] -ne '' -and [string]$mt['iphost'] -ne 'yok') { $ipHost = [string]$mt['iphost'] }
+            Add-Conn 'IP erişimi' ($ipHost + ':443 (DNS bagimsiz, dogrudan IP)') $lvl $(if ($lvl -eq 'ok') { 'BAGLI' } else { 'YOK' }) ([string]$mt['ip443'] + ' ms')
         }
         if ($mt.ContainsKey('dnsstate')) {
             $lvl = if ($mt['dnsstate'] -eq 'cozuldu') { 'ok' } else { 'bad' }
