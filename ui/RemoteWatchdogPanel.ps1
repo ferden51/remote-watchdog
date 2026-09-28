@@ -2385,7 +2385,9 @@ function Wire-UI {
             $script:Win.Activate()
             Write-Trace 'goster istegi islendi (pencere one getirildi)'
         })
-    $w.add_DispatcherUnhandledException({
+    # Dispatcher uzerinde tek merkezî hata yakalayici (Window'da add_DispatcherUnhandledException
+    # metodu YOKTUR; Dispatcher.UnhandledException kullanilir). Dosya sonunda tekrar KAYDEDILMEZ.
+    $script:Win.Dispatcher.UnhandledException.Add({
             param($s, $e)
             Write-Trace ('YAKALANAMAYAN HATA: ' + $e.Exception.GetType().Name + ' - ' + $e.Exception.Message + ' | iz: ' + (($e.Exception.StackTrace -split "`r?`n" | Select-Object -First 3) -join ' <- '))
             [System.Windows.MessageBox]::Show('Panelde bir hata olustu: ' + $e.Exception.Message + "`n`nAyrinti: C:\ProgramData\RemoteWatchdog\panel.log", 'RemoteWatchdog') | Out-Null
@@ -2707,10 +2709,4 @@ if ($SelfTest) {
 }
 
 if ($TrayOnly -or $script:Background) { $script:Win.Hide() } else { $script:Win.Show() }
-$script:Win.Dispatcher.UnhandledException.Add({
-        param($sender, $e)
-        Write-Trace ('yakalanmayan hata: ' + $e.Exception.Message + ' | ' + $e.Exception.ScriptStackTrace)
-        [System.Windows.MessageBox]::Show('Panel bir hata ile karsilasti: ' + $e.Exception.Message + '`r`nPanel acik kalmaya calisacak.', 'RemoteWatchdog', 'OK', 'Warning') | Out-Null
-        $e.Handled = $true
-    })
 try { [System.Windows.Threading.Dispatcher]::Run() } finally { try { $script:Mutex.ReleaseMutex() } catch { } }
