@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
     Collect-Diagnostics - "uzak masaustu neden koptu" tehis paketi
     Hicbir ayari degistirmez; yalnizca okur ve tek bir rapor dosyasi yazar.
@@ -42,7 +42,8 @@ function Get-Events {
     $h = @{ LogName = $Log; StartTime = $start }
     if ($Ids.Count -gt 0) { $h['Id'] = $Ids }
     $ev = @()
-    try { $ev = Get-WinEvent -FilterHashtable $h -MaxEvents 2000 -ErrorAction Stop } catch { return @() }
+    # Limiting to 10000 events to prevent truncation of events over $Days in busy logs
+    try { $ev = Get-WinEvent -FilterHashtable $h -MaxEvents 10000 -ErrorAction Stop } catch { return @() }
     $out = @($ev | Where-Object { -not $Match -or $_.Message -match $Match } | Sort-Object TimeCreated -Descending | Select-Object -First $Max)
     return $out
 }

@@ -98,6 +98,7 @@ $script:SpeechMp3 = ''
 $script:SpeechTxt = ''
 $script:SpeechDeadline = [datetime]::MinValue
 $script:SpeechTimer = $null
+$script:DiagProc = $null
 $script:EdgeOk = $null
 $script:PyExe = ''
 $script:PiperOk = $null
@@ -134,6 +135,19 @@ $script:SfxMissing = @{}
 # boylece "kapattim ama ses geliyor" durumu olusmaz.
 $script:SfxOn = $true
 $script:VoiceOn = $true
+# Onceden uretilmis KADIN sesli anons onbellegi (internetsiz calisir).
+# edge-tts bulutta oldugu icin internet giderken anons susuyordu; sabit cumleler
+# tools\Build-VoiceCache.ps1 ile mp3'e cevrilir, panel onleri dogrudan oynatir.
+# tools\VoiceLines.ps1 tek kaynak (yeni cumle eklenince onbellek yeniden uretilmeli).
+$script:VoiceCacheDir = Join-Path $VoiceDir 'cache'
+$script:VoiceCache = $null
+try {
+    $vl = Join-Path $Root 'tools\VoiceLines.ps1'
+    if (Test-Path -LiteralPath $vl) {
+        . $vl
+        $script:VoiceCache = $script:VwVoiceLines
+    } else { Write-Trace 'tools\VoiceLines.ps1 yok; onbellekli anons kullanilamaz' }
+} catch { Write-Trace ('anons cumle listesi yuklenemedi: ' + $_.Exception.Message) }
 # --- Canli ag onarim izleme (basliktaki "Agi / interneti onar" dugmesi) ---
 $script:RepairRunning = $false
 $script:RepairSawDone = $false
@@ -889,7 +903,8 @@ function Get-RepairReport {
     $when = ''
     try { $when = ([datetime]::Parse([string]$lr.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToString('dd.MM HH:mm') } catch { }
     $lines = New-Object System.Collections.ArrayList
-    [void]$lines.Add(('Son ağ onarımı: ' + $when + ' | ' + $(if ($lr.ok) { 'BAŞARILI' } else { 'KISMİ / BAŞARISIZ' }) + ' | ' + [int]$lr.elapsedSec + ' sn'))
+    $verdict = $(if ($lr.cancelled) { 'İPTAL EDİLDİ' } elseif ($lr.ok) { 'BAŞARILI' } else { 'KISMİ / BAŞARISIZ' })
+    [void]$lines.Add(('Son ağ onarımı: ' + $when + ' | ' + $verdict + ' | ' + [int]$lr.elapsedSec + ' sn'))
     [void]$lines.Add(('  uygulanan kademe: ' + $(if (@($lr.rungs).Count) { (@($lr.rungs) -join ' → ') } else { 'gerekmedi (ağ sağlıklıydı)' })))
     if (@($lr.actions).Count) { [void]$lines.Add('  yapılanlar: ' + ((@($lr.actions)) -join '; ')) }
     if (@($lr.stillBad).Count) { [void]$lines.Add('  kalan sorun: ' + ((@($lr.stillBad)) -join ', ') + '  (5. kademe restart önerir)') }
@@ -1064,14 +1079,55 @@ function Show-RepairWindow {
     return $w
 }
 
+function Cancel-NetworkRepairLive {
+    <#
+        Kullanici onarim penceresini kapatti. Bu bir "izlemeyi kapat" degil, gercek iptaldir:
+        once SYSTEM gorevine bildirilen repair-cancel.json yazilir (kademeler yari birakilmasin),
+        bekleyen istek dosyasi silinir, sonra panelin canli izlemesi durdurulur.
+    #>
+    if (-not $script:RepairRunning) { return }
+    if ($script:RepairTimer) { try { $script:RepairTimer.Stop() } catch { } }
+    $script:RepairRunning = $false
+    $script:RepairSawDone = $false
+
+    # 1) Host tarafina iptal bildir: calisan akis bir sonraki kademede kendini durdurur
+    $cancelPath = Join-Path (Split-Path -Parent $HostJson) 'repair-cancel.json'
+    $notified = $false
+    try {
+        $cobj = [ordered]@{ requestedBy = $env:USERNAME; at = (Get-Date).ToString('o') }
+        Write-RwJson -Path $cancelPath -Object $cobj
+        $notified = $true
+    } catch { Write-Trace ('iptal bildirimi yazilamadi: ' + $_.Exception.Message) }
+    # 2) Henuz baslamadiysa bekleyen istegi kaldir (izleyici onu alip calistirmasin)
+    $droppedReq = $false
+    try {
+        if ($script:RepairRequestPath -and (Test-Path -LiteralPath $script:RepairRequestPath)) {
+            Remove-Item -LiteralPath $script:RepairRequestPath -Force -ErrorAction SilentlyContinue
+            $droppedReq = $true
+        }
+    } catch { }
+
+    $btn = $script:Win.FindName('BtnRepairNet')
+    if ($btn) { $btn.Content = 'Ağı / interneti onar'; $btn.IsEnabled = $true }
+    $top = $script:Win.FindName('TxtSettingsStatus')
+    if ($top) { $top.Text = 'Onarım iptal edildi.'; $top.Foreground = Bx 'Muted' }
+    $script:RepairStatusText = 'Onarım iptal edildi.'
+    Show-Balloon -Title 'Ağ onarımı' -Text 'Onarım iptal edildi. Uygulanan kademeler geri alınmaz.' -Icon 'Warning' -Critical
+    Speak-Text 'Onarım iptal edildi.' -Sfx 'warn'
+    if ($script:Page -eq 'log') { Update-Log }
+    Write-Trace ('ag onarimi iptal edildi (host bilgilendirildi=' + $notified + ', bekleyen istek silindi=' + $droppedReq + ')')
+}
+
 function Close-RepairWindow {
-    <#  Pencereyi kapatir; onarim arka planda surerse balonla biter. #>
+    <#  Pencereyi kapatir; onarim suruyorsa once iptal olarak raporlar. #>
+    $wasRunning = $script:RepairRunning
     $w = $script:RepairWin
     $script:RepairWin = $null
     $script:RepairLiveBox = $null
     $script:RepairStatusBox = $null
     $script:RepairElapsedBox = $null
     if ($w) { try { $w.Close() } catch { } }
+    if ($wasRunning) { Cancel-NetworkRepairLive }
 }
 
 function Complete-NetworkRepairLive {
@@ -1084,15 +1140,28 @@ function Complete-NetworkRepairLive {
     Update-Connections
     Update-Overview
     $report = Get-RepairReport
-    $ok = ($report -match 'BAŞARILI')
-    $script:RepairStatusText = $(if ($Reason) { $Reason } elseif ($ok) { ('Bitti: BAŞARILI (' + $el + ' sn)') } else { ('Bitti: KISMİ / BAŞARISIZ (' + $el + ' sn)') })
+    <#
+        Sonucu metinde 'BASARILI' arayarak cikarmak yanlisti: last-run.json henuz yazilmadiysa
+        Get-RepairReport "Henuz onarim calistirilmadi." doner, bu da BASARILI icermedigi icin
+        basarisiz sayiliyordu. Gercek sonucu lastRepair.ok alanindan okuyoruz.
+    #>
+    $hj = Get-Json $HostJson
+    $lr = $hj.lastRepair
+    $hasResult = [bool]$lr
+    $ok = [bool]($lr.ok)
+    $wasCancelled = [bool]($lr.cancelled)
+    $script:RepairStatusText = $(if ($wasCancelled) { ('Bitti: İPTAL EDİLDİ (' + $el + ' sn)') } elseif ($Reason) { $Reason } elseif (-not $hasResult) { ('Bitti: sonuç kaydedilmedi (' + $el + ' sn)') } elseif ($ok) { ('Bitti: BAŞARILI (' + $el + ' sn)') } else { ('Bitti: KISMİ / BAŞARISIZ (' + $el + ' sn)') })
     Set-RepairLiveText -Text ([string]$script:RepairLiveText) -Color $(if ($ok) { 'Ok' } else { 'Warn' }) -Bold $true
     $btn = $script:Win.FindName('BtnRepairNet')
     if ($btn) { $btn.Content = 'Ağı / interneti onar'; $btn.IsEnabled = $true }
     $top = $script:Win.FindName('TxtSettingsStatus')
-    if ($top) { $top.Text = $report; $top.Foreground = $(if ($ok) { Bx 'Ok' } else { Bx 'Warn' }) }
+    if ($top) { $top.Text = $report; $top.Foreground = $(if ($ok) { Bx 'Ok' } elseif ($wasCancelled) { Bx 'Muted' } elseif ($hasResult) { Bx 'Warn' } else { Bx 'Muted' }) }
     Show-Balloon -Title 'Ağ onarımı' -Text $report -Icon $(if ($ok) { 'Info' } else { 'Warning' }) -Critical
-    if ($ok) { Speak-Text 'Onarım tamamlandı.' -Sfx 'ok' } else { Speak-Text 'Onarım başarısız oldu.' -Sfx 'warn' }
+    if ($wasCancelled) { Speak-Text 'Onarım iptal edildi.' -Sfx 'warn' }
+    elseif ($Reason) { Speak-Text 'Onarım tamamlanmadı.' -Sfx 'warn' }
+    elseif (-not $hasResult) { Speak-Text 'Onarım sonucu alınamadı.' -Sfx 'warn' }
+    elseif ($ok) { Speak-Text 'Onarım tamamlandı.' -Sfx 'ok' }
+    else { Speak-Text 'Onarım başarısız oldu.' -Sfx 'warn' }
     if ($script:Page -eq 'log') { Update-Log }
     Write-Trace ('ag onarimi izi tamam: ' + $script:RepairStatusText)
 }
@@ -1137,6 +1206,8 @@ function Invoke-NetworkRepair {
     }
     $script:RepairStart = Get-Date
     $script:RepairRequestPath = Join-Path (Split-Path -Parent $HostJson) 'repair-request.json'
+    # Onceki bir iptal kaydi kalirsa yeni onarim kademeleri hic uygulamadan biter
+    try { Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $HostJson) 'repair-cancel.json') -Force -ErrorAction SilentlyContinue } catch { }
     $hj0 = Get-Json $HostJson
     $script:RepairWatch = ($hj0 -and ([int]($hj0.host | ForEach-Object { $_.repairWatch }) -eq 1))
     $script:RepairLiveText = ''
@@ -1441,7 +1512,7 @@ function Update-Countdown {
 function Invoke-ConnAction {
     param([string]$Key)
     switch ($Key) {
-        'host' { Invoke-Script -Path $HostScript -Args @('-Install'); Start-Sleep 5; Update-Connections; Update-Overview; Update-Actions; Update-ActionBarColors }
+        'host' { Invoke-Script -Path $HostScript -Args @('-Install'); Start-Sleep 1; Update-Connections; Update-Overview; Update-Actions; Update-ActionBarColors }
         'run' { Start-ManualCheck }
         'repair' { Invoke-NetworkRepair }
         'crd' { Start-Process 'https://remotedesktop.google.com/headless' }
@@ -2096,17 +2167,17 @@ function Invoke-SettingsAction {
             if ([System.Windows.MessageBox]::Show('Watchdog zamanlanmis gorevi kaldirilsin mi?', 'RemoteWatchdog', 'YesNo', 'Question') -eq 'Yes') { Invoke-Script -Path $HostScript -Args @('-Uninstall') -Wait }
         }
         'stoptask' { Disable-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue | Out-Null; Write-Host 'gorev durduruldu' }
-        'runtask' { Start-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue; Start-Sleep 5; Update-Connections; Update-Overview }
-        'diag' { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaüstüne yazıldı.', 'RemoteWatchdog') | Out-Null }
+        'runtask' { Start-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue; Start-Sleep 1; Update-Connections; Update-Overview }
+        'diag' { $script:DiagProc = Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $HostDiag + '"')) -WindowStyle Hidden -PassThru }
         'testalert' {
             $cfg = Get-HostConfig
             Play-Sfx 'alert' | Out-Null
             $msg = 'RemoteWatchdog test bildirimi - ' + $env:COMPUTERNAME + ' - ' + (Get-Date).ToString('HH:mm:ss')
             if (-not $cfg.TelegramToken) { [System.Windows.MessageBox]::Show('Telegram token ayarli degil.', 'RemoteWatchdog') | Out-Null; break }
-            try {
-                Invoke-RestMethod -Method Post -Uri ('https://api.telegram.org/bot' + $cfg.TelegramToken + '/sendMessage') -Body @{ chat_id = $cfg.TelegramChatId; text = $msg } -TimeoutSec 15 -ErrorAction Stop | Out-Null
-                [System.Windows.MessageBox]::Show('Test mesaji gonderildi.', 'RemoteWatchdog') | Out-Null
-            } catch { [System.Windows.MessageBox]::Show('Gonderilemedi: ' + $_.Exception.Message, 'RemoteWatchdog') | Out-Null }
+            $uri = 'https://api.telegram.org/bot' + $cfg.TelegramToken + '/sendMessage'
+            $body = @{ chat_id = $cfg.TelegramChatId; text = $msg }
+            Start-Job -ScriptBlock { Invoke-RestMethod -Method Post -Uri $using:uri -Body $using:body -TimeoutSec 15 } | Out-Null
+            [System.Windows.MessageBox]::Show('Test mesaji arka planda gonderiliyor.', 'RemoteWatchdog') | Out-Null
         }
         'resetstate' {
             Remove-Item -LiteralPath (Join-Path $HostData 'host-state.json') -Force -ErrorAction SilentlyContinue
@@ -2334,18 +2405,39 @@ function Save-PendingVoice {
 }
 
 function Speak-PendingVoice {
-    <#  Panel acilinda bekleyen reboot anonsunu konusur ve dosyayi siler. #>
-    $f = Join-Path $HostData 'pending-voice.json'
-    if (-not (Test-Path -LiteralPath $f)) { return }
-    $j = $null
-    try { $j = Get-Json $f } catch { }
-    Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
-    if (-not $j -or -not $j.text) { return }
-    $ageMin = 999
-    try { $ageMin = ((Get-Date) - [datetime]::Parse([string]$j.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes } catch { }
-    if ($ageMin -gt 30) { Write-Trace ('bekleyen reboot anonsu cok eski (' + [int]$ageMin + ' dk), konusulmadi'); return }
-    Write-Trace ('bekleyen reboot anonsu konusuluyor: ' + $j.text)
-    Speak-Text -Text ([string]$j.text) -Sfx ([string]$j.sfx) -Force
+    <#
+        Panel acilinda/calisirken bekleyen anonslari konusur ve dosyalari siler.
+        pending-voice.json  : restart ve genel anonslar
+        pending-repair.json : anlik ag sorunu anonsu (ayri dosya; restart anonsu bunu EZMESIN diye)
+    #>
+    foreach ($pair in @(
+            @{ File = 'pending-voice.json'; Etiket = 'restart' },
+            @{ File = 'pending-repair.json'; Etiket = 'ag sorunu' })) {
+        $f = Join-Path $HostData $pair.File
+        if (-not (Test-Path -LiteralPath $f)) { continue }
+        $j = $null
+        try { $j = Get-Json $f } catch { }
+        Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+        if (-not $j -or -not $j.text) { continue }
+        $ageMin = 999
+        try { $ageMin = ((Get-Date) - [datetime]::Parse([string]$j.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes } catch { }
+        if ($ageMin -gt 30) { Write-Trace ('bekleyen ' + $pair.Etiket + ' anonsu cok eski (' + [int]$ageMin + ' dk), konusulmadi'); continue }
+        Write-Trace ('bekleyen ' + $pair.Etiket + ' anonsu konusuluyor: ' + $j.text)
+        # voiceKey: metin kismi dinamik oldugu icin (ornegin "Eksik: IP,DNS") onbellekteki
+        # kadin sesli dosyayi DOGRudan bu anahtarla caliyoruz.
+        $vk = [string]$j.voiceKey
+        if ($vk) {
+            if ($script:SpeechBusy) {
+                # Konusma suruyor: anahtari kuyruga tasimaliyiz, yoksa metin eslesmesine
+                # duser ve (internetsizken) edge-tts'a giderdi.
+                if (-not (Test-Path -LiteralPath (Join-Path $script:VoiceCacheDir ($vk + '.mp3')))) { $vk = '' }
+            } else {
+                if (Speak-CachedVoice -Key $vk) { continue }
+                $vk = ''
+            }
+        }
+        Speak-Text -Text ([string]$j.text) -Sfx ([string]$j.sfx) -Force -CacheKey $vk
+    }
 }
 
 function Stop-Speech {
@@ -2368,10 +2460,10 @@ function Add-SpeechQueue {
         Konusma sirasinda gelen olayi KUYRUGA alir (ses kaybolmaz).
         Ayni metin arka arkaya geliyorsa tekilleştirilir (spam olmaz), kuyruk 8 ile sınırlıdır.
     #>
-    param([string]$Text, [int]$Volume = 100)
+    param([string]$Text, [int]$Volume = 100, [string]$CacheKey = '')
     if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
     foreach ($q in $script:SpeechQueue) { if ($q.Text -eq $Text) { return $false } }
-    [void]$script:SpeechQueue.Add([pscustomobject]@{ Text = [string]$Text; Volume = $Volume; At = (Get-Date) })
+    [void]$script:SpeechQueue.Add([pscustomobject]@{ Text = [string]$Text; Volume = $Volume; CacheKey = [string]$CacheKey; At = (Get-Date) })
     while ($script:SpeechQueue.Count -gt 8) { $script:SpeechQueue.RemoveAt(0) }
     Write-Trace ('anons kuyruga alindi (' + $script:SpeechQueue.Count + ' bekliyor): ' + $Text)
     return $true
@@ -2384,7 +2476,7 @@ function Show-NextQueued {
     $item = $script:SpeechQueue[0]
     $script:SpeechQueue.RemoveAt(0)
     Start-Sleep -Milliseconds 250
-    Speak-Text -Text $item.Text -Volume $item.Volume
+    Speak-Text -Text $item.Text -Volume $item.Volume -CacheKey ([string]$item.CacheKey)
 }
 
 function Start-SpeechPoller {
@@ -2439,6 +2531,97 @@ function Update-SpeechPlayback {
             if ($script:SpeechPlayer.Position.TotalMilliseconds -ge ($end - 120)) { Stop-Speech }
         } elseif ($late) { Stop-Speech }
     } catch { Stop-Speech }
+}
+
+function Speak-CachedVoice {
+    <#
+        ONCEDEN URETILMIS kadin sesli anonsu calar (internetsiz).
+        edge-tts bulutta oldugu icin internet gidince anons susuyordu; sabit cumleler
+        tools\Build-VoiceCache.ps1 ile mp3'e cevrilip onbellege alinir, burada oynatilir.
+        -Key verilirse dogrudan o dosya; verilmezse metin eslestirmesi yapilir.
+        Eslesmezse $false doner (cagiran motorlara duser).
+    #>
+    param([string]$Text = '', [string]$Key = '')
+    if ($script:SpeechBusy) { return $false }
+    $file = ''
+    if ($Key) {
+        if (-not $script:VoiceCache) { return $false }
+        if (-not $script:VoiceCache.Contains($Key)) { return $false }
+        $file = Join-Path $script:VoiceCacheDir ($Key + '.mp3')
+    } else {
+        $t = [string]$Text
+        if ([string]::IsNullOrWhiteSpace($t)) { return $false }
+        if (-not $script:VoiceCache) { return $false }
+        # once tam eslesme (anahtar -> mp3)
+        foreach ($k in $script:VoiceCache.Keys) {
+            if ([string]$script:VoiceCache[$k] -eq $t) { $file = Join-Path $script:VoiceCacheDir ($k + '.mp3'); break }
+        }
+        # kayma/whitespace farklarina tolerans
+        if (-not $file) {
+            $norm = ($t -replace '\s+', ' ').Trim()
+            foreach ($k in $script:VoiceCache.Keys) {
+                $n2 = ([string]$script:VoiceCache[$k] -replace '\s+', ' ').Trim()
+                if ($n2 -eq $norm) { $file = Join-Path $script:VoiceCacheDir ($k + '.mp3'); break }
+            }
+        }
+        # Tam eslesme yoksa KISMI eslesme iki yonlu olur:
+        #  a) anons metni cumlenin BASINDAN devam eder ("... 60 saniye icinde. Acik belgeler...")
+        #  b) anons metnin ICINDE cumle gecir (host "Ağ sorunu algılandı. Eksik: IP,DNS...
+        #     Onarım başlatılıyor." der; sabit kısım ortada kalir)
+        if (-not $file) {
+            $norm = ($t -replace '\s+', ' ').Trim()
+            $best = ''
+            $bestLen = 0
+            foreach ($k in $script:VoiceCache.Keys) {
+                $n2 = ([string]$script:VoiceCache[$k] -replace '\s+', ' ').Trim()
+                # Cok kisa cumleler yanlis eslesmesin (12 karakter alti guvenli degil)
+                if ($n2.Length -lt 12) { continue }
+                if ($norm.StartsWith($n2)) {
+                    # basi tutuyor: en uzun eslesmeyi sec
+                    if ($n2.Length -gt $bestLen) { $bestLen = $n2.Length; $best = $n2 }
+                } elseif ($norm.Contains($n2)) {
+                    # metin icinde gecir: host tarafinin ekledigi parcalar tolerans
+                    if ($n2.Length -gt $bestLen) { $bestLen = $n2.Length; $best = $n2 }
+                }
+            }
+            if ($best) {
+                foreach ($k in $script:VoiceCache.Keys) {
+                    $n2 = ([string]$script:VoiceCache[$k] -replace '\s+', ' ').Trim()
+                    if ($n2 -eq $best) { $file = Join-Path $script:VoiceCacheDir ($k + '.mp3'); break }
+                }
+            }
+        }
+        # Hala bulunamadiysa kisa sabit parcalar icin son deneme: host metni ikiye boler
+        # ("Ağ sorunu algılandı." / "Onarım başlatılıyor."), araya dinamik "Eksik: ..." girer.
+        if (-not $file) {
+            foreach ($k in @('netdown2', 'netdown1')) {
+                if (-not $script:VoiceCache.Contains($k)) { continue }
+                $n2 = ([string]$script:VoiceCache[$k] -replace '\s+', ' ').Trim()
+                if ($n2 -and $norm.Contains($n2)) { $file = Join-Path $script:VoiceCacheDir ($k + '.mp3'); break }
+            }
+        }
+    }
+    if (-not $file) { return $false }
+    if (-not (Test-Path -LiteralPath $file)) { return $false }
+    try { if ((Get-Item -LiteralPath $file -ErrorAction Stop).Length -le 0) { return $false } } catch { return $false }
+    try {
+        $pl = New-Object System.Windows.Media.MediaPlayer
+        $pl.Open([uri]$file)
+        $pl.Play()
+        $script:SpeechBusy = $true
+        $script:SpeechPlayer = $pl
+        # Onbellek dosyasi kalici: Stop-Speech bunu SILMEZ (silinirse anons bir daha
+        # uretilemez, cunku uretim internet gerektiriyor). Gecici dosyalar ($script:SpeechTxt)
+        # temizlenir; onbellek yolu ise SpeechTxt bos birakilir.
+        $script:SpeechMp3 = $file
+        $script:SpeechTxt = ''
+        $script:SpeechProc = $null
+        $script:SpeechText = $(if ($Key) { $Key } else { [string]$Text })
+        $script:SpeechEngine = 'onbellek (kadin ses, internetsiz)'
+        $script:SpeechDeadline = (Get-Date).AddSeconds(30)
+        Start-SpeechPoller
+        return $true
+    } catch { Write-Trace ('onbellek anonsu calinamadi: ' + $_.Exception.Message); return $false }
 }
 
 function Get-PiperVoice {
@@ -2497,6 +2680,7 @@ function Speak-EdgeTts {
     <#  Metni dogal Turkce KADIN sese (tr-TR-EmelNeural) cevirip mp3 olarak calar. #>
     param([string]$Text)
     if ($script:SpeechBusy) { return $false }
+    if (-not [System.Net.NetworkInformation.NetworkInterface]::GetIsNetworkAvailable()) { return $false }
     $py = Get-PythonExe
     if (-not $py) { return $false }
     $id = [Guid]::NewGuid().ToString('N')
@@ -2547,8 +2731,7 @@ function Speak-SapiText {
         }
         $sp.SelectVoice($tr)
         $sp.Volume = [Math]::Max(0, [Math]::Min(100, $Volume))
-        $sp.Speak($Text)
-        $sp.Dispose()
+        $sp.SpeakAsync($Text) | Out-Null
     } catch { Write-Trace ('SAPI sesli bildirim calismadi: ' + $_.Exception.Message) }
 }
 
@@ -2673,14 +2856,19 @@ function ConvertTo-TtsText {
 function Speak-Text {
     <#
         Turkce sesli anons. Konusma motoru onceligi:
-          1) edge-tts -> dogal KADIN Turkce (tr-TR-EmelNeural, Microsoft, bulut, ucretsiz)
-          2) Piper (yerel, dogal ama ERKEK; internetsiz yedek)
+          0) ONBELLEK (tools\Build-VoiceCache.ps1) -> dogal KADIN ses, TAMAMEN INTERNETSIZ.
+             Sabit anons cumleleri burada hazir bekler; asagidaki motorlar yalnizca
+             onbellekte olmayan/degisken metinler icin devreye girer.
+          1) edge-tts -> dogal KADIN Turkce (tr-TR-EmelNeural, bulut, INTERNET GEREKIR)
+          2) Piper (yerel, internetsiz ama ERKEK/robotik)
           3) Windows Turkce SAPI sesi (Tolga/Emel)
           4) Turkce ses yoksa SUSAR - Ingilizce okumaz.
+        ONEMLI: onceki surumde edge-tts birincildi; internet kesilince (yani tam on
+        anonsun duyulmasi gerektiginde) susuyordu. Onbellek bu bosluku kapatir.
         -Sfx ile once hazir film efekti calar (net/keskin/parlak), sonra anons gelir.
         SesliBildirim kapaliysa veya sessiz moddaysa konusmaz (efektin kendi anahtari SesEfektleri).
     #>
-    param([string]$Text, [int]$Volume = 100, [string]$Sfx = '', [switch]$Force)
+    param([string]$Text, [int]$Volume = 100, [string]$Sfx = '', [switch]$Force, [string]$CacheKey = '')
     if ($Sfx) { [void](Play-Sfx -Name $Sfx -Force:$Force) }
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
     if (-not $script:VoiceOn) { return }
@@ -2691,7 +2879,12 @@ function Speak-Text {
     if ($t.Length -gt 160) { $t = $t.Substring(0, 160) }
     # Konusma surerken gelen olay: motorlara dusulmez (cakisma/sessiz yutulma olurdu),
     # kuyruga alinir ve mevcut anons bitince okunur.
-    if ($script:SpeechBusy) { [void](Add-SpeechQueue -Text $t -Volume $Volume); return }
+    if ($script:SpeechBusy) { [void](Add-SpeechQueue -Text $t -Volume $Volume -CacheKey $CacheKey); return }
+    # 0) Onbellek: internetsiz kadin sesi
+    try {
+        if ($CacheKey) { if (Speak-CachedVoice -Key $CacheKey) { return } }
+        elseif (Speak-CachedVoice -Text $t) { return }
+    } catch { Write-Trace ('onbellek yolu hata verdi: ' + $_.Exception.Message) }
     try {
         if ($cfg.SesliBildirimEdge -ne $false -and (Test-EdgeTts)) {
             if (Speak-EdgeTts -Text $t) { return }
@@ -2837,7 +3030,7 @@ function Invoke-TrayAction {
         'panelstart' {
             # Konsol penceresi acilmasin: Normal yerine Hidden (acik konsol kapatilinca program da kapaniyordu)
             Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-STA', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ScriptPath + '"')) -WindowStyle Hidden | Out-Null
-            Start-Sleep 3
+            Start-Sleep 1
             Update-Connections
         }
         'toggle' { if ($script:Win.IsVisible) { $script:Win.Hide() } else { $script:Win.Show(); $script:Win.Activate() } }
@@ -2859,8 +3052,8 @@ function Invoke-TrayAction {
             if (Test-Path $d) { Start-Process explorer.exe ('"' + $d + '"') } else { [System.Windows.MessageBox]::Show('Log klasoru yok: ' + $d, 'RemoteWatchdog') | Out-Null }
         }
         'web' { Start-Process 'https://remotedesktop.google.com' }
-        'install' { Play-Sfx 'online' | Out-Null; Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null; Start-Sleep 5; Update-ActionBarColors }
-        'diag' { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaüstüne yazıldı.', 'RemoteWatchdog') | Out-Null }
+        'install' { Play-Sfx 'online' | Out-Null; Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null; Start-Sleep 1; Update-ActionBarColors }
+        'diag' { $script:DiagProc = Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $HostDiag + '"')) -WindowStyle Hidden -PassThru }
         'cancelsreboot' {
             # Restart geri sayimi surerken (varsayilan 60 sn) bu dosya olusturulur; host
             # dongusu onu gorup shutdown'u IPTAL EDER. "Adaptoru geri actim ama yine de
@@ -2976,7 +3169,7 @@ function Wire-UI {
     (El $script:Win 'BtnRepairNet').Add_Click({ Invoke-NetworkRepair })
     (El $script:Win 'BtnDiag').Add_Click({
             $r = [System.Windows.MessageBox]::Show('Collect-Diagnostics calisacak (okuma modunda, ~40 sn). Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Question')
-            if ($r -eq 'Yes') { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaüstüne yazıldı.', 'RemoteWatchdog') | Out-Null }
+            if ($r -eq 'Yes') { $script:DiagProc = Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $HostDiag + '"')) -WindowStyle Hidden -PassThru }
         })
     (El $script:Win 'BtnInstall').Add_Click({ Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null })
     (El $script:Win 'BtnReboot').Add_Click({
@@ -3060,6 +3253,10 @@ try { Speak-PendingVoice } catch { Write-Trace ('bekleyen anons hatasi: ' + $_.E
     $script:Tick.Interval = [TimeSpan]::FromSeconds(1)
     $script:Tick.Add_Tick({
             try {
+                if ($script:DiagProc -and $script:DiagProc.HasExited) {
+                    $script:DiagProc = $null
+                    [System.Windows.MessageBox]::Show('Rapor Masaüstüne yazıldı.', 'RemoteWatchdog') | Out-Null
+                }
                 if ($script:CheckBusy) {
                     if (Test-ManualCheckRunning) { Update-Countdown } else { Complete-ManualCheck }
                 } else { Update-Countdown }
@@ -3201,6 +3398,13 @@ try { $script:SfxOn = ((Get-HostConfig).SesEfektleri -ne $false) } catch { $scri
 try { $script:VoiceOn = ((Get-HostConfig).SesliBildirim -ne $false) } catch { $script:VoiceOn = $true }
 Write-Trace ('ses anahtarlari -> film efektleri (wav): ' + $(if ($script:SfxOn) { 'ACIK' } else { 'KAPALI' }) + ' | insan sesi: ' + $(if ($script:VoiceOn) { 'ACIK' } else { 'KAPALI' }))
 Write-Trace ('konusma motoru: ' + $(if (Test-EdgeTts) { 'edge-tts dogal KADIN Turkce (bulut) + yerel Piper yedegi' } elseif (Test-Piper) { 'Piper (yerel, internetsiz yedek)' } else { 'kurulu Turkce konusma motoru yok' }))
+<# Onbellek durumu: internet gittiginde konusabilmek icin onceden uretilmis kadin sesli
+   anonslar. Sayisini burada yaz ki panel acilirken "internetsiz konusur" net gorunsun. #>
+try {
+    $cacheN = 0
+    if ($script:VoiceCache) { foreach ($k in $script:VoiceCache.Keys) { if (Test-Path -LiteralPath (Join-Path $script:VoiceCacheDir ($k + '.mp3'))) { $cacheN++ } } }
+    Write-Trace ('anons onbellegi: ' + $cacheN + '/' + $(if ($script:VoiceCache) { $script:VoiceCache.Count } else { 0 }) + ' kadin sesli anons hazir (internetsiz; uretmek icin tools\Build-VoiceCache.ps1)')
+} catch { }
 New-TrayIcon
 Set-WindowIcon
 Wire-UI

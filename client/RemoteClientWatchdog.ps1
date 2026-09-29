@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
     RemoteClientWatchdog - YEREL (istemci) taraf
     Uzak makineye erisimi periyodik test eder, erisilemiyorsa Telegram/e-posta uyarisi gonderir,
@@ -36,13 +36,6 @@ foreach ($lib in @('Common.ps1', 'Contract.ps1')) {
 }
 
 $ErrorActionPreference = 'Continue'
-
-$LibDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) 'lib'
-foreach ($lib in @('Common.ps1', 'Contract.ps1')) {
-    $libPath = Join-Path $LibDir $lib
-    if (-not (Test-Path -LiteralPath $libPath)) { Write-Host ('KRITIK: kitaplik eksik: ' + $libPath); exit 2 }
-    . $libPath
-}
 $ScriptPath = $PSCommandPath
 $BaseDir = Join-Path $env:LOCALAPPDATA 'RemoteClientWatchdog'
 $LogFile = Join-Path $BaseDir 'client-watchdog.log'
@@ -144,9 +137,13 @@ function Test-RemoteTargets {
     }
     $all = $true
     foreach ($t in $targets) {
-        $parts = [string]$t -split ':'
-        $h = $parts[0]
-        $p = if ($parts.Count -gt 1) { [int]$parts[1] } else { 3389 }
+        if ($t -match '^\[(.+)\]:(\d+)$') {
+            $h = $Matches[1]; $p = [int]$Matches[2]
+        } elseif ($t -match '^([^:]+):(\d+)$') {
+            $h = $Matches[1]; $p = [int]$Matches[2]
+        } else {
+            $h = $t; $p = 3389
+        }
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $up = Test-TcpPort -HostName $h -Port $p -TimeoutMs 4000
         $sw.Stop()
@@ -169,6 +166,7 @@ function Test-CrdServicePath {
 function Invoke-Launcher {
     param([bool]$Recovered)
     $cfg = $global:cfg
+    if (-not $Recovered -and $cfg.KeepAliveMinutes -le 0) { return }
     $state = Get-State
     $now = Get-Date
     if ($cfg.KeepAliveMinutes -gt 0 -and $state.LastLaunchUtc) {
@@ -177,6 +175,7 @@ function Invoke-Launcher {
     }
     if ($recovered -and -not $cfg.LaunchOnRecover) { return }
     if ($cfg.RdpFile -and (Test-Path -LiteralPath $cfg.RdpFile)) {
+        if (Get-Process mstsc -ErrorAction SilentlyContinue) { return }
         try { Start-Process -FilePath 'mstsc.exe' -ArgumentList ('"' + $cfg.RdpFile + '"') -ErrorAction Stop; Write-Log 'INFO' ('RDP acildi: ' + $cfg.RdpFile) } catch { Write-Log 'WARN' ('mstsc baslatilamadi: ' + $_.Exception.Message) }
     } elseif ($cfg.BrowserUrl) {
         try { Start-Process -FilePath $cfg.BrowserUrl -ErrorAction Stop; Write-Log 'INFO' ('tarayici acildi: ' + $cfg.BrowserUrl) } catch { Write-Log 'WARN' ('tarayici acilamadi: ' + $_.Exception.Message) }
@@ -203,7 +202,7 @@ function Invoke-Alerts {
     $send = $false
     $recovered = $false
     if ($state.AlertKey -ne $key) { $send = $true; $recovered = ($key -eq 'OK' -and $state.AlertKey -ne '') }
-    elseif ($state.AlertUtc) {
+    elseif ($key -ne 'OK' -and $state.AlertUtc) {
         $last = [datetime]::Parse([string]$state.AlertUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
         if (($now - $last).TotalHours -ge [double]$cfg.AlertRepeatHours) { $send = $true }
     }
@@ -299,6 +298,7 @@ function Install-Watchdog {
         Write-Host 'Zamanlanmis gorev kurulamadi, periyodik olarak kendini baslatan dongu kuruluyor.'
         $run = 'Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File ""' + $ScriptPath + """"
         Set-ItemProperty -Path ('HKCU:\Software\Microsoft\Windows\CurrentVersion\Run') -Name 'RemoteClientWatchdog' -Value $run -ErrorAction SilentlyContinue
+        Write-Log '[WARN] HKCU Run yedegi tek seferlik calisir, periyodik degil. Zamanlanmis gorevi manuel olarak kurun.'
     }
     Write-Host ('Config: ' + $ConfigFile)
 }

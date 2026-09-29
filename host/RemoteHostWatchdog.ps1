@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
     RemoteHostWatchdog - UZAK MAKINE tarafi (host)
     Kendini periyodik test eder, bozulan parcalari onarir, olculmezse makineyi yeniden baslatir,
@@ -214,7 +214,14 @@ function Get-State {
 
 function Save-State {
     param($State)
-    try { $State | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $StateFile -Encoding UTF8 } catch { }
+    for ($i = 1; $i -le 3; $i++) {
+        try {
+            $State | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $StateFile -Encoding UTF8
+            break
+        } catch {
+            if ($i -lt 3) { Start-Sleep -Milliseconds 200 }
+        }
+    }
 }
 
 function Add-Result {
@@ -424,12 +431,20 @@ function Invoke-NetworkRepairFlow {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $applied = @()
     $rungs = @()
+    $cancelled = $false
     $healthy = Test-NetworkHealthy
     Write-Log 'WARN' ('elle ag onarimi basladi: ' + $Reason + ' (saatlim: ' + $healthy + ')')
     if ($healthy) {
         Write-Log 'INFO' 'ag saglikli, hicbir kademe uygulanmadi'
     } else {
+        $cancelled = $false
         for ($r = 1; $r -le $MaxRung; $r++) {
+            <# Kullanici paneli kapattiysa burada dururuz; kademeler yari birakilmasin. #>
+            if (Test-RepairCancelled) {
+                $cancelled = $true
+                Write-Log 'WARN' ('ag onarimi iptal edildi (kullanici istedi), kademe ' + $r + ' uygulanmadi')
+                break
+            }
             Write-Log 'INFO' ('kademe ' + $r + '/' + $MaxRung + ' basliyor: ' + (Get-RepairRungName $r))
             $steps = @(Invoke-NetworkRepair -Rung $r)
             $rungs += $r
@@ -453,12 +468,15 @@ function Invoke-NetworkRepairFlow {
         reason = $Reason
         healthyAtStart = $healthy
         ok = ($still.Count -eq 0)
+        cancelled = $cancelled
         rungs = $rungs
         actions = $applied
         stillBad = $still
         elapsedSec = [int]$sw.Elapsed.TotalSeconds
     }
-    Write-Log $(if ($script:LastRepair.ok) { 'INFO' } else { 'WARN' }) ('ag onarimi bitti: basarili=' + $script:LastRepair.ok + ', kademe=' + ($rungs -join ',') + ', sure=' + $script:LastRepair.elapsedSec + ' sn' + $(if ($still.Count) { ', kalan sorun: ' + ($still -join ', ') } else { '' }))
+    Write-Log $(if ($cancelled) { 'WARN' } elseif ($script:LastRepair.ok) { 'INFO' } else { 'WARN' }) $(if ($cancelled) { ('ag onarimi iptal edildi (kullanici kapatti), uygulanan kademe=' + ($rungs -join ',') + ', sure=' + $script:LastRepair.elapsedSec + ' sn') } else { ('ag onarimi bitti: basarili=' + $script:LastRepair.ok + ', kademe=' + ($rungs -join ',') + ', sure=' + $script:LastRepair.elapsedSec + ' sn' + $(if ($still.Count) { ', kalan sorun: ' + ($still -join ', ') } else { '' })) })
+    # Iptal kaydi kalmasin: sonraki otomatik onarimlar da iptal sayilmasin
+    Clear-RepairCancelIfIdle
     return $script:LastRepair
 }
 
@@ -469,6 +487,8 @@ function Read-RepairRequest {
     $req = $null
     try { $req = Get-Content -LiteralPath $reqPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
     try { Remove-Item -LiteralPath $reqPath -Force -ErrorAction SilentlyContinue } catch { }
+    # Yeni istek geldi: onceki iptal kaydini temizle (yoksa bu istek de iptal sayilir)
+    Clear-RepairCancel
     $rung = 0
     if ($req -and $req.PSObject.Properties.Name -contains 'rung') { try { $rung = [int]$req.rung } catch { } }
     $who = 'panel'
@@ -479,6 +499,30 @@ function Read-RepairRequest {
 function Test-RepairRequestPending {
     <#  Panelin biraktigi onarim istegi dosyasi var mi (bu calisma icinde mi geldi)? #>
     return (Test-Path -LiteralPath (Join-Path $BaseDir 'repair-request.json'))
+}
+
+function Test-RepairCancelled {
+    <#
+        Panelde kullanici onarim penceresini kapattiysa repair-cancel.json yazilir.
+        Akis burada kontrol edip kalan kademeleri uygulamadan durur; boylece kullanici
+        "iptal" dediginde onarim gercekten yari birakilmaz.
+    #>
+    return (Test-Path -LiteralPath (Join-Path $BaseDir 'repair-cancel.json'))
+}
+
+function Clear-RepairCancel {
+    <#  Yeni onarim istegi geldiginde eski iptal kaydini temizle, yoksa onarim hic baslamaz. #>
+    try { Remove-Item -LiteralPath (Join-Path $BaseDir 'repair-cancel.json') -Force -ErrorAction SilentlyContinue } catch { }
+}
+
+function Clear-RepairCancelIfIdle {
+    <#
+        Onarim akisi bittiginde iptal kaydini kaldir. Kaydi kalici birakirsak, sonraki
+        otomatik (izleyici) onarimlar da kullanici kapatmadi haliyle iptal sayilir.
+    #>
+    if (Test-RepairCancelled) {
+        try { Remove-Item -LiteralPath (Join-Path $BaseDir 'repair-cancel.json') -Force -ErrorAction SilentlyContinue } catch { }
+    }
 }
 
 function Test-NetworkLayer {
@@ -942,11 +986,14 @@ function Write-RebootAnnounce {
              Panel acik degilse dosya kalir; panel acilinca 30 dk'ya kadar konusur.
           2) msg.exe + Telegram -> ekran/telefon bildirimi.
         Amac: kullanici bilgisayarin kendiliginden kapanacagini ANLASIN.
+        -VoiceKey verilirse panel onbellekteki hazir kadin sesli dosyayi calar; geri sayim
+        metni her seferinde farkli kuruldugu icin bu, internetsiz anonsu garanti eder.
     #>
     param(
         [string]$Text = 'Ağ sorunları çözülemedi, bilgisayar yeniden başlatılacak.',
         [int]$CountdownSeconds = 60,
-        [switch]$Force
+        [switch]$Force,
+        [string]$VoiceKey = ''
     )
     $state = Get-State
     $kalan = [math]::Max(0, [int]$CountdownSeconds)
@@ -966,10 +1013,18 @@ function Write-RebootAnnounce {
     $metin += ' Açık belgeler varsa kaydediliyor.'
     Write-Log 'ALERT' ('RESTART ANNOSU: ' + $metin)
     # 1) Panel icin bekleyen anons (dosya; panel okuyup konusur)
+    # voiceKey: onbellekteki kadin sesli varyant. Geri sayim metni DINAMIK ("60/30/10
+    # saniye") oldugu icin kalan saniyeye gore hazir varyant secilir; panel bu anahtarla
+    # internetsiz onbellekten calar, eslesmezse metin eslesmesine duser.
+    $vkey = $VoiceKey
+    if (-not $vkey) {
+        $vkey = 'rebootplan'
+        if ($kalan -eq 60) { $vkey = 'reboot60' } elseif ($kalan -eq 30) { $vkey = 'reboot30' } elseif ($kalan -le 10 -and $kalan -gt 0) { $vkey = 'reboot10' }
+    }
     try {
         $vf = Join-Path $BaseDir 'pending-voice.json'
         if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
-        ([ordered]@{ text = [string]$metin; sfx = 'reboot'; at = (Get-Date).ToString('o') } | ConvertTo-Json) |
+        ([ordered]@{ text = [string]$metin; sfx = 'reboot'; voiceKey = $vkey; at = (Get-Date).ToString('o') } | ConvertTo-Json) |
             Set-Content -LiteralPath $vf -Encoding UTF8
     } catch { Write-Log 'WARN' ('restart anonsu dosyasi yazilamadi: ' + $_.Exception.Message) }
     # 2) Ekran + Telegram
@@ -1180,19 +1235,6 @@ function Invoke-RebootIfNeeded {
     $uptime = Get-UptimeMinutes
     if ($uptime -lt [int]$cfg.MinUptimeMinutes) {
         Write-Log 'INFO' ('restart ertelendi: makine sadece ' + $uptime + ' dk acik (esik ' + $cfg.MinUptimeMinutes + ' dk)')
-        # ONCEDEN sadece log yazilip sayac sifirlaniyordu; ama NetResetPendingReboot=1 ise
-        # limit=1 oldugu icin sayac BIR SONRAKI dongude tekrar esigi asar ve yeniden
-        # denenir. Adaptor 20 sn kapali kalsaydi bile (geri acilsa da) restart tetikleniyordu.
-        # Burada gercek bir sorun varken, erteleme icin sayaci sifirlIYORUZ: kullanici sorunu
-        # elle giderdiyse dongu saglikli gorunur ve sayac zaten 0 olur; sorun devam ediyorsa
-        # MinUptimeMinutes dolunca yeniden sayilir. Boylece "geri actim ama yine de restart
-        # edildi" durumu olmaz.
-        $state.ConsecutiveFailures = 0
-        # Bekleyen zorunlu-restart bayragini da dusur: kullanicinin baglantiyi geri getirmesi
-        # sorunu cozmus demektir, bir sonraki dongude zorla restart yapilmayacak.
-        $state.NetResetPendingReboot = 0
-        Save-State $state
-        Write-Log 'INFO' 'restart ertelemesi: hata sayaci ve bekleyen zorunlu-restart bayragi sifirlandi (kullanici sorunu elle giderirse restart olmayacak)'
         return
     }
     $badNames = ($bad | ForEach-Object { $_.Name }) -join ', '
@@ -1270,7 +1312,7 @@ function Invoke-RebootIfNeeded {
                 Write-Log 'INFO' 'restart iptal edildi: panelden iptal istendi (reboot-cancel.flag)'
                 # Iptal edildi: kullaniciyi rahatlatacak ikinci anons (dosya panelde konusulur)
                 try {
-                    ([ordered]@{ text = 'Yeniden başlatma iptal edildi, bilgisayar açık kalacak.'; sfx = 'ok'; at = (Get-Date).ToString('o') } | ConvertTo-Json) |
+                    ([ordered]@{ text = 'Yeniden başlatma iptal edildi, bilgisayar açık kalacak.'; sfx = 'ok'; voiceKey = 'rebootcancel'; at = (Get-Date).ToString('o') } | ConvertTo-Json) |
                         Set-Content -LiteralPath (Join-Path $BaseDir 'pending-voice.json') -Encoding UTF8
                 } catch { }
                 $state.RebootsUtc = @(@($state.RebootsUtc) | Where-Object { $_ -ne $gercekyeniden })
@@ -1287,19 +1329,19 @@ function Invoke-RebootIfNeeded {
                     $state.LastOkUtc = (Get-Date).ToString('o')
                     Save-State $state
                     try {
-                        ([ordered]@{ text = 'Yeniden başlatma iptal edildi, bilgisayar açık kalacak.'; sfx = 'ok'; at = (Get-Date).ToString('o') } | ConvertTo-Json) |
+                        ([ordered]@{ text = 'Yeniden başlatma iptal edildi, bilgisayar açık kalacak.'; sfx = 'ok'; voiceKey = 'rebootcancel'; at = (Get-Date).ToString('o') } | ConvertTo-Json) |
                             Set-Content -LiteralPath (Join-Path $BaseDir 'pending-voice.json') -Encoding UTF8
                     } catch { }
                     return
                 }
                 # Hala kopuk: geri sayimi hatirlat (kullanici baska isle mesgulse duysun diye)
                 if ($bekle -ge 30 -and ($kaldi % 20) -eq 0 -and $kaldi -gt 10) {
-                    $null = Write-RebootAnnounce -Text ('Ağ sorunları çözülemedi, bilgisayar ' + $kaldi + ' saniye içinde yeniden başlatılacak.') -CountdownSeconds 0 -Force
+                    $null = Write-RebootAnnounce -Text ('Ağ sorunları çözülemedi, bilgisayar ' + $kaldi + ' saniye içinde yeniden başlatılacak.') -CountdownSeconds 0 -Force -VoiceKey 'reminder'
                 }
             }
         }
     }
-    shutdown.exe /r /t $cfg.RebootDelaySeconds /c 'RemoteHostWatchdog: onarilamayan baglanti sorunu' 2>&1 | Out-Null
+    shutdown.exe /r /t 0 /c 'RemoteHostWatchdog: onarilamayan baglanti sorunu' 2>&1 | Out-Null
 }
 
 function Show-Results {
@@ -1593,6 +1635,45 @@ function Get-ProbeState {
     return [string]$j.last
 }
 
+function Send-NetDownAnnounce {
+    <#
+        ANLIK ag sorunu algilandiginda sesli anons. Iki kanaldan birden gider:
+          1) pending-voice.json -> panel dosyayi okuyup TURKCE KONUSUR (kullanici duyar).
+          2) msg.exe + Telegram -> ekran/telefon bildirimi.
+        Bastirma (throttle): kablo takilip cikarildiginda saniyeler icinde arka arkaya olay
+        gelir; kullanici her seferinde duymasin diye ayni sorun icin kisa surede tekrar
+        anons yapilmaz. "Saglandi" anonsu bastirmadan gecmeli, cunku her seferinde degil,
+        sadece gercekten toparlanma aninda soylenmeli.
+    #>
+    param([string]$Detay = '', [bool]$YeniSorun = $true)
+    $cfg = $global:cfg
+    # Ayni kesintinin tekrari: onceki durum da 'bad' ise bu yeni olay degil, ayni sorun.
+    if (-not $YeniSorun) { return $false }
+
+    $eksik = ([string]$Detay).Trim()
+    if (-not $eksik) { $eksik = 'baglanti' }
+    $metin = 'Ağ sorunu algılandı. Eksik: ' + $eksik + '. Onarım başlatılıyor.'
+    Write-Log 'ALERT' ('ANLIK AG SORUNU: ' + $metin)
+
+    # 1) Panel icin bekleyen anons (dosya; panel okuyup konusur)
+    # NOT: pending-voice.json TEK dosya ve restart anonsu da onu yazar. Buraya yazdigimiz
+    # anonsu bir restart bildirimi ezebilirdi (canli testte boyle oldu), bu yuzden onarim
+    # anonsunu KALICI (kuyruk) dosyasina yaziyoruz; panel her iki dosyayi da okur.
+    # voiceKey: sabit cumlenin onbellekteki adi. 'Eksik: ...' kismi DINAMIK oldugu icin
+    # metin birebir eslesmez; panel bu anahtarla kismi eslesme yapar ve internetsiz
+    # kadin sesli anonsu onceden uretilmis dosyadan calar.
+    try {
+        $vfRepair = Join-Path $BaseDir 'pending-repair.json'
+        if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
+        ([ordered]@{ text = [string]$metin; sfx = 'warn'; voiceKey = 'netdown'; at = (Get-Date).ToString('o') } | ConvertTo-Json) |
+            Set-Content -LiteralPath $vfRepair -Encoding UTF8
+    } catch { Write-Log 'WARN' ('anlik sorun anonsu dosyasi yazilamadi: ' + $_.Exception.Message) }
+    # 2) Ekran + Telegram (kullanici basinda oturum yoksa Telegram devrede kalir)
+    try { msg.exe * /TIME:300 ('[' + $env:COMPUTERNAME + '] ' + $metin) 2>&1 | Out-Null } catch { }
+    try { Send-Telegram ('[UYARI] ' + $env:COMPUTERNAME + ': ' + $metin) } catch { }
+    return $true
+}
+
 function Save-ProbeState {
     <#
         Sonucu ve zamani yazar; -Beat ile "yoklama calisiyor" log zamani da guncellenir.
@@ -1628,7 +1709,7 @@ function Test-ProbeBeatDue {
 function Test-CycleRunning {
     <#  Su an baska bir tam dongu calisiyor mu? (ayni anda tek dongu kurali) #>
     try {
-        $m = New-Object System.Threading.Mutex($false, 'Local\RemoteWatchdogCycle')
+        $m = New-Object System.Threading.Mutex($false, 'Global\RemoteWatchdogCycle')
         $got = $m.WaitOne(0)
         if ($got) { $m.ReleaseMutex() }
         $m.Dispose()
@@ -1672,17 +1753,19 @@ function Get-FastProbeDecision {
         $beat = Test-ProbeBeatDue
         Save-ProbeState 'ok' -Beat:$beat
         if ($beat) { Write-Log 'INFO' 'hizli yoklama calisiyor (olay dinleyici + 1 dk yedegi) - ag saglikli' }
-        return [pscustomobject]@{ Action = 'ok'; Detay = '' }
+        return [pscustomobject]@{ Action = 'ok'; Detay = ''; YeniSorun = $false }
     }
     if ($bad) {
         Save-ProbeState 'bad'
         $eksik = @(@(if (-not $h.Ip) { 'IP' }) + @(if (-not $h.Dns) { 'DNS' }) + @(if (-not $h.Https) { 'HTTPS' }) + @(if (-not $h.Signal) { 'sinyal' }) -join ',')
         Write-Log 'WARN' ('hizli yoklama sorun gordu (' + $eksik + ') -> tam dongu tetikleniyor')
-        return [pscustomobject]@{ Action = 'full'; Detay = $eksik }
+        # Yeni kesinti mi? (onceki 'bad' degilse). Anonsu burada yapmiyoruz: Save-ProbeState
+        # 'bad' yazdigi icin Send-NetDownAnnounce bastirmaya dusup sessizce cikarirdi.
+        return [pscustomobject]@{ Action = 'full'; Detay = $eksik; YeniSorun = ($prev -ne 'bad') }
     }
     Save-ProbeState 'ok'
     Write-Log 'INFO' 'hizli yoklama baglanti yeniden geldi -> duzelme kaydi icin tam dongu tetikleniyor'
-    return [pscustomobject]@{ Action = 'full'; Detay = 'duzeldi' }
+    return [pscustomobject]@{ Action = 'full'; Detay = 'duzeldi'; YeniSorun = $false }
 }
 
 function Invoke-FastProbe {
@@ -1694,6 +1777,8 @@ function Invoke-FastProbe {
     #>
     $d = Get-FastProbeDecision
     if ($d.Action -eq 'full') {
+        # Anlik sorun anonsu: once "duzeldi" gelirse soylenmez, yalnizca yeni kesintide
+        if ($d.YeniSorun) { try { $null = Send-NetDownAnnounce -Detay $d.Detay -YeniSorun $true } catch { Write-Log 'WARN' ('anlik sorun anonsu hatasi: ' + $_.Exception.Message) } }
         $gorev = Start-FullCycle
         Write-Log 'INFO' ('tam dongu tetikleme sonucu: ' + $gorev)
     }
@@ -1744,16 +1829,26 @@ public class RwNetWatch {
         try {
             # 60 sn'de bir zaman asimi: yedek yoklama (olay gelmezse de calisir)
             if ([RwNetWatch]::Wait(60000)) {
+                Start-Sleep -Seconds 3
                 Write-Log 'INFO' 'ag olayi geldi (kablo/adaptor/IP degisti) -> anlik yoklama'
                 $son = Get-Date
                 # Adaptor kapanip acilmasinda birkac deneme: IP/DHCP oturmasini bekle
                 for ($i = 1; $i -le 3; $i++) {
                     $dd = Get-FastProbeDecision
-                    if ($dd.Action -eq 'full') { try { $null = Start-FullCycle; Write-Log 'INFO' 'olay sonrasi tam dongu tetiklendi' } catch { } ; break }
+                    if ($dd.Action -eq 'full') {
+                        if ($dd.YeniSorun) { try { $null = Send-NetDownAnnounce -Detay $dd.Detay -YeniSorun $true } catch { Write-Log 'WARN' ('anlik sorun anonsu hatasi: ' + $_.Exception.Message) } }
+                        try { $null = Start-FullCycle; Write-Log 'INFO' 'olay sonrasi tam dongu tetiklendi' } catch { }
+                        break
+                    }
                     if ($i -lt 3) { Start-Sleep -Seconds 5 }
                 }
             } elseif (((Get-Date) - $son).TotalMinutes -ge 1) {
-                $null = Get-FastProbeDecision
+                $dd = Get-FastProbeDecision
+                if ($dd.Action -eq 'full') {
+                    if ($dd.YeniSorun) { try { $null = Send-NetDownAnnounce -Detay $dd.Detay -YeniSorun $true } catch { Write-Log 'WARN' ('anlik sorun anonsu hatasi: ' + $_.Exception.Message) } }
+                    try { $null = Start-FullCycle } catch { }
+                    break
+                }
                 $son = Get-Date
             }
         } catch { Write-Log 'WARN' ('dinleyici hatasi: ' + $_.Exception.Message); Start-Sleep -Seconds 5 }
@@ -1811,7 +1906,11 @@ function Invoke-NetEventNow {
     $son = Get-Date
     for ($i = 1; $i -le 3; $i++) {
         $dd = Get-FastProbeDecision
-        if ($dd.Action -eq 'full') { try { $null = Start-FullCycle; Write-Log 'INFO' 'olay sonrasi tam dongu tetiklendi (elle test)' } catch { }; break }
+        if ($dd.Action -eq 'full') {
+            if ($dd.YeniSorun) { try { $null = Send-NetDownAnnounce -Detay $dd.Detay -YeniSorun $true } catch { Write-Log 'WARN' ('anlik sorun anonsu hatasi: ' + $_.Exception.Message) } }
+            try { $null = Start-FullCycle; Write-Log 'INFO' 'olay sonrasi tam dongu tetiklendi (elle test)' } catch { }
+            break
+        }
         if ($i -lt 3) { Start-Sleep -Seconds 5 }
     }
     exit 0
@@ -1849,7 +1948,7 @@ if ($ForceReboot) {
     exit 0
 }
     $cycleLock = $null
-    try { $cycleLock = New-Object System.Threading.Mutex($false, 'Local\RemoteWatchdogCycle') } catch { }
+    try { $cycleLock = New-Object System.Threading.Mutex($false, 'Global\RemoteWatchdogCycle') } catch { }
     if ($cycleLock) {
         $owns = $false
         try { $owns = $cycleLock.WaitOne(0) } catch { $owns = $true }
