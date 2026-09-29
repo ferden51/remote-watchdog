@@ -79,6 +79,7 @@ $script:LastState = ''
 $script:LastColor = $null
 $script:HIcon = [IntPtr]::Zero
 $script:ExitRequested = $false
+$script:WinClosed = $false
 $script:RoleCache = $null
 $script:RoleCacheUntil = [datetime]::MinValue
 $script:Mutex = New-Object System.Threading.Mutex($false, 'Local\RemoteWatchdogPanel')
@@ -169,6 +170,10 @@ try {
 if (-not $script:MutexAcquired -and -not $SelfTest) {
     $script:OtherInstance = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
             Where-Object { $_.CommandLine -and $_.CommandLine -match ('-File\s+"?[^"]*' + [regex]::Escape([string]$ScriptPath)) -and $_.ProcessId -ne $PID })
+    # Kullanici kisa yola (masaustu/Baslat menusu) bastiginda ORnek -Background DEGILDIR
+    # (Start-Panel.vbs "show" argumani) ve calisan ornekten "penceremi goster" ister.
+    # Arka plan tetikleyicisi (RemoteHostPanel gorevi, her 5 dk) -Background ile gelir ve
+    # BAYRAK YAZMAZ: yoksa her 5 dakikada pencere kendiliginden one atardi.
     if (-not $Background -and -not $SelfTest) {
         try { Set-Content -LiteralPath $ShowRequest -Value (Get-Date).ToString('o') -Encoding UTF8 -ErrorAction SilentlyContinue } catch { }
         foreach ($o in $script:OtherInstance) {
@@ -2987,8 +2992,17 @@ try { Speak-PendingVoice } catch { Write-Trace ('bekleyen anons hatasi: ' + $_.E
             Write-Trace 'pencere kapatma istegi yoksayildi (trayde kalindi)'
         })
     $w.add_Closed({
+            # Pencere kapandi: artik Show() cagirmak "Pencere kapatildi..." hatasi verir.
+            $script:WinClosed = $true
+            # Cikis (tepsi > Cikis): Dispatcher'i kapat ki [Dispatcher]::Run() donup
+            # betik bitsin. ONCEDEN "statik Dispatcher.Shutdown" cagriliyordu; WPF'te boyle
+            # bir statik metot YOKTUR (statikler: Run/PushFrame/ExitAllFrames/Yield...), cagri
+            # MethodNotFound ile hata verip `catch {}` ile yutuluyor, Dispatcher hic kapanmiyor,
+            # surec sonsuza kadar ayakta kaliyor ve mutex'i tutmaya devam ediyordu. Bu yuzden
+            # tray'den ciktiktan sonra kisa yola basmak paneli geri getirmiyordu.
             if ($script:ExitRequested) {
-                try { [System.Windows.Threading.Dispatcher]::Shutdown() } catch { }
+                try { Write-Trace 'cikis onaylandi: dispatcher kapatiliyor' } catch { }
+                try { $script:Win.Dispatcher.InvokeShutdown() } catch { try { [System.Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown() } catch { } }
             }
         })
     $script:Timer = New-Object System.Windows.Threading.DispatcherTimer
@@ -3036,10 +3050,21 @@ try { Speak-PendingVoice } catch { Write-Trace ('bekleyen anons hatasi: ' + $_.E
             if (-not (Test-Path -LiteralPath $ShowRequest)) { return }
             if (((Get-Date) - $script:StartedAt).TotalSeconds -lt 10) { return }
             try { Remove-Item -LiteralPath $ShowRequest -Force -ErrorAction SilentlyContinue } catch { }
-            $script:Win.Show()
-            $script:Win.WindowState = 'Normal'
-            $script:Win.Activate()
-            Write-Trace 'goster istegi islendi (pencere one getirildi)'
+            # Cikan panel artik gosterilemez ("Pencere kapatildi..." hatasi verip YAKALANAMAYAN
+            # HATA olarak log'a duserdi). Cikar istegi gelmis demektir; bayragi birakmadan cik.
+            # NOT: $script:Win.IsLoaded kapanma sonrasi de True kaliyor, guvenilir degil;
+            # asil bayrak add_Closed icinde $script:WinClosed olarak tutuluyor.
+            if ($script:ExitRequested -or $script:WinClosed) {
+                Write-Trace 'goster istegi geldi ama panel kapali; acik kalmayan ornek kapatiliyor'
+                try { $script:Win.Dispatcher.InvokeShutdown() } catch { }
+                return
+            }
+            try {
+                $script:Win.Show()
+                $script:Win.WindowState = 'Normal'
+                $script:Win.Activate()
+                Write-Trace 'goster istegi islendi (pencere one getirildi)'
+            } catch { Write-Trace ('goster istegi islenemedi: ' + $_.Exception.Message) }
         })
     # Dispatcher uzerinde tek merkezî hata yakalayici (Window'da add_DispatcherUnhandledException
     # metodu YOKTUR; Dispatcher.UnhandledException kullanilir). Dosya sonunda tekrar KAYDEDILMEZ.
@@ -3067,6 +3092,8 @@ function New-PanelShortcuts {
     <#
         Baslat menusu + masaustu kisayolu. Hedef wscript + Start-Panel.vbs: konsol penceresi
         acilmaz (Windows Terminal -WindowStyle Hidden'i yok sayiyor), tiklaninca panel acar.
+        "show" argumani sart: Start-Panel.vbs argumansiz cagrildiginda -Background ile baslar ve
+        pencere gizli kalir; kisa yoldan beklenen davranis panelin gorunur acilmasi.
     #>
     $vbs = Join-Path $UiDir 'Start-Panel.vbs'
     if (-not (Test-Path -LiteralPath $vbs)) { return @() }
@@ -3083,7 +3110,7 @@ function New-PanelShortcuts {
                 if (-not (Test-Path -LiteralPath (Split-Path -Parent $p))) { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $p) | Out-Null }
                 $lnk = $ws.CreateShortcut($p)
                 $lnk.TargetPath = (Join-Path $env:SystemRoot 'System32\wscript.exe')
-                $lnk.Arguments = '"' + $vbs + '"'
+                $lnk.Arguments = '"' + $vbs + '" show'
                 $lnk.WorkingDirectory = $UiDir
                 if (Test-Path -LiteralPath $ico) { $lnk.IconLocation = $ico + ',0' }
                 $lnk.Description = 'RemoteWatchdog kontrol paneli (tepsi simgesi)'

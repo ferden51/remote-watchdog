@@ -287,6 +287,51 @@ if (-not $mx.Success) { Ok 'panel XAML bulundu' $false } else {
     Ok 'Stop-Sfx onbellegi temizliyor' (@($script:SfxPlayers.Keys).Count -eq 0)
 
     Write-Host ''
+    Write-Host '-- Cikis yolu: dispatcher gercekten kapaniyor mu (mutu kilitleme regresyonu) --'
+    <#
+        Hata: tepsi "Cikis" -> add_Closed -> VAR OLMAYAN statik Dispatcher.Shutdown cagrisi
+        (catch {} ile yutuluyordu) -> Dispatcher.Run() HIC DONMUYORDU -> powershell surecu
+        ayakta kalip 'Local\RemoteWatchdogPanel' mutex'ini tutmaya devam ediyordu. Kullanicinin
+        actigi her yeni ornek mutex'te cikip sessizce cikiyor, panel bir daha acilmiyordu.
+
+        Burada panelin gercek cikis akisi taklit edilir: ExitRequested -> Close() -> add_Closed
+        -> Dispatcher.InvokeShutdown() -> Run() doner. Test, Run() gercekten donuyor mu diye bakar.
+    #>
+    $exitScript = Join-Path $env:TEMP ('rw-exit-test-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    $exitProbe = @'
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName WindowsBase
+$script:ExitRequested = $false
+$script:WinClosed = $false
+$script:Win = New-Object System.Windows.Window
+$script:Win.Width = 300
+$script:Win.Height = 200
+$w = $script:Win
+$w.add_Closing({ param($s, $e) if (-not $script:ExitRequested) { $e.Cancel = $true; $script:Win.Hide() } })
+$w.add_Closed({
+    $script:WinClosed = $true
+    if ($script:ExitRequested) { try { $script:Win.Dispatcher.InvokeShutdown() } catch { } }
+})
+$w.Show()
+$t = New-Object System.Windows.Threading.DispatcherTimer
+$t.Interval = [TimeSpan]::FromMilliseconds(1200)
+$t.Add_Tick({ $t.Stop(); $script:ExitRequested = $true; $script:Win.Close() })
+$t.Start()
+$sw = [Diagnostics.Stopwatch]::StartNew()
+[System.Windows.Threading.Dispatcher]::Run()
+$sw.Stop()
+if ($script:WinClosed -and $sw.ElapsedMilliseconds -lt 15000) { 'PASS ' + $sw.ElapsedMilliseconds } else { 'FAIL' }
+'@
+    Set-Content -LiteralPath $exitScript -Value $exitProbe -Encoding UTF8
+    $exitRes = $null
+    try { $exitRes = (& powershell -NoProfile -STA -ExecutionPolicy Bypass -File $exitScript 2>$null | Select-Object -Last 1) } catch { $exitRes = 'HATA' }
+    Remove-Item -LiteralPath $exitScript -Force -ErrorAction SilentlyContinue
+    $exitOk = ([string]$exitRes -match '^PASS (\d+)')
+    Ok ('tray Cikis -> Dispatcher.Run donuyor, surec bitiyor (mutex birakiliyor)' + $(if ($exitOk) { ': ' + $exitOk.Matches[0].Groups[1].Value + ' ms' } elseif ($exitRes) { ': ' + $exitRes } else { '' })) $exitOk
+    # Yanan WPF sureci kalmasin diye kalan pencereyi kapat (guvenlik agi)
+    try { if ($script:Win) { $script:Win.Close() } } catch { }
+
+    Write-Host ''
     Write-Host '-- Anons metni duzeltme (ASCII kontrol adi -> Turkce telaffuz) --'
     $script:TtsFix = @{
         'Internet erisimi'            = 'İnternet erişimi'

@@ -4,6 +4,36 @@ Bu dosya sürüm bazlı değişiklikleri tutar. Sürüm numarası depodaki `VERS
 panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürümleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.2.3] - 2026-09-29
+
+### Düzeltilen
+- **Tray'den çıkış yapınca program bir daha açılmıyordu (asıl hata):** *Çıkış* menüsünde
+  `add_Closed` içinde `[System.Windows.Threading.Dispatcher]::Shutdown()` çağrılıyordu; WPF'te
+  böyle bir **statik metot yok** (`Run`, `PushFrame`, `ExitAllFrames`, `Yield` var). Çağrı
+  `MethodNotFound` hatası verip `catch {}` ile yutulduğu için `Dispatcher.Run()` hiç dönmüyor,
+  **PowerShell süreci sonsuza kadar ayakta kalıyor ve `Local\RemoteWatchdogPanel` mutex'ini tutmaya
+  devam ediyordu**. Sonuç: kısayola (ya da göreve) tekrar basıldığında yeni örnek mutex'te
+  çıkıp sessizce kapanıyor, panel bir daha açılmıyordu. Artık `Dispatcher.InvokeShutdown()`
+  (gerçekten var olan metot) çağrılıyor → `Run()` dönüyor → betik bitiyor, süreç çıkıyor, mutex
+  serbest kalıyor.
+- **Kısayol paneli hiç açmıyordu (ikinci hata):** `Start-Panel.vbs` her zaman `-Background`
+  gönderiyordu; bu bayrak pencereyi gizli başlatıyor, ayrıca ikinci örnek çalışan panelden
+  "penceremi göster" isteğini **yazmıyordu**. Başlatıcıya `show` argümanı eklendi: masaüstü ve
+  Başlat menüsü kısayolları `Start-Panel.vbs show` ile çağırıp paneli görünür açıyor;
+  zamanlanmış görev ise argümansız çağrılmaya devam edip arka planda çalışıyor.
+- **Çıkmış panele "göster" isteği hata veriyordu:** `ShowTimer` kapalı pencereye `Show()`
+  çağırıp `YAKALANAMAYAN HATA ... Pencere kapatıldıktan sonra ... çağrılamaz` ile log'a düşüyordu.
+  `add_Closed` içinde `$script:WinClosed` bayrağı tutuluyor; istek geldiğinde pencere kapalıysa
+  örnek düzgün şekilde kapatılıyor. (`$script:Win.IsLoaded` kapanma sonrası da `True` kaldığı için
+  güvenilir değil.)
+
+### Test
+- Regresyon testleri eklendi: `Test-All.ps1` artık geçersiz statik çağrının **kalmadığını**,
+  `InvokeShutdown` kullanıldığını, kısayolun `show` argümanı verdiğini ve başlatıcının `show`
+  modunda `-Background` göndermediğini denetliyor; `Test-UI.ps1` ise gerçek bir WPF penceresiyle
+  tray *Çıkış* akışını çalıştırıp `Dispatcher.Run()`'un gerçekten döndüğünü doğruluyor
+  (eski kodda bu test kırmızıya düşüyor, süreç ayakta kalıyor).
+
 ## [1.2.2] - 2026-09-29
 
 ### Eklenen

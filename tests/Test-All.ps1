@@ -262,6 +262,26 @@ if ($Section -eq 0 -or $Section -eq 1) {
         Ok 'kurulum betigi Start Menu kisayolu olusturuyor' ($setupText -match "GetFolderPath\('Programs'\)")
         Ok 'kurulum betigi masaustu kisayolu olusturuyor' ($setupText -match "GetFolderPath\('Desktop'\)")
         Ok 'kisayol wscript ile pencere acmadan basliyor' ($setupText -match 'wscript\.exe')
+        # Kisa yol "show" argumani vermeli: Start-Panel.vbs argumansiz cagrildiginda -Background
+        # ile baslar ve pencere gizli kalir (kullanici panelin acmadigini sanir).
+        Ok 'kurulum betigi kisa yola "show" argumani veriyor' ($setupText -match '\$lnk\.Arguments = ''"'' \+ \$vbs \+ ''" show''')
+    }
+    # --- Tray'den cikis sonrasi kisayolla geri acma (regresyon) ---
+    # Hata: add_Closed icinde [System.Windows.Threading.Dispatcher]::Shutdown() cagriliyordu;
+    # o metot WPF'te YOKTUR, cagri `catch {}` ile yutuluyor, Dispatcher.Run() hic donmuyor,
+    # surec ayakta kalip mutex'i tutuyor ve kisa yol ikinci ornekte sessizce cikiyordu.
+    Ok 'panel VAR OLMAYAN statik Dispatcher::Shutdown cagrisini kullanmiyor' ($panelText -notmatch '\[System\.Windows\.Threading\.Dispatcher\]::Shutdown\(\)')
+    Ok 'panel cikista dispatcher i dogru kapatiyor (InvokeShutdown)' ($panelText -match 'InvokeShutdown\(\)')
+    Ok 'panel pencere kapandi bayragi tutuyor (WinClosed)' (($panelText -match '\$script:WinClosed = \$true') -and ($panelText -match '\$script:WinClosed = \$false'))
+    Ok 'panel goster isteginde kapali pencereyi Show() etmeyi denemiyor' ($panelText -match 'if \(\$script:ExitRequested -or \$script:WinClosed\)')
+    # Kisa yol ("show") -Background DEGIL -> calisan ornekten "penceremi goster" ister.
+    Ok 'panel -Background degilken goster istegi yaziliyor' ($panelText -match 'if \(-not \$Background -and -not \$SelfTest\)')
+    $startVbs = Join-Path (Split-Path -Parent $Panel) 'Start-Panel.vbs'
+    Ok 'baslatici betigi (Start-Panel.vbs) var' (Test-Path -LiteralPath $startVbs)
+    if (Test-Path -LiteralPath $startVbs) {
+        $startVbsText = Get-Content -LiteralPath $startVbs -Raw
+        Ok 'baslatici "show" argumanini anliyor' (($startVbsText -match 'showMode') -and ($startVbsText -match 'WScript\.Arguments'))
+        Ok 'baslatici show modunda -Background GONDERMIYOR' ($startVbsText -match 'If showMode Then[\s\S]{0,400}?RemoteWatchdogPanel\.ps1"""[\s\S]*?Else[\s\S]{0,400}?-Background')
     }
     Ok 'panel -Install mutex oncesi calisiyor' ($panelText -match "Panel-Setup\.ps1'\) -Action")
     Ok 'panel ses KUYRUGU var (Add-SpeechQueue)' ($panelText -match 'function Add-SpeechQueue')

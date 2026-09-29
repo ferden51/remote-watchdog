@@ -30,6 +30,8 @@ function New-PanelShortcuts {
     <#
         Baslat menusu + masaustu kisayolu. Hedef wscript + Start-Panel.vbs: konsol penceresi
         acilmaz (Windows Terminal -WindowStyle Hidden'i yok sayiyor), tiklaninca panel acar.
+        "show" argumani sart: Start-Panel.vbs argumansiz cagrildiginda -Background ile baslar ve
+        pencere gizli kalir; kisa yoldan beklenen davranis panelin gorunur acilmasi.
     #>
     $vbs = Join-Path $UiDir 'Start-Panel.vbs'
     if (-not (Test-Path -LiteralPath $vbs)) { return @() }
@@ -43,7 +45,7 @@ function New-PanelShortcuts {
                 if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
                 $lnk = $ws.CreateShortcut($p)
                 $lnk.TargetPath = (Join-Path $env:SystemRoot 'System32\wscript.exe')
-                $lnk.Arguments = '"' + $vbs + '"'
+                $lnk.Arguments = '"' + $vbs + '" show'
                 $lnk.WorkingDirectory = $UiDir
                 if (Test-Path -LiteralPath $ico) { $lnk.IconLocation = $ico + ',0' }
                 $lnk.Description = 'RemoteWatchdog kontrol paneli (tepsi simgesi)'
