@@ -2716,13 +2716,19 @@ function Update-VoiceAlerts {
         $snap = [ordered]@{
             Ok = [bool]$hj.ok
             Bad = @(@($hj.checks | Where-Object { -not $_.ok }) | ForEach-Object { [string]$_.name })
-            Rung = 0; ResetPending = 0; ForceAlways = $false; Reboots = 0
+            Rung = 0; ResetPending = 0; ForceAlways = $false; Reboots = 0; Uptime = -1
         }
         if ($stt) {
             try { $snap.Rung = [int]$stt.NetRepairRung } catch { }
             try { $snap.ResetPending = [int]$stt.NetResetPendingReboot } catch { }
             try { $snap.Reboots = @($stt.RebootsUtc).Count } catch { }
         }
+        # GERCEK RESTART DOGRULAMASI: "Sistem yeniden baslatildi" anonsu yalnizca makine
+        # gercekten yeniden acildiysa konusur. ONCEDEN sadece RebootsUtc sayacina bakiliyordu;
+        # o sayaç uzun sure saglikli kalinca sifirlandigi icin, panel yeniden basladiginda
+        # "eskiden 3 vardi, simdi 0" diye YANLISLIKLA "yeniden baslatildi" diyordu.
+        # Simdi uptimeMinutes GERCEK ACILIS zamanini verir: kuculmusse restart olmustur.
+        try { $snap.Uptime = [double]$hj.uptimeMinutes } catch { $snap.Uptime = -1 }
         try { $snap.ForceAlways = [bool](Get-HostConfig).ForceRestartAlways } catch { }
         if (-not $script:VoiceLast) { $script:VoiceLast = $snap; return }
         $p = $script:VoiceLast
@@ -2736,7 +2742,18 @@ function Update-VoiceAlerts {
         }
         if ([int]$snap.ResetPending -eq 1 -and [int]$p.ResetPending -ne 1) { Announce-Reboot }
         elseif ($snap.ForceAlways -and -not $p.ForceAlways) { Announce-Reboot }
-        if ([int]$snap.Reboots -gt [int]$p.Reboots) { Speak-Text 'Sistem yeniden başlatıldı.' -Sfx 'online' }
+        <#
+            Gercek restart kontrolu. Iki kosulun bir araya gelmesi gerekir:
+              - uptime AZALMIS olmali (makine gercekten yeniden acildi)
+              - reboot sayaci ART MIS olmali
+            Sayac tek basina yeterli degildir (butce sifirlanmasi ve panelin geci
+            baslamasi sahte sinyal uretiyordu).
+        #>
+        $gercekRestart = $false
+        if ($snap.Uptime -ge 0 -and $p.Uptime -ge 0) {
+            if ($snap.Uptime -lt ([double]$p.Uptime - 2)) { $gercekRestart = $true }   # tolerans: 2 dk
+        } elseif ([int]$snap.Reboots -gt [int]$p.Reboots) { $gercekRestart = $true }
+        if ($gercekRestart) { Speak-Text 'Sistem yeniden başlatıldı.' -Sfx 'online' }
         $script:VoiceLast = $snap
     } catch { Write-Trace ('sesli uyari gecisi hatasi: ' + $_.Exception.Message) }
 }
@@ -2844,6 +2861,18 @@ function Invoke-TrayAction {
         'web' { Start-Process 'https://remotedesktop.google.com' }
         'install' { Play-Sfx 'online' | Out-Null; Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null; Start-Sleep 5; Update-ActionBarColors }
         'diag' { Invoke-Script -Path $HostDiag -Wait; [System.Windows.MessageBox]::Show('Rapor Masaüstüne yazıldı.', 'RemoteWatchdog') | Out-Null }
+        'cancelsreboot' {
+            # Restart geri sayimi surerken (varsayilan 60 sn) bu dosya olusturulur; host
+            # dongusu onu gorup shutdown'u IPTAL EDER. "Adaptoru geri actim ama yine de
+            # yeniden baslatildi" durumunu kullanici aninda engelleyebilir.
+            $cf = Join-Path $HostData 'reboot-cancel.flag'
+            try {
+                Set-Content -LiteralPath $cf -Value (Get-Date).ToString('o') -Encoding UTF8 -ErrorAction Stop
+                Write-Trace 'restart iptal istegi yazildi (reboot-cancel.flag)'
+                Play-Sfx 'ok' | Out-Null
+                [System.Windows.MessageBox]::Show('Restart iptal istendi. Geri sayım sürerken internet geri gelirse zaten otomatik iptal olunur.', 'RemoteWatchdog') | Out-Null
+            } catch { [System.Windows.MessageBox]::Show('İptal isteği yazılamadı: ' + $_.Exception.Message, 'RemoteWatchdog') | Out-Null }
+        }
         'quit' {
             $r = [System.Windows.MessageBox]::Show('Panel kapatilsin mi? Zamanlanmis watchdog gorevi calismaya devam eder.', 'RemoteWatchdog', 'YesNo', 'Question')
             if ($r -eq 'Yes') { Stop-Sfx; $script:ExitRequested = $true; $script:Win.Close(); $script:Icon.Visible = $false; $script:Icon.Dispose() }
@@ -2871,6 +2900,7 @@ function New-TrayIcon {
         @{ t = 'Watchdog kur'; k = 'install' }
         @{ t = 'Teşhis raporu üret'; k = 'diag' }
         @{ t = '-'; k = '' }
+        @{ t = 'Restart iptal et (geri sayım varsa)'; k = 'cancelsreboot' }
         @{ t = 'Çıkış'; k = 'quit' }
     )
     foreach ($spec in $items) {
@@ -3013,6 +3043,10 @@ try { Speak-PendingVoice } catch { Write-Trace ('bekleyen anons hatasi: ' + $_.E
                 Update-Overview
                 Update-Actions
                 Update-VoiceAlerts
+                # Restart/onarim anonslari host tarafindan pending-voice.json ile birakilir.
+                # ONCEDEN bu dosya yalnizca panel ACILISINDA okunuyordu; panel zaten acikken
+                # yazilirsa anons HIC duyulmuyordu. Artik her dongude kontrol edilir.
+                Speak-PendingVoice
                 Refresh-Icon
             } catch { Write-Trace ('zamanlayici hatasi: ' + $_.Exception.Message) }
         })

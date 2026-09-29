@@ -8,6 +8,7 @@
     .\RemoteHostWatchdog.ps1            bir onarim dongusu
     .\RemoteHostWatchdog.ps1 -UserFallback  SYSTEM gorevi saglamsa cikis, yoksa/eskise tam dongu (kullanici yedegi)
     .\RemoteHostWatchdog.ps1 -FastProbe     hafif 60 sn yoklamasi: sorun varsa tam donguyu hemen tetikler
+    .\RemoteHostWatchdog.ps1 -NetListen    surekli ag olay dinleyicisi (kablo/adaptor/IP degisimi ANLIK)
     .\RemoteHostWatchdog.ps1 -Install   zamanlanmis gorev + servis ayarlari (admin)
     .\RemoteHostWatchdog.ps1 -Uninstall
     .\RemoteHostWatchdog.ps1 -Status
@@ -35,6 +36,8 @@ param(
     [switch]$RepairWatch,
     [switch]$UserFallback,
     [switch]$FastProbe,
+    [switch]$NetListen,
+    [switch]$NetTestEvent,
     [switch]$Version,
     [int]$Rung = 0
 )
@@ -932,6 +935,49 @@ function Test-InBlackout {
     return $false
 }
 
+function Write-RebootAnnounce {
+    <#
+        Restart ONCESI sesli/ekran anonsu. Iki kanaldan birden gider:
+          1) pending-voice.json -> panel dosyayi okuyup TURKCE KONUSUR (kullanici duyar).
+             Panel acik degilse dosya kalir; panel acilinca 30 dk'ya kadar konusur.
+          2) msg.exe + Telegram -> ekran/telefon bildirimi.
+        Amac: kullanici bilgisayarin kendiliginden kapanacagini ANLASIN.
+    #>
+    param(
+        [string]$Text = 'Ağ sorunları çözülemedi, bilgisayar yeniden başlatılacak.',
+        [int]$CountdownSeconds = 60,
+        [switch]$Force
+    )
+    $state = Get-State
+    $kalan = [math]::Max(0, [int]$CountdownSeconds)
+    if (-not $Force) {
+        # Ayni sorun icin tekrar tekrar anons etmeyelim (saatte bir)
+        try {
+            if ($state.LastUserNotifyUtc) {
+                $son = [datetime]::Parse([string]$state.LastUserNotifyUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+                if (((Get-Date) - $son).TotalHours -lt 1) { return $false }
+            }
+        } catch { }
+        $state.LastUserNotifyUtc = (Get-Date).ToString('o')
+        Save-State $state
+    }
+    $metin = $Text
+    if ($kalan -gt 0) { $metin += (' ' + $kalan + ' saniye içinde.') }
+    $metin += ' Açık belgeler varsa kaydediliyor.'
+    Write-Log 'ALERT' ('RESTART ANNOSU: ' + $metin)
+    # 1) Panel icin bekleyen anons (dosya; panel okuyup konusur)
+    try {
+        $vf = Join-Path $BaseDir 'pending-voice.json'
+        if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
+        ([ordered]@{ text = [string]$metin; sfx = 'reboot'; at = (Get-Date).ToString('o') } | ConvertTo-Json) |
+            Set-Content -LiteralPath $vf -Encoding UTF8
+    } catch { Write-Log 'WARN' ('restart anonsu dosyasi yazilamadi: ' + $_.Exception.Message) }
+    # 2) Ekran + Telegram
+    try { msg.exe * /TIME:600 ('[' + $env:COMPUTERNAME + '] ' + $metin) 2>&1 | Out-Null } catch { }
+    try { Send-Telegram ('[KRITIK] ' + $env:COMPUTERNAME + ': ' + $metin) } catch { }
+    return $true
+}
+
 function Send-UserNotification {
     param([string]$Text, [string]$Title = 'Uzak Makine Uyarisi')
     $cfg = $global:cfg
@@ -1068,6 +1114,34 @@ function Get-RebootDecision {
     return [pscustomobject]@{ Allowed = $true; Reason = 'ok'; Text = ('siyaha girildi; 24 saatte ' + $b.Count24h + '/' + $b.Max + ' restart kullanildi'); Budget = $b }
 }
 
+function Test-RecoveryBeforeReboot {
+    <#
+        Yeniden baslatma TETIKLENMEDEN once son bir taze kontrol.
+        Gerekce: adaptor elle kapatilip geri acildiginda (veya kablo cekilip geri takildiginda)
+        ag saniyeler icinde toparlanir, ama dongu bunu gormeden karar verir ve kullanici
+        "ben adaptoru geri actim ama yine de restart etti" durumunda kalir.
+        Burada iki deneme yapilir; ikisi de basariliysa RESTART IPTAL EDILIR.
+        -Yoklama dongusundan farkli olarak bu bir son care kontroludur, bu yuzden hizli
+        yazilir ama iki kez denenir (arada bir dinlenme).
+    #>
+    $girdi = @('https://www.google.com/generate_204', 'https://www.gstatic.com/generate_204')
+    for ($deneme = 1; $deneme -le 2; $deneme++) {
+        $ok = $false
+        $detay = ''
+        foreach ($u in $girdi) {
+            $r = Invoke-Probe -Url $u -TimeoutSec 6
+            if ($r.Ok) { $ok = $true; $detay = $u; break }
+        }
+        if ($ok) {
+            Write-Log 'INFO' ('restart iptal: yeniden baslatma oncesi taze kontrolde internet SAGLIKLI (' + $detay + ', deneme ' + $deneme + ') - adaptor geri acilmis, restart yapilmadi')
+            return $true
+        }
+        if ($deneme -lt 2) { Start-Sleep -Seconds 4 }
+    }
+    Write-Log 'INFO' 'restart oncesi taze kontrol de basarisiz (internet hala kopuk) - restart devam ediyor'
+    return $false
+}
+
 function Invoke-RebootIfNeeded {
     param([bool]$AllOk)
     $cfg = $global:cfg
@@ -1106,6 +1180,19 @@ function Invoke-RebootIfNeeded {
     $uptime = Get-UptimeMinutes
     if ($uptime -lt [int]$cfg.MinUptimeMinutes) {
         Write-Log 'INFO' ('restart ertelendi: makine sadece ' + $uptime + ' dk acik (esik ' + $cfg.MinUptimeMinutes + ' dk)')
+        # ONCEDEN sadece log yazilip sayac sifirlaniyordu; ama NetResetPendingReboot=1 ise
+        # limit=1 oldugu icin sayac BIR SONRAKI dongude tekrar esigi asar ve yeniden
+        # denenir. Adaptor 20 sn kapali kalsaydi bile (geri acilsa da) restart tetikleniyordu.
+        # Burada gercek bir sorun varken, erteleme icin sayaci sifirlIYORUZ: kullanici sorunu
+        # elle giderdiyse dongu saglikli gorunur ve sayac zaten 0 olur; sorun devam ediyorsa
+        # MinUptimeMinutes dolunca yeniden sayilir. Boylece "geri actim ama yine de restart
+        # edildi" durumu olmaz.
+        $state.ConsecutiveFailures = 0
+        # Bekleyen zorunlu-restart bayragini da dusur: kullanicinin baglantiyi geri getirmesi
+        # sorunu cozmus demektir, bir sonraki dongude zorla restart yapilmayacak.
+        $state.NetResetPendingReboot = 0
+        Save-State $state
+        Write-Log 'INFO' 'restart ertelemesi: hata sayaci ve bekleyen zorunlu-restart bayragi sifirlandi (kullanici sorunu elle giderirse restart olmayacak)'
         return
     }
     $badNames = ($bad | ForEach-Object { $_.Name }) -join ', '
@@ -1125,6 +1212,20 @@ function Invoke-RebootIfNeeded {
         return
     }
     Write-Log 'INFO' ('restart kararı: ' + $decision.Text)
+    <#
+        SON KONTROL: karar verildi ama henuz hicbir sey yapilmadi. Burada interneti TAZE
+        tekrar yoklariz; kullanici adaptoru (ya da kabloyu) geri acmissa RESTART IPTAL EDILIR.
+        Boylece "adaptoru geri actim ama yine de restart etti" durumu olmaz.
+        Not: iptal edilirse ConsecutiveFailures ve NetResetPendingReboot sifirlanir, boylece
+        eski "winsock reset sonrasi zorla restart" bayragi da temizlenir.
+    #>
+    if (Test-RecoveryBeforeReboot) {
+        $state.ConsecutiveFailures = 0
+        $state.NetResetPendingReboot = 0
+        $state.LastOkUtc = (Get-Date).ToString('o')
+        Save-State $state
+        return
+    }
     Send-Telegram ('[KRİTİK] ' + $env:COMPUTERNAME + ' ' + $state.ConsecutiveFailures + ' kez onarılamadı, ' + $cfg.RebootDelaySeconds + ' sn sonra yeniden başlatılıyor')
     if (-not (Request-OfficeSave -TimeoutSeconds ([int]$cfg.OfficeSaveTimeoutSeconds))) {
         Write-Log 'ALERT' 'yeniden başlatma iptal edildi: Word/Excel belgeleri kaydedilemedi (kayıp olmaması için durduruldu)'
@@ -1143,6 +1244,61 @@ function Invoke-RebootIfNeeded {
     $state.RebootsUtc = $kept
     Save-State $state
     Write-Log 'ALERT' ('yeniden başlatma tetiklendi: ' + $cfg.RebootDelaySeconds + ' sn sonra (24 saatte ' + $kept.Count + '/' + [int]$cfg.MaxRestartsPerDay + ' restart)')
+    <#
+        Gecikme suresi (varsayilan 60 sn) icinde iki kontrol daha yapilir:
+          1) Internet geri geldiyse restart IPTAL EDILIR (adaptor/kablo geri acilmis demektir).
+          2) Panelden "iptal" istegi varsa (reboot-cancel.flag) yine iptal edilir.
+        Boylece "adaptoru geri actim ama yine de yeniden baslatildi" durumu olmaz.
+    #>
+    $cancelFile = Join-Path $BaseDir 'reboot-cancel.flag'
+    $gercekyeniden = $kept[-1]
+    $bekle = [int]$cfg.RebootDelaySeconds
+    <#
+        KULLANICI ANNOSU: restart gercekten tetiklenmeden once sesli + ekran bildirimi.
+        "Ağ sorunları çözülemedi, bilgisayar yeniden başlatılacak" -> panel dosyadan okuyup
+        konusur; panel kapaliysa dosya kalir ve panel acilinca (30 dk'ya kadar) konusulur.
+    #>
+    $null = Write-RebootAnnounce -Text 'Ağ sorunları çözülemedi, bilgisayar yeniden başlatılacak.' -CountdownSeconds $bekle
+    if ($bekle -gt 0 -and $bekle -le 600) {
+        Write-Log 'INFO' ('restart geri sayimi basliyor: ' + $bekle + ' sn icinde internet sagli cikarsa restart iptal edilecek')
+        $kaldi = $bekle
+        while ($kaldi -gt 0) {
+            Start-Sleep -Seconds 2
+            $kaldi -= 2
+            if (Test-Path -LiteralPath $cancelFile) {
+                try { Remove-Item -LiteralPath $cancelFile -Force -ErrorAction SilentlyContinue } catch { }
+                Write-Log 'INFO' 'restart iptal edildi: panelden iptal istendi (reboot-cancel.flag)'
+                # Iptal edildi: kullaniciyi rahatlatacak ikinci anons (dosya panelde konusulur)
+                try {
+                    ([ordered]@{ text = 'Yeniden başlatma iptal edildi, bilgisayar açık kalacak.'; sfx = 'ok'; at = (Get-Date).ToString('o') } | ConvertTo-Json) |
+                        Set-Content -LiteralPath (Join-Path $BaseDir 'pending-voice.json') -Encoding UTF8
+                } catch { }
+                $state.RebootsUtc = @(@($state.RebootsUtc) | Where-Object { $_ -ne $gercekyeniden })
+                Save-State $state
+                return
+            }
+            if (($kaldi % 6) -eq 0) {
+                $r = Invoke-Probe -Url 'https://www.google.com/generate_204' -TimeoutSec 5
+                if ($r.Ok) {
+                    Write-Log 'INFO' 'restart iptal edildi: geri sayim sirasinda internet SAGLIKLI cikti (adaptor/kablo geri gelmis)'
+                    $state.RebootsUtc = @(@($state.RebootsUtc) | Where-Object { $_ -ne $gercekyeniden })
+                    $state.ConsecutiveFailures = 0
+                    $state.NetResetPendingReboot = 0
+                    $state.LastOkUtc = (Get-Date).ToString('o')
+                    Save-State $state
+                    try {
+                        ([ordered]@{ text = 'Yeniden başlatma iptal edildi, bilgisayar açık kalacak.'; sfx = 'ok'; at = (Get-Date).ToString('o') } | ConvertTo-Json) |
+                            Set-Content -LiteralPath (Join-Path $BaseDir 'pending-voice.json') -Encoding UTF8
+                    } catch { }
+                    return
+                }
+                # Hala kopuk: geri sayimi hatirlat (kullanici baska isle mesgulse duysun diye)
+                if ($bekle -ge 30 -and ($kaldi % 20) -eq 0 -and $kaldi -gt 10) {
+                    $null = Write-RebootAnnounce -Text ('Ağ sorunları çözülemedi, bilgisayar ' + $kaldi + ' saniye içinde yeniden başlatılacak.') -CountdownSeconds 0 -Force
+                }
+            }
+        }
+    }
     shutdown.exe /r /t $cfg.RebootDelaySeconds /c 'RemoteHostWatchdog: onarilamayan baglanti sorunu' 2>&1 | Out-Null
 }
 
@@ -1369,6 +1525,26 @@ function Install-Watchdog {
         Register-ScheduledTask -TaskName $probeTask -Action $fAct -Trigger @($fTrg) -Principal $fPrn -Settings $fStg -Force | Out-Null
         Write-Log 'INFO' ('hizli yoklama gorevi kuruldu: ' + $probeTask + ' (kullanici ' + $env:USERNAME + ', her 1 dk; sorun gorurse tam donguyu tetikler)')
     } catch { Write-Log 'WARN' ('hizli yoklama gorevi kurulamadi: ' + $_.Exception.Message) }
+    <#
+        SUREKLI ag olay dinleyicisi: 60 sn'lik gorev kapanip acildigi icin kablo cekilmesi
+        gibi ANLIK olaylari yakalayamaz. Bu gorev surekli calisir ve Windows'un NetworkChange
+        olaylarini dinler. 1 dk'lik FastProbe gorevi YEDEK olarak calismaya devam eder
+        (yonlendirici/ISP tarafi sorunlarda olay gelmez, 1 dk'de bir yakalanir).
+    #>
+    $listenTask = 'RemoteHostNetListen'
+    try {
+        if (Test-Path -LiteralPath $hiddenVbs) {
+            $lAct = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"' + $hiddenVbs + '" "' + $ScriptPath + '" -NetListen')
+        } else {
+            $lAct = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -NetListen')
+        }
+        $lTrg = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+        $lPrn = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+        # -Once TEKRAR YOK: surekli calisir, olayinda kendini yeniden baslatir
+        $lStg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+        Register-ScheduledTask -TaskName $listenTask -Action $lAct -Trigger @($lTrg) -Principal $lPrn -Settings $lStg -Force | Out-Null
+        Write-Log 'INFO' ('ag olay dinleyici gorevi kuruldu: ' + $listenTask + ' (kullanici ' + $env:USERNAME + ', surekli; kablo/adaptor/IP degisimi anlik yakalanir)')
+    } catch { Write-Log 'WARN' ('ag olay dinleyici gorevi kurulamadi: ' + $_.Exception.Message) }
     Write-Host ('Kuruldu. Elle calistirmak icin: Start-ScheduledTask -TaskName ' + $TaskName)
     Write-Host 'Sunucu modu: BIOS icinde "Restore on AC Power Loss = Power On" ve "Wake on LAN" acik olmali.'
 }
@@ -1382,6 +1558,7 @@ function Uninstall-Watchdog {
     if (Get-ScheduledTask -TaskName 'RemoteHostOfficeSaver' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostOfficeSaver' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostOfficeSaver' }
     if (Get-ScheduledTask -TaskName 'RemoteHostWatchdogUser' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostWatchdogUser' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostWatchdogUser' }
     if (Get-ScheduledTask -TaskName 'RemoteHostFastProbe' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostFastProbe' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostFastProbe' }
+    if (Get-ScheduledTask -TaskName 'RemoteHostNetListen' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostNetListen' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostNetListen' }
     Write-Host ('Config/loglar korundu: ' + $BaseDir)
 }
 
@@ -1477,12 +1654,11 @@ function Start-FullCycle {
     } catch { return ('hata: ' + $_.Exception.Message) }
 }
 
-function Invoke-FastProbe {
+function Get-FastProbeDecision {
     <#
-        Hafif canli yoklama (60 sn gorevi): sadece ag sagligini olcer (~bir kac sn).
-        Saglikliysa sessiz cikar; sorun varsa tam donguyu tetikler. DUSEGECI DE YAKALAR:
-        onceki durum kotuydu (veya son rapor hataliysa) ve ag duzeldiyse tam dongu tetiklenir,
-        boylece "baglanti duzeldi" kaydi ve sesli anons olusur.
+        Hafif ag sagligi olcer ve NE YAPILACAGINI dondurur. exit CAGIRMAZ, cunku hem 60 sn
+        gorevi hem de surekli olay dinleyicisi ayni karar mantigini kullanir.
+        Donus: [pscustomobject]@{ Action='ok'|'full'; Detay='...' }
     #>
     $global:cfg = Get-Config
     $h = Get-NetworkHealth
@@ -1495,20 +1671,93 @@ function Invoke-FastProbe {
     if (-not $bad -and -not $duzeldi) {
         $beat = Test-ProbeBeatDue
         Save-ProbeState 'ok' -Beat:$beat
-        if ($beat) { Write-Log 'INFO' 'hizli yoklama calisiyor (her 1 dk, gunluk 30 dakikada bir) - ag saglikli' }
-        exit 0
+        if ($beat) { Write-Log 'INFO' 'hizli yoklama calisiyor (olay dinleyici + 1 dk yedegi) - ag saglikli' }
+        return [pscustomobject]@{ Action = 'ok'; Detay = '' }
     }
     if ($bad) {
         Save-ProbeState 'bad'
         $eksik = @(@(if (-not $h.Ip) { 'IP' }) + @(if (-not $h.Dns) { 'DNS' }) + @(if (-not $h.Https) { 'HTTPS' }) + @(if (-not $h.Signal) { 'sinyal' }) -join ',')
         Write-Log 'WARN' ('hizli yoklama sorun gordu (' + $eksik + ') -> tam dongu tetikleniyor')
-    } else {
-        Save-ProbeState 'ok'
-        Write-Log 'INFO' 'hizli yoklama baglanti yeniden geldi -> duzelme kaydi icin tam dongu tetikleniyor'
+        return [pscustomobject]@{ Action = 'full'; Detay = $eksik }
     }
-    $gorev = Start-FullCycle
-    Write-Log 'INFO' ('tam dongu tetikleme sonucu: ' + $gorev)
+    Save-ProbeState 'ok'
+    Write-Log 'INFO' 'hizli yoklama baglanti yeniden geldi -> duzelme kaydi icin tam dongu tetikleniyor'
+    return [pscustomobject]@{ Action = 'full'; Detay = 'duzeldi' }
+}
+
+function Invoke-FastProbe {
+    <#
+        Hafif canli yoklama (60 sn gorevi): sadece ag sagligini olcer (~bir kac sn).
+        Saglikliysa sessiz cikar; sorun varsa tam donguyu tetikler. DUSEGECI DE YAKALAR:
+        onceki durum kotuydu (veya son rapor hataliysa) ve ag duzeldiyse tam dongu tetiklenir,
+        boylece "baglanti duzeldi" kaydi ve sesli anons olusur.
+    #>
+    $d = Get-FastProbeDecision
+    if ($d.Action -eq 'full') {
+        $gorev = Start-FullCycle
+        Write-Log 'INFO' ('tam dongu tetikleme sonucu: ' + $gorev)
+    }
     exit 0
+}
+
+function Start-NetEventListener {
+    <#
+        SUREKLI ag olay dinleyicisi. 60 sn'lik gorev kapanip acildigi icin kablo cekilmesi
+        gibi ANLIK olaylari yakalayamaz; bu dinleyici Windows'un kendi ag olaylarini dinler
+        (System.Net.NetworkInformation.NetworkChange):
+            - NetworkAvailabilityChanged : baglanti koptu / geri geldi (kablo, modem, DHCP)
+            - NetworkAddressChanged      : IP degisti
+        Olay gelince Get-FastProbeDecision calisir; ag sagliysa sessizce cikar, sorunlu/
+        duzelmis ise tam donguyu tetikler.
+
+        NEDEN "PORT DINLEME" DEGIL: internet kesildiginde aradaki baglanti kopar, yerel
+        soket acik kalir ama yanit gelmez. Kesinti ancak disariya bir baglanti acilip yanit
+        alinip alinmadigiyla anlasilir (Get-TcpMs / generate_204) - yani bu olay sadece
+        FIZIKSEL katmani (kablo/adaptor/IP) anlik bildirir. Yonlendirici/ISP tarafi sorun
+        olursa sinyal gelmez; onun icin 1 dakikalik FastProbe gorevi yedek olarak durur.
+    #>
+    Write-Log 'INFO' 'ag olay dinleyicisi basliyor (NetworkChange: kablo/adaptor/IP degisimi anlik; 1 dk yedegi devam ediyor)'
+    $cs = @'
+using System;
+using System.Threading;
+public class RwNetWatch {
+  public static AutoResetEvent Signal = new AutoResetEvent(false);
+  public static void Hook() {
+    System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged += delegate(object s, System.Net.NetworkInformation.NetworkAvailabilityEventArgs e) {
+      Signal.Set();
+    };
+    System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged += delegate(object s, System.EventArgs e) {
+      Signal.Set();
+    };
+  }
+  public static bool Wait(int ms) { return Signal.WaitOne(ms); }
+}
+'@
+    try { Add-Type -TypeDefinition $cs -ErrorAction Stop } catch { Write-Log 'WARN' ('olay dinleyici yuklenemedi: ' + $_.Exception.Message); return 1 }
+    try { [RwNetWatch]::Hook() } catch { Write-Log 'WARN' ('olay aboneligi kurulamadi: ' + $_.Exception.Message); return 1 }
+
+    # Baslangicta bir kez yokla (acilista zaten kotu ise hemen yakala)
+    $d = Get-FastProbeDecision
+    if ($d.Action -eq 'full') { try { $null = Start-FullCycle; Write-Log 'INFO' 'olay dinleyicisi baslangic kontrolu: sorun vardi, tam dongu tetiklendi' } catch { } }
+    $son = Get-Date
+    while ($true) {
+        try {
+            # 60 sn'de bir zaman asimi: yedek yoklama (olay gelmezse de calisir)
+            if ([RwNetWatch]::Wait(60000)) {
+                Write-Log 'INFO' 'ag olayi geldi (kablo/adaptor/IP degisti) -> anlik yoklama'
+                $son = Get-Date
+                # Adaptor kapanip acilmasinda birkac deneme: IP/DHCP oturmasini bekle
+                for ($i = 1; $i -le 3; $i++) {
+                    $dd = Get-FastProbeDecision
+                    if ($dd.Action -eq 'full') { try { $null = Start-FullCycle; Write-Log 'INFO' 'olay sonrasi tam dongu tetiklendi' } catch { } ; break }
+                    if ($i -lt 3) { Start-Sleep -Seconds 5 }
+                }
+            } elseif (((Get-Date) - $son).TotalMinutes -ge 1) {
+                $null = Get-FastProbeDecision
+                $son = Get-Date
+            }
+        } catch { Write-Log 'WARN' ('dinleyici hatasi: ' + $_.Exception.Message); Start-Sleep -Seconds 5 }
+    }
 }
 
 function Show-Status {
@@ -1523,7 +1772,9 @@ function Show-Status {
     $ut = Get-ScheduledTask -TaskName 'RemoteHostWatchdogUser' -ErrorAction SilentlyContinue
     Write-Host ('kullanici yedegi: ' + $(if ($ut) { $ut.State } else { 'YOK' }) + ' | SYSTEM devrede: ' + (Test-SystemWatchdogActive))
     $ft = Get-ScheduledTask -TaskName 'RemoteHostFastProbe' -ErrorAction SilentlyContinue
-    Write-Host ('hizli yoklama: ' + $(if ($ft) { $ft.State } else { 'YOK' }) + ' (her 1 dk)')
+    Write-Host ('hizli yoklama: ' + $(if ($ft) { $ft.State } else { 'YOK' }) + ' (her 1 dk, yedek)')
+    $lt = Get-ScheduledTask -TaskName 'RemoteHostNetListen' -ErrorAction SilentlyContinue
+    Write-Host ('ag olay dinleyici: ' + $(if ($lt) { $lt.State } else { 'YOK' }) + ' (surekli, anlik kablo/adaptor/IP)')
     Write-Host ('=== son loglar (' + $LogFile + ') ===')
     if (Test-Path -LiteralPath $LogFile) { Get-Content -LiteralPath $LogFile -Tail 40 | ForEach-Object { Write-Host $_ } } else { Write-Host 'log yok' }
 }
@@ -1550,6 +1801,23 @@ if ($UserFallback) {
     exit 0
 }
 if ($FastProbe) { Invoke-FastProbe; exit 0 }
+if ($NetListen) { exit (Start-NetEventListener) }
+function Invoke-NetEventNow {
+    <#
+        Dinleyicinin olaydan sonra yaptigi isi elle tetikler (test/deniz aslani icin).
+        -NetTestEvent ile cagrilir: "olay geldi" varsayilir ve ayni karar zinciri isler.
+    #>
+    Write-Log 'INFO' 'olay elle tetiklendi (-NetTestEvent): anlik yoklama baslatiliyor'
+    $son = Get-Date
+    for ($i = 1; $i -le 3; $i++) {
+        $dd = Get-FastProbeDecision
+        if ($dd.Action -eq 'full') { try { $null = Start-FullCycle; Write-Log 'INFO' 'olay sonrasi tam dongu tetiklendi (elle test)' } catch { }; break }
+        if ($i -lt 3) { Start-Sleep -Seconds 5 }
+    }
+    exit 0
+}
+
+if ($NetTestEvent) { Invoke-NetEventNow }
 if ($RepairWatch) {
     # Hafif izleyici: her 60 sn bir kez calisir. Istek dosyasi yoksa aninda cikar (gunluk/JSON dokunulmaz).
     $wReq = Read-RepairRequest
