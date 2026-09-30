@@ -38,7 +38,9 @@ function Ok { param([string]$Text) Write-Host ('    [OK] ' + $Text) -ForegroundC
 function Warn { param([string]$Text) Write-Host ('    [!] ' + $Text) -ForegroundColor Yellow }
 
 function Copy-AppToInstallDir {
-    $targets = @('client', 'ui', 'lib')
+    # 'tools' de kopyalanir: panel anons onbellegini $Root\tools\VoiceLines.ps1'den
+    # yukler (client tarafinda da ayni panel kullanilir).
+    $targets = @('client', 'ui', 'lib', 'tools')
     foreach ($t in $targets) {
         $src = Join-Path $Root $t
         if (-not (Test-Path -LiteralPath $src)) { Write-Host ('Klasor yok: ' + $src) -ForegroundColor Red; exit 1 }
@@ -65,7 +67,7 @@ Write-Host '=============================================='
 if ($DryRun) {
     Warn 'KURULUM YAPILMAYACAK (DryRun)'
     Step '0) Kurulum dizini'
-    Warn ('  kopyalanacak: ' + $Root + '  ->  ' + $AppDir + '  (client\, ui\, lib\, VERSION)')
+    Warn ('  kopyalanacak: ' + $Root + '  ->  ' + $AppDir + '  (client\, ui\, lib\, tools\, VERSION)')
     $a = @('-Install', '-IntervalMinutes', $IntervalMinutes)
     if ($Target) { $a += @('-Target', ('"' + $Target + '"')) }
     if ($RdpFile) { $a += @('-RdpFile', ('"' + $RdpFile + '"')) }

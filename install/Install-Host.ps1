@@ -49,11 +49,14 @@ function Is-Admin {
 
 function Copy-AppToInstallDir {
     <#
-        host\, ui\, lib\, VERSION klasorlerini ProgramData'ya kopyalar ve oradaki
+        host\, ui\, lib\, tools\ klasorlerini + VERSION dosyasini ProgramData'ya kopyalar; oradaki
         betik yollarini dondurur. Panel aciliyken bir dosya kilitliyse robocopy
         onarim modu (/M) eskiyi atlamaz; bu yuzden once paneli kapatmayi dener.
     #>
-    $targets = @('host', 'ui', 'lib')
+    # 'tools' de KOPYALANMALI: panel anons onbellegini $Root\tools\VoiceLines.ps1'den
+    # yukler. Kopyalanmazsa onbellekli (internetsiz) anons devre disi kalir ve
+    # kesinti anonslari sessizce kaybolur - panel.log'a da Write-Trace hatasi duser.
+    $targets = @('host', 'ui', 'lib', 'tools')
     foreach ($t in $targets) {
         $src = Join-Path $Root $t
         if (-not (Test-Path -LiteralPath $src)) { Die ('kopyalanacak klasor yok: ' + $src) }
@@ -95,7 +98,7 @@ if (-not (Is-Admin)) { Warn 'Yonetici degilsin. Zamanlanmis gorev ve servis ayar
 if ($DryRun) {
     Warn 'KURULUM YAPILMAYACAK (DryRun)'
     Step '0) Kurulum dizini'
-    Warn ('  kopyalanacak: ' + $Root + '  ->  ' + $AppDir + '  (host\, ui\, lib\, VERSION)')
+    Warn ('  kopyalanacak: ' + $Root + '  ->  ' + $AppDir + '  (host\, ui\, lib\, tools\, VERSION)')
     Warn '  Bundan sonra butun gorevler ve kisayollar kurulum dizininden calisir.'
     Step '1) Tehis raporu'
     Warn ('  calistirilacak: ' + $DiagScript + '  (okuma modunda)')

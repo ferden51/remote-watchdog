@@ -60,6 +60,21 @@ $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $RunName = 'RemoteWatchdogTray'
 $ShowRequest = Join-Path $env:TEMP 'RemoteWatchdog-show.flag'
 $VersionFile = Join-Path $Root 'VERSION'
+
+<#
+    Write-Trace EN TEPEYE koyulur: asagidaki anons onbellegi blogu (dosya yuklenirken)
+    hata olursa catch icinde cagirir. Fonksiyon daha asagida tanimliydi; o zamana
+    kadar tanimsiz oldugu icin "Write-Trace komutu bulunamadi" hatasi veriyordu ve
+    ASIL hata panel.log'a hic yazilmadan kayboluyordu. Sadece $HostData'ya bagli
+    oldugu icin burada guvenle tanimlanabilir.
+#>
+function Write-Trace {
+    param([string]$Text)
+    try {
+        if (-not (Test-Path -LiteralPath $HostData)) { New-Item -ItemType Directory -Force -Path $HostData | Out-Null }
+        Add-Content -LiteralPath (Join-Path $HostData 'panel.log') -Value ((Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' ' + $Text) -Encoding UTF8
+    } catch { }
+}
 $script:AppVersion = '0.0.0'
 if (Test-Path -LiteralPath $VersionFile) { try { $script:AppVersion = ([System.IO.File]::ReadAllText($VersionFile)).Trim() } catch { } }
 if ($Version) { Write-Host ('RemoteWatchdogPanel ' + $script:AppVersion); exit 0 }
@@ -335,14 +350,6 @@ function Get-NextCheck {
         OverdueSeconds = [double]($now - $next).TotalSeconds
         AgeSeconds = [double]($now - $last).TotalSeconds
     }
-}
-
-function Write-Trace {
-    param([string]$Text)
-    try {
-        if (-not (Test-Path -LiteralPath $HostData)) { New-Item -ItemType Directory -Force -Path $HostData | Out-Null }
-        Add-Content -LiteralPath (Join-Path $HostData 'panel.log') -Value ((Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' ' + $Text) -Encoding UTF8
-    } catch { }
 }
 
 function Get-RoleInfo {

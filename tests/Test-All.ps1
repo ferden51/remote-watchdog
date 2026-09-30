@@ -289,6 +289,27 @@ if ($Section -eq 0 -or $Section -eq 1) {
         # ile baslar ve pencere gizli kalir (kullanici panelin acmadigini sanir).
         Ok 'kurulum betigi kisa yola "show" argumani veriyor' ($setupText -match '\$lnk\.Arguments = ''"'' \+ \$vbs \+ ''" show''')
     }
+    # --- Sabit kurulum dizini (v1.3.1) ---
+    # Hata: Install-Host/Install-Client yalnizca host|client + ui + lib kopyaliyordu.
+    # Panel anons onbellegini $Root\tools\VoiceLines.ps1'den yukledigi icin kurulumdan
+    # sonra onbellekli (internetsiz) anons TUMDEN devre disi kaliyordu; uzerine panel
+    # startup'ta "Write-Trace komutu bulunamadi" hatasi dusuyordu.
+    $instHost = Join-Path $Root 'install\Install-Host.ps1'
+    $instClient = Join-Path $Root 'install\Install-Client.ps1'
+    if (Test-Path -LiteralPath $instHost) {
+        $ih = Get-Content -LiteralPath $instHost -Raw -Encoding UTF8
+        Ok 'kurulum tools klasorunu kopyaliyor (anons onbellegi icin)' ($ih -match "\`$targets\s*=\s*@\('host',\s*'ui',\s*'lib',\s*'tools'\)")
+    }
+    if (Test-Path -LiteralPath $instClient) {
+        $ic = Get-Content -LiteralPath $instClient -Raw -Encoding UTF8
+        Ok 'istemci kurulumu tools klasorunu kopyaliyor' ($ic -match "\`$targets\s*=\s*@\('client',\s*'ui',\s*'lib',\s*'tools'\)")
+    }
+    # Write-Trace, anons onbellegi blogundan ONCE tanimli olmali; aksi halde startup
+    # hatasinin kendisi "Write-Trace bulunamadi" ile kapanir ve asil sebep loglanmaz.
+    $traceDef = ([regex]::Match($panelText, '(?m)^function Write-Trace \{')).Index
+    $voiceLoad = ([regex]::Match($panelText, 'VoiceLines\.ps1')).Index
+    Ok 'panelde Write-Trace, anons onbellegi yuklemesinden once tanimli' ($traceDef -ge 0 -and $voiceLoad -ge 0 -and $traceDef -lt $voiceLoad)
+
     # --- Tray'den cikis sonrasi kisayolla geri acma (regresyon) ---
     # Hata: add_Closed icinde [System.Windows.Threading.Dispatcher]::Shutdown() cagriliyordu;
     # o metot WPF'te YOKTUR, cagri `catch {}` ile yutuluyor, Dispatcher.Run() hic donmuyor,
