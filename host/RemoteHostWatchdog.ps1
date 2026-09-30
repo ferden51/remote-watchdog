@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
     RemoteHostWatchdog - UZAK MAKINE tarafi (host)
     Kendini periyodik test eder, bozulan parcalari onarir, olculmezse makineyi yeniden baslatir,
@@ -59,6 +59,9 @@ $LogFile = Join-Path $BaseDir 'host-watchdog.log'
 $LogDir = Join-Path $BaseDir 'log'
 $StateFile = Join-Path $BaseDir 'host-state.json'
 $ConfigFile = Join-Path $BaseDir 'config.json'
+$RebootPendingFile = Join-Path $BaseDir 'reboot-pending.json'
+$RebootCancelFile = Join-Path $BaseDir 'reboot-cancel.flag'
+$RebootAckFile = Join-Path $BaseDir 'reboot-ack.json'
 $TaskName = 'RemoteHostWatchdog'
 $script:Results = New-Object System.Collections.ArrayList
 $script:PublicIp = $null
@@ -1499,21 +1502,27 @@ function Invoke-RebootIfNeeded {
     $badNames = ($bad | ForEach-Object { $_.Name }) -join ', '
     $decision = Get-RebootDecision -State $state -Now (Get-Date) -BadNames @($bad | ForEach-Object { $_.Name })
     if (-not $decision.Allowed) {
+        # Bu iki yolde restart YAPILMAZ ama sorun devam ediyor. Onceki mesaj
+        # "durduruldu" diyordu ve kullanici bunu "restart iptal edildi" saniyordu;
+        # aslinda hic restart denenmemisti. Metin artik bunu acikca soyluyor.
         if ($decision.Reason -eq 'outside-blackout' -or $decision.Reason -eq 'policy-never') {
             Write-Log 'INFO' ('yeniden başlatma yapılmayacak (' + $decision.Text + '); kullanıcıya bildiriliyor')
-            $null = Send-UserNotification -Key ('policy-' + $decision.Reason) -Title 'Baglanti sorunu - karar sizin' -Text ('Uzaktan erisim onarilamadi (' + $state.ConsecutiveFailures + ' deneme). Sorun: ' + $badNames + '. Bilgisayari istediginiz zaman yeniden baslatabilirsiniz; zorla kapatma yapilmadi.')
+            $txt = ('Uzaktan erişim onarılamadı (' + $state.ConsecutiveFailures + ' deneme). Sorun: ' + $badNames + '. Şu anda yeniden başlatma yapılmayacak: ' + $decision.Text + '. Bilgisayarı istediğiniz zaman elle yeniden başlatabilirsiniz.')
+            $null = Send-UserNotification -Key ('policy-' + $decision.Reason) -Title 'Bağlantı sorunu - restart yapılmayacak' -Text $txt
         } else {
             <#
                 AYNI DEVRE KESICI DURUMUNDA ALERT/MESAJ TEKRARLANMAZ. Onceki surumde bu iki
                 satiri her dongude (dakikada bir, iki es zamanli surecle) yaziyor, msg.exe
                 ile 8 saat boyunca 276 kutu birikiyordu.
             #>
+            $txt = ('Uzaktan erişim onarılamadı. Sorun: ' + $badNames + '. Yeniden başlatma bu turda yapılmayacak: ' + $decision.Text + '. Elle müdahale gerekiyor; bütçe veya bekleme süresi dolunca yeniden değerlendirilecek.')
             if ([string]$state.BreakerKey -ne [string]$decision.Reason) {
-                Write-Log 'ALERT' ('yeniden başlatma DURDURULDU (devre kesici): ' + $decision.Text)
+                Write-Log 'ALERT' ('yeniden başlatma yapılmayacak (devre kesici): ' + $decision.Text)
+                $null = Send-UserNotification -Key ('kesici-' + $decision.Reason) -Title 'Otomatik restart yapılmayacak' -Text $txt
             } else {
                 Write-Log 'INFO' ('devre kesici ayni durumda, tekrar edilmedi: ' + $decision.Text)
+                $null = Send-UserNotification -Key ('kesici-' + $decision.Reason) -Title 'Otomatik restart yapılmayacak' -Text $txt
             }
-            $null = Send-UserNotification -Key ('kesici-' + $decision.Reason) -Title 'Otomatik restart durduruldu' -Text ($decision.Text + '. Sorun: ' + $badNames + '. Elle mudahale gerekiyor; butce veya bekleme suresi dolunca yeniden degerlendirilecek.')
         }
         $null = Invoke-StateUpdate {
             param($st)
@@ -1561,73 +1570,169 @@ function Invoke-RebootIfNeeded {
         Boylece "24 saatte 3 restart" iddiasi, olmayan restart'lar icin butce yakmaz.
     #>
     $null = Invoke-StateUpdate { param($st) $st.PendingRebootUtc = (Get-Date).ToString('o') }
-    Write-Log 'ALERT' ('yeniden başlatma istendi: ' + $bekle + ' sn sonra (onaylanan restart ' + $kept.Count + '/' + [int]$cfg.MaxRestartsPerDay + '; bu restart gerçekten olunca sayılacak)')
+    Write-Log 'ALERT' ('yeniden başlatma istendi: ' + [int]$cfg.RebootDelaySeconds + ' sn sonra (onaylanan restart ' + $kept.Count + '/' + [int]$cfg.MaxRestartsPerDay + '; bu restart gerçekten olunca sayılacak)')
+    $null = Start-CountdownReboot -Reason 'onarilamayan baglanti sorunu' -Problems $badNames
+}
+
+function Start-CountdownReboot {
     <#
-        Gecikme suresi (varsayilan 60 sn) icinde iki kontrol daha yapilir:
-          1) Internet geri geldiyse restart IPTAL EDILIR (adaptor/kablo geri acilmis demektir).
-          2) Panelden "iptal" istegi varsa (reboot-cancel.flag) yine iptal edilir.
-        Boylece "adaptoru geri actim ama yine de yeniden baslatildi" durumu olmaz.
+        Geri sayacli, IPTAL EDILEBILIR yeniden baslatma. Tum restart yollari buradan gecer
+        (otomatik karar, paneldeki "Simdi zorla kapat", CRD) ki tek davranis olsun.
+
+        Iki ayri iptal yolu var:
+          1) Panelden "Iptal et" -> reboot-cancel.flag. 0,5 sn'de bir kontrol edilir;
+             reboot-ack.json yazilir (panelin "gercekten durdu" demesinin tek yolu).
+          2) Geri sayim sirasinda internet kendiliginden SAGLIKI cikarsa iptal edilir
+             (kullanici adaptoru/kablonu geri acmis olabilir, gereksiz restart olmasin).
+
+        Panel hic acilmadiysa da ayni dosyalar yazilir; kullanici yoksa cihaz yine kapanir
+        (uzaktan kurtarma davranisi korunur).
     #>
-    $cancelFile = Join-Path $BaseDir 'reboot-cancel.flag'
-    $bekle = [int]$cfg.RebootDelaySeconds
-    <#
-        KULLANICI ANNOSU: restart gercekten tetiklenmeden once sesli + ekran bildirimi.
-        "Ağ sorunları çözülemedi, bilgisayar yeniden başlatılacak" -> panel dosyadan okuyup
-        konusur; panel kapaliysa dosya kalir ve panel acilinca (30 dk'ya kadar) konusulur.
-    #>
-    $null = Write-RebootAnnounce -Text 'Ağ sorunları çözülemedi, bilgisayar yeniden başlatılacak.' -CountdownSeconds $bekle
-    $iptal = $false
-    if ($bekle -gt 0 -and $bekle -le 600) {
-        Write-Log 'INFO' ('restart geri sayimi basliyor: ' + $bekle + ' sn icinde internet sagli cikarsa restart iptal edilecek')
-        $kaldi = $bekle
-        $hatirlatildi = $false
-        try {
-            while ($kaldi -gt 0) {
-                Start-Sleep -Seconds 2
-                $kaldi -= 2
-                if (Test-Path -LiteralPath $cancelFile) {
-                    try { Remove-Item -LiteralPath $cancelFile -Force -ErrorAction SilentlyContinue } catch { }
-                    Write-Log 'INFO' 'restart iptal edildi: panelden iptal istendi (reboot-cancel.flag)'
-                    $iptal = $true
-                    break
+    param(
+        [string]$Reason = 'onarilamayan baglanti sorunu',
+        [string]$Problems = '',
+        [int]$DelaySeconds = 0
+    )
+    $cfg = Get-Config
+    $delay = $DelaySeconds
+    if ($delay -le 0) { $delay = [int]$cfg.RebootDelaySeconds }
+    if ($delay -lt 30) { $delay = 30 }
+    if ($delay -gt 600) { $delay = 600 }
+
+    # Onceki turdan kalan isaretleri temizle: yeni sayac sifirdan baslasin.
+    foreach ($f in @($RebootCancelFile, $RebootAckFile)) { try { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } catch { } }
+
+    $pending = [ordered]@{
+        generated = (Get-Date).ToString('o')
+        deadline  = (Get-Date).AddSeconds($delay).ToString('o')
+        delaySec  = $delay
+        reason    = $Reason
+        problems  = $Problems
+    }
+    try {
+        [System.IO.File]::WriteAllText($RebootPendingFile, ($pending | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding $true))
+    } catch { Write-Log 'WARN' ('restart bildirim dosyasi yazilamadi: ' + $_.Exception.Message) }
+
+    # KULLANICI ANNOSU: panel dosyadan Turkce konusur (ses onbellegi tercih edilir);
+    # panel kapaliysa dosya kalir ve 30 dk'ya kadar acilinca konusulur.
+    # CountdownSeconds verildigi icin Write-RebootAnnounce klibi sure gore secer (60/30/10).
+    $null = Write-RebootAnnounce -Text ('Onarılamayan bağlantı sorunu. Bilgisayar ' + $delay + ' saniye içinde yeniden açılacak.') -CountdownSeconds $delay -Force
+
+    Write-Log 'ALERT' ('yeniden baslatma geri sayimi basladi: ' + $delay + ' sn (iptal edilebilir; sebep: ' + $Reason + ')')
+
+    $end = (Get-Date).AddSeconds($delay)
+    $tick = 0
+    while ((Get-Date) -lt $end) {
+        # 1) Panelden iptal
+        if (Test-Path -LiteralPath $RebootCancelFile) {
+            Write-Log 'ALERT' 'yeniden baslatma kullanici tarafindan iptal edildi'
+            shutdown.exe /a 2>&1 | Out-Null
+            try {
+                $ack = [ordered]@{ cancelled = $true; at = (Get-Date).ToString('o'); reason = $Reason } | ConvertTo-Json
+                [System.IO.File]::WriteAllText($RebootAckFile, $ack, (New-Object System.Text.UTF8Encoding $true))
+            } catch { }
+            foreach ($f in @($RebootCancelFile, $RebootPendingFile, (Join-Path $BaseDir 'pending-voice.json'))) {
+                try { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } catch { }
+            }
+            # Ayni soruyu 5 dk sonra tekrar sorma: sayaci sifirla.
+            # Butce kaydi zaten yazilmadi (yalnizca PendingRebootUtc vardi), o yuzden
+            # burada butceden kayit silinmez; PendingRebootUtc temizlenir.
+            try {
+                $null = Invoke-StateUpdate {
+                    param($st)
+                    $st.ConsecutiveFailures = 0
+                    $st.PendingRebootUtc = ''
+                    $st.OutageStartUtc = ''
+                    $st.RebootCancelledUtc = (Get-Date).ToString('o')
                 }
-                <#  Kablo/adaptor geri geldiyse iptal. TEK kisa yoklama: geri sayimin
-                    gercekten 30 sn surmesi icin her adimda uzun bekleme yapmayiz. #>
-                if (($kaldi % 10) -eq 0) {
-                    if ((Get-TcpMs -HostName '1.1.1.1' -Port 443 -TimeoutMs 1200) -ge 0) {
-                        Write-Log 'INFO' 'restart iptal edildi: geri sayim sirasinda internet SAGLIKLI cikti (adaptor/kablo geri gelmis)'
-                        $iptal = $true
-                        break
-                    }
-                }
+            } catch { }
+            Send-Telegram ('[BILDIRIM] ' + $env:COMPUTERNAME + ' yeniden baslatma iptal edildi (sistem acik kaldi)')
+            # msg.exe KULLANILMAZ: panel zaten ekranda anons + balon gosteriyor ve
+            # msg.exe 10 dk acik kalan bir pencere oldugu icin kullaniciya iki kutu cikiyordu.
+            Write-Log 'ALERT' ('KULLANICI BILDIRIMI: yeniden baslatma iptal edildi - ' + $Reason)
+            return $false
+        }
+        # 2) Geri sayim sirasinda internet toparlandi mi?
+        $tick += 1
+        if (($tick % 12) -eq 0) {
+            try {
                 <#
-                    Hatirlatma EN FAZLA BIR kez (yarida). Onceki surumde her 20 saniyede bir
-                    yeni anons gonderiyordu; sesli/mesaj birikiyordu.
+                    HIZLI YOKLAMA: once sert zaman asimli TCP (1,2 sn). DNS'te asilmaz, HTTP
+                    basligi beklemez. 1.1.1.1 engelli bir agda olumsuz donerse HTTP yoklamasi
+                    da yapilir; IKISI DE "baglanti var" demedikce iptal edilmez (yanlis
+                    iptal, sadece bir restart'i engelledigi icin en kotu hali sinirli).
                 #>
-                if ((-not $hatirlatildi) -and $bekle -ge 40 -and $kaldi -le [int]($bekle / 2)) {
-                    $hatirlatildi = $true
-                    $null = Write-RebootAnnounce -Text ('Ağ sorunları çözülemedi, bilgisayar ' + $kaldi + ' saniye içinde yeniden başlatılacak.') -CountdownSeconds 0 -Force -VoiceKey 'reminder'
+                $ok = $false
+                if ((Get-TcpMs -HostName '1.1.1.1' -Port 443 -TimeoutMs 1200) -ge 0) { $ok = $true }
+                if (-not $ok) {
+                    try { $r = Invoke-Probe -Url 'https://www.google.com/generate_204' -TimeoutSec 3; if ($r.Ok) { $ok = $true } } catch { }
                 }
+                if ($ok) {
+                    Write-Log 'INFO' 'restart iptal edildi: geri sayim sirasinda internet SAGLIKLI cikti'
+                    shutdown.exe /a 2>&1 | Out-Null
+                    foreach ($f in @($RebootCancelFile, $RebootPendingFile)) { try { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } catch { } }
+                    $null = Invoke-StateUpdate {
+                        param($st)
+                        $st.ConsecutiveFailures = 0
+                        $st.NetResetPendingReboot = 0
+                        $st.PendingRebootUtc = ''
+                        $st.OutageStartUtc = ''
+                        $st.LastOkUtc = (Get-Date).ToString('o')
+                    }
+                    $null = Write-RebootAnnounce -Text 'Bağlantı geri geldi, yeniden başlatma iptal edildi.' -CountdownSeconds 0 -Force -VoiceKey 'rebootcancel'
+                    return $false
+                }
+            } catch { }
+            # Hatirlatma anonsu: kullanici baska isle mesgulse duysun.
+            $left = [int][math]::Ceiling(($end - (Get-Date)).TotalSeconds)
+            if ($left -le 30 -and $left -gt 10) {
+                $null = Write-RebootAnnounce -Text ('Bilgisayar ' + $left + ' saniye içinde yeniden açılacak. İptal edebilirsiniz.') -CountdownSeconds 0 -Force -VoiceKey 'reminder'
             }
         } catch {
             <#  Geri sayim ortasinda hata olsa bile restart yapilir: kullaniciyi asla acikta birakmayalim. #>
             Write-Log 'ERR' ('restart geri sayiminda hata: ' + $_.Exception.Message + ' - yine de yeniden baslatma deneniyor')
         }
+        Start-Sleep -Milliseconds 500
     }
-    if ($iptal) {
-        $null = Write-VoicePending -Text 'Yeniden başlatma iptal edildi, bilgisayar açık kalacak.' -Sfx 'ok' -VoiceKey 'rebootcancel'
-        $null = Invoke-StateUpdate {
-            param($st)
-            $st.PendingRebootUtc = ''
-            $st.ConsecutiveFailures = 0
-            $st.NetResetPendingReboot = 0
-            $st.OutageStartUtc = ''
-            $st.LastOkUtc = (Get-Date).ToString('o')
+
+    # Son kontrol: kullanici tam sayi bittiginde tikladiysa yine de yakalayalim.
+    Start-Sleep -Seconds 2
+    if (Test-Path -LiteralPath $RebootCancelFile) {
+        Write-Log 'ALERT' 'yeniden baslatma son anda iptal edildi'
+        shutdown.exe /a 2>&1 | Out-Null
+        try {
+            $ack = [ordered]@{ cancelled = $true; at = (Get-Date).ToString('o'); reason = $Reason } | ConvertTo-Json
+            [System.IO.File]::WriteAllText($RebootAckFile, $ack, (New-Object System.Text.UTF8Encoding $true))
+        } catch { }
+        foreach ($f in @($RebootCancelFile, $RebootPendingFile, (Join-Path $BaseDir 'pending-voice.json'))) {
+            try { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } catch { }
         }
-        return
+        try {
+            $null = Invoke-StateUpdate {
+                param($st)
+                $st.ConsecutiveFailures = 0
+                $st.PendingRebootUtc = ''
+            }
+        } catch { }
+        return $false
     }
-    Write-Log 'INFO' ('restart geri sayimi bitti (' + $bekle + ' sn), yeniden baslatma tetikleniyor')
-    $null = Confirm-Reboot
+
+    Write-Log 'ALERT' 'geri sayim bitti, yeniden baslatma tetiklendi'
+    try { Remove-Item -LiteralPath $RebootPendingFile -Force -ErrorAction SilentlyContinue } catch { }
+    <#
+        DOGRULANABILIR RESTART. Dogrudan "shutdown.exe /r /t 0" CAGRILMAZ: cikis kodu
+        2>&1 | Out-Null ile atiliyordu, tek log yoktu ve geri sayim bitse bile restart
+        gerceklesmeyince (digeri oturum, komut reddi) sistem sessizce acik kaliyordu;
+        gunluk butce ise "restart gerceklesmis" sayiyordu. Confirm-Reboot sirasiyla
+        shutdown.exe -> WMI Reboot -> Restart-Computer dener ve hangisinin restart
+        ilettigini yazar. Butce kaydi ancak gercekten yeniden acilinda (Sync-RebootAccounting)
+        yazilir; PendingRebootUtc o ana kadar durur.
+    #>
+    if (-not (Confirm-Reboot)) {
+        Write-Log 'ERR' 'restart iletilemedi: butce yazilmadi, PendingRebootUtc duruyor (bir sonraki dongude yeniden denenecek)'
+        return $false
+    }
+    return $true
 }
 
 function Show-Results {
@@ -2397,13 +2502,11 @@ if ($RepairWatch) {
 }
 if ($ForceReboot) {
     $global:cfg = Get-Config
-    $null = Invoke-StateUpdate {
-        param($st)
-        $st.ConsecutiveFailures = [int]$cfg.RebootAfterFailedCycles
-        $st.NetResetPendingReboot = 1
-        $st.PendingRebootUtc = (Get-Date).ToString('o')
-    }
-    Write-Log 'ALERT' ('elle restart istendi (pano butonu), gecikmeli yeniden baslatma: ' + $cfg.RebootDelaySeconds + ' sn')
+    $state = Get-State
+    $state.ConsecutiveFailures = [int]$cfg.RebootAfterFailedCycles
+    $state.NetResetPendingReboot = 1
+    Save-State $state
+    Write-Log 'ALERT' 'elle restart istendi (pano butonu), geri sayimli yeniden baslatma: ' + $cfg.RebootDelaySeconds + ' sn'
     Send-Telegram ('[BILDIRIM] ' + $env:COMPUTERNAME + ' elle restart istendi, ' + $cfg.RebootDelaySeconds + ' sn sonra yeniden baslatilacak')
     if (-not (Request-OfficeSave -TimeoutSeconds ([int]$cfg.OfficeSaveTimeoutSeconds))) {
         Write-Log 'ALERT' 'elle restart iptal: kaydedilmemiş belge var, once kaydedip kapatin'
@@ -2411,14 +2514,8 @@ if ($ForceReboot) {
         $null = Invoke-StateUpdate { param($st) $st.PendingRebootUtc = '' }
         exit 1
     }
-    <#  Elle restart da ayni dogrulama yolunu kullanir: hata olursa yedek yontem denenir. #>
-    try {
-        $p = Start-Process -FilePath 'shutdown.exe' -ArgumentList @('/r', '/t', [string]$cfg.RebootDelaySeconds, '/c', 'RemoteHostWatchdog: kullanici restart istedi') -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
-        if ($p.ExitCode -ne 0) { throw ('cikis kodu ' + $p.ExitCode) }
-    } catch {
-        Write-Log 'WARN' ('shutdown.exe ile elle restart basarisiz: ' + $_.Exception.Message + '; WMI deneniyor')
-        try { Invoke-CimMethod -ClassName Win32_OperatingSystem -MethodName Reboot -ErrorAction Stop | Out-Null } catch { Write-Log 'ERR' ('elle restart da basarisiz: ' + $_.Exception.Message) }
-    }
+    # Ayni geri sayimli/iptal edilebilir yol: panel de modal acsin, anons yapsin.
+    $null = Start-CountdownReboot -Reason 'siz istediniz (panel butonu)'
     exit 0
 }
 <#  Varsayilan tam dongu: canli yoklama yoluyla AYNI kilidi kullanir. #>

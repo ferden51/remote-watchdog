@@ -52,6 +52,9 @@ $ClientData = Join-Path $env:LOCALAPPDATA 'RemoteClientWatchdog'
 $ClientJson = Join-Path $ClientData 'last-run.json'
 $ClientConfig = Join-Path $ClientData 'config.json'
 $ClientLog = Join-Path $ClientData 'client-watchdog.log'
+$RebootPendingFile = Join-Path $HostData 'reboot-pending.json'
+$RebootCancelFile = Join-Path $HostData 'reboot-cancel.flag'
+$RebootAckFile = Join-Path $HostData 'reboot-ack.json'
 $VoiceDir = Join-Path $env:LOCALAPPDATA 'RemoteWatchdog\voice'
 $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $RunName = 'RemoteWatchdogTray'
@@ -121,6 +124,39 @@ $script:TtsFix = @{
     'Belge kaydetme'                  = 'Belge kaydetme'
     'Sistem yeniden baslatildi'       = 'Sistem yeniden başlatıldı'
 }
+function Show-PanelWindow {
+    <#
+        Ana pencereyi guvenli sekilde one getirir. WPF'te pencere bir kez Close()
+        cagrildiktan sonra Show() her zaman "Pencere kapatildi" hatasi verir; o
+        durumda panel zombie olur (tepside kalir, pencere hic acilmaz). Bu yuzden
+        once $script:WinClosed bayragina bakilir.
+
+        NOT: IsLoaded burada kullanilmaz - arka planda baslayan panelde pencere
+        hic gosterilmedigi icin IsLoaded her zaman false kalir ve gosterim
+        istekleri reddedilir (teyide var).
+    #>
+    $w = $script:Win
+    if (-not $w) { return $false }
+    # Cikan panel artik gosterilemez ("Pencere kapatildi..." hatasi verip YAKALANAMAYAN
+    # HATA olarak log'a duserdi). Cikar istegi gelmis demektir; bayragi birakmadan cik.
+    # NOT: $script:Win.IsLoaded kapanma sonrasi de True kaliyor, guvenilir degil;
+    # asil bayrak add_Closed icinde $script:WinClosed olarak tutuluyor.
+    if ($script:ExitRequested -or $script:WinClosed) {
+        Write-Trace 'goster istegi geldi ama panel kapali; acik kalmayan ornek kapatiliyor'
+        try { $w.Dispatcher.InvokeShutdown() } catch { try { [System.Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown() } catch { } }
+        return $false
+    }
+    try {
+        $w.Show()
+        $w.WindowState = 'Normal'
+        $w.Activate()
+        return $true
+    } catch {
+        Write-Trace ('pencere gosterilemedi: ' + $_.Exception.Message)
+        return $false
+    }
+}
+
 $script:SpeechProc = $null
 $script:SpeechText = ''
 $script:SpeechEngine = ''
@@ -159,6 +195,15 @@ $script:RepairLiveText = ''
 $script:RepairStatusText = ''
 $script:RepairWin = $null
 $script:RepairTimer = $null
+# Geri sayacli restart modali (reboot-pending.json -> saniye sayaci + iptal butonu)
+$script:RebootWin = $null
+$script:RebootTimer = $null
+$script:RebootCountBox = $null
+$script:RebootHintBox = $null
+$script:RebootCancelBtn = $null
+$script:RebootSoonBtn = $null
+$script:RebootDeadline = $null
+$script:RebootSeenAt = $null
 $script:RepairLiveBox = $null
 $script:RepairStatusBox = $null
 $script:RepairElapsedBox = $null
@@ -174,6 +219,7 @@ Add-Type -AssemblyName System.Drawing
 
 $script:MutexAcquired = $false
 $script:OtherInstance = $null
+$script:WinClosed = $false
 # Kurulum/kaldirma her zaman calismali: panel zaten acikken de -Install/-Uninstall islesin
 # (aksi halde mutex'te cikip hicbir sey yapmiyordu - kisayol olusmuyordu).
 if ($Install -or $Uninstall) {
@@ -961,6 +1007,259 @@ function Wait-Dispatcher {
     $t.Start()
     [System.Windows.Threading.Dispatcher]::PushFrame($f)
     $t.Stop()
+}
+
+function Close-RebootModal {
+    <#  Restart modalini kapatir; geri sayac durur. #>
+    if ($script:RebootTimer) { try { $script:RebootTimer.Stop() } catch { } }
+    $script:RebootTimer = $null
+    $w = $script:RebootWin
+    $script:RebootWin = $null
+    $script:RebootCountBox = $null
+    $script:RebootHintBox = $null
+    $script:RebootCancelBtn = $null
+    $script:RebootSoonBtn = $null
+    $script:RebootDeadline = $null
+    if ($w) { try { $w.Close() } catch { } }
+}
+
+function Show-RebootModal {
+    <#
+        Onarilamayan baglanti sorunu icin GERI SAYACLI restart modali.
+        Host once reboot-pending.json yazar; panel burada saniye saniye geri sayar
+        ve kullanici "Iptal et" diyebilir. Iptal, shutdown /a + reboot-cancel.flag
+        yazar; host geri sayim sonunda bu dosyayi gorup restart etmez.
+    #>
+    $data = $null
+    try { $data = Get-Content -LiteralPath $RebootPendingFile -Raw -ErrorAction Stop | ConvertFrom-Json } catch { $data = $null }
+    if (-not $data) { return }
+
+    if ($script:RebootWin) {
+        $alive = $false
+        try { $alive = ($script:RebootWin.IsLoaded -and -not $script:RebootWin.IsClosed) } catch { $alive = $false }
+        if ($alive) { return }
+        $script:RebootWin = $null
+    }
+
+    $deadline = $null
+    try { $deadline = [datetime]::Parse([string]$data.deadline, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime() } catch { $deadline = (Get-Date).AddSeconds(60) }
+    $script:RebootDeadline = $deadline
+
+    $w = New-Object System.Windows.Window
+    $w.Title = 'Yeniden başlatma'
+    $w.Width = 560
+    $w.Height = 380
+    $w.ResizeMode = 'NoResize'
+    $w.WindowStartupLocation = 'CenterScreen'
+    $w.Background = Bx '#15181D'
+    $w.Foreground = Bx 'Text'
+    $w.FontFamily = 'Segoe UI'
+    $w.Topmost = $true
+    $w.ShowInTaskbar = $true
+
+    $sp = New-Object System.Windows.Controls.StackPanel
+    $sp.Margin = New-Object System.Windows.Thickness(24, 20, 24, 16)
+
+    $h1 = New-Object System.Windows.Controls.TextBlock
+    $h1.Text = 'Uzaktan erişim onarılamıyor'
+    $h1.FontSize = 19
+    $h1.FontWeight = 'Bold'
+    $h1.Foreground = Bx 'Bad'
+    [void]$sp.Children.Add($h1)
+
+    $h2 = New-Object System.Windows.Controls.TextBlock
+    $h2.Text = 'Cihazınız yeniden başlatılacak. İsterseniz şimdi iptal edebilirsiniz.'
+    $h2.FontSize = 13
+    $h2.Foreground = Bx 'Text'
+    $h2.TextWrapping = 'Wrap'
+    $h2.Margin = New-Object System.Windows.Thickness(0, 6, 0, 12)
+    [void]$sp.Children.Add($h2)
+    $script:RebootHintBox = $h2
+
+    $h3 = New-Object System.Windows.Controls.TextBlock
+    $h3.Text = 'Kalan süre'
+    $h3.FontSize = 12
+    $h3.Foreground = Bx 'Muted'
+    [void]$sp.Children.Add($h3)
+
+    $big = New-Object System.Windows.Controls.TextBlock
+    $big.Name = 'TxtRebootCount'
+    $big.FontSize = 60
+    $big.FontWeight = 'Bold'
+    $big.Foreground = Bx 'Warn'
+    $big.HorizontalAlignment = 'Center'
+    $big.Margin = New-Object System.Windows.Thickness(0, 2, 0, 10)
+    $big.Text = '--'
+    [void]$sp.Children.Add($big)
+
+    $h4 = New-Object System.Windows.Controls.TextBlock
+    $h4.Name = 'TxtRebootInfo'
+    $h4.Text = ''
+    $h4.FontSize = 12
+    $h4.Foreground = Bx 'Muted'
+    $h4.TextWrapping = 'Wrap'
+    $h4.TextAlignment = 'Center'
+    $h4.Margin = New-Object System.Windows.Thickness(0, 0, 0, 14)
+    if ($data.problems) { $h4.Text = ('Sorun: ' + [string]$data.problems) }
+    [void]$sp.Children.Add($h4)
+
+    $row = New-Object System.Windows.Controls.StackPanel
+    $row.Orientation = 'Horizontal'
+    $row.HorizontalAlignment = 'Center'
+
+    $cancel = New-Object System.Windows.Controls.Button
+    $cancel.Name = 'BtnRebootCancel'
+    $cancel.Content = 'İptal et — şimdi yeniden başlatma'
+    $cancel.FontSize = 13
+    $cancel.Padding = New-Object System.Windows.Thickness(18, 9, 18, 9)
+    $cancel.Margin = New-Object System.Windows.Thickness(0, 0, 10, 0)
+    $cancel.Background = Bx '#21252B'
+    $cancel.Foreground = Bx 'Text'
+    $cancel.BorderThickness = New-Object System.Windows.Thickness(0)
+    $cancel.Cursor = [System.Windows.Input.Cursors]::Hand
+    $cancel.ToolTip = 'Yeniden başlatmayı iptal eder. Bağlantı sorunu düzelmezse bir sonraki denemede tekrar sorulur.'
+    [void]$row.Children.Add($cancel)
+
+    $soon = New-Object System.Windows.Controls.Button
+    $soon.Name = 'BtnRebootSoon'
+    $soon.Content = 'Şimdi yeniden başlat'
+    $soon.FontSize = 13
+    $soon.Padding = New-Object System.Windows.Thickness(18, 9, 18, 9)
+    $soon.Background = Bx '#5A2020'
+    $soon.Foreground = Bx 'Text'
+    $soon.BorderThickness = New-Object System.Windows.Thickness(0)
+    $soon.Cursor = [System.Windows.Input.Cursors]::Hand
+    [void]$row.Children.Add($soon)
+
+    [void]$sp.Children.Add($row)
+    $w.Content = $sp
+
+    # Buton referanslari script seviyesine alinir: add_Click scriptblock'lari
+    # fonksiyon kapsamini yakalayamaz, $cancel/$soon null kalir ve
+    # "IsEnabled" hatasi verir (tum handler bu yuzden script degiskeni kullanir).
+    $script:RebootCancelBtn = $cancel
+    $script:RebootSoonBtn = $soon
+
+    $cancel.add_Click({
+            try {
+                Write-Trace 'restart iptal istegi (kullanicidan)'
+                # Butonu kilitle: cift tiklamayi ve "Iptal ediliyor" goruntusunu onle.
+                if ($script:RebootCancelBtn) {
+                    $script:RebootCancelBtn.IsEnabled = $false
+                    $script:RebootCancelBtn.Content = 'İptal ediliyor…'
+                }
+                if ($script:RebootSoonBtn) { $script:RebootSoonBtn.IsEnabled = $false }
+                try { Set-Content -LiteralPath $RebootCancelFile -Value (Get-Date).ToString('o') -Encoding UTF8 -ErrorAction Stop } catch { Write-Trace ('iptal dosyasi yazilamadi: ' + $_.Exception.Message) }
+                # Panel normal kullanici da olabilir; shutdown /a yetkisi yoksa sorun degil:
+                # SYSTEM'deki watchdog 0,5 sn'de bir iptal dosyasina bakip geri sayimi
+                # KENDISI durdurur. Asil dogrulama reboot-ack.json dosyasidir.
+                try { & shutdown.exe /a 2>&1 | Out-Null } catch { }
+                # Dogrulama: watchdog iptali onaylayana kadar bekle, ONCE "durduruldu" deme.
+                $ok = $false
+                for ($i = 0; $i -lt 20; $i++) {
+                    if (Test-Path -LiteralPath $RebootAckFile) { $ok = $true; break }
+                    Start-Sleep -Milliseconds 500
+                }
+                if ($ok) {
+                    Write-Trace 'restart iptali watchdog tarafindan onaylandi'
+                    Speak-Text 'Yeniden başlatma iptal edildi. Bilgisayar açık kalıyor.' -Sfx 'recover' -Force
+                    Show-Balloon -Title 'Yeniden başlatma iptal edildi' -Text 'Bilgisayar yeniden başlatılmadı. Bağlantı sorunu sürerse bir sonraki denemede tekrar sorulacak.' -Icon 'Info' -Always
+                    Close-RebootModal
+                    Update-Actions
+                } else {
+                    Write-Trace 'restart iptali onaylanmadi; geri sayim suruyor olabilir'
+                    if ($script:RebootCancelBtn) {
+                        $script:RebootCancelBtn.IsEnabled = $true
+                        $script:RebootCancelBtn.Content = 'İptal et — şimdi yeniden başlatma'
+                    }
+                    if ($script:RebootSoonBtn) { $script:RebootSoonBtn.IsEnabled = $true }
+                    if ($script:RebootHintBox) { $script:RebootHintBox.Text = 'İptal onaylanmadı. Geri sayım sürüyor — sistem yine de kapanabilir.' }
+                    Speak-Text 'İptal onaylanmadı. Bilgisayar yine de yeniden başlatılabilir.' -Sfx 'warn' -Force
+                }
+            } catch {
+                # Bu handler'da istisna atilirsa panel HATA KUTUSU gosterip coktu oluyor;
+                # restart akisi sessizce bozulmasin diye yutuyoruz.
+                Write-Trace ('iptal isleyici hatasi: ' + $_.Exception.Message)
+            }
+        })
+    $soon.add_Click({
+            try {
+                Write-Trace 'restart hemen tetiklendi (kullanicidan)'
+                if ($script:RebootSoonBtn) { $script:RebootSoonBtn.IsEnabled = $false }
+                if ($script:RebootCancelBtn) {
+                    $script:RebootCancelBtn.IsEnabled = $false
+                    $script:RebootCancelBtn.Content = 'Kapatılıyor…'
+                }
+                # Geri sayimin kalan kismini beklemeden kapat; watchdog kendi sayacini
+                # bitirince kapanir. Anons once verilir, sonra kapatilir.
+                Speak-Text 'Bilgisayar şimdi yeniden başlatılıyor.' -Sfx 'reboot' -Force
+                if ($script:RebootHintBox) { $script:RebootHintBox.Text = 'Yeniden başlatma onaylandı — bilgisayar kapanıyor.' }
+            } catch { Write-Trace ('hemen baslat isleyici hatasi: ' + $_.Exception.Message) }
+        })
+
+    $script:RebootWin = $w
+    $script:RebootCountBox = $big
+    $script:RebootTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:RebootTimer.Interval = [TimeSpan]::FromSeconds(1)
+    $script:RebootSpoken = @{}
+    $script:RebootTimer.Add_Tick({
+            $box = $script:RebootCountBox
+            if (-not $box) { return }
+            $left = [int][math]::Ceiling(($script:RebootDeadline - (Get-Date)).TotalSeconds)
+            if ($left -lt 0) { $left = 0 }
+            $mm = [int][math]::Floor($left / 60)
+            $ss = $left % 60
+            $box.Text = if ($mm -gt 0) { ('{0}:{1:00}' -f $mm, $ss) } else { [string]$ss }
+            # Asama anonslari: kalan sure her gecildiginde bir kez konusulur.
+            foreach ($mark in @(30, 15, 10, 5)) {
+                if (($left -le $mark) -and -not $script:RebootSpoken.ContainsKey($mark)) {
+                    $script:RebootSpoken[$mark] = $true
+                    if ($left -gt 0) {
+                        try { Speak-Text ($mark + ' saniye sonra yeniden başlatılıyor. İptal edebilirsiniz.') -Sfx 'alert' } catch { }
+                    }
+                }
+            }
+            if ($left -le 0) {
+                $box.Text = '0'
+                $box.Foreground = Bx 'Bad'
+                Close-RebootModal
+            } elseif ($left -le 10) {
+                $box.Foreground = Bx 'Bad'
+            }
+        })
+    $w.Show()
+    $w.Activate() | Out-Null
+    $script:RebootTimer.Start()
+    # Kalan sureyi hemen goster (timer ilk tick'i 1 sn sonra).
+    try {
+        $left0 = [int][math]::Ceiling(($script:RebootDeadline - (Get-Date)).TotalSeconds)
+        $mm0 = [int][math]::Floor($left0 / 60)
+        $ss0 = $left0 % 60
+        $big.Text = if ($mm0 -gt 0) { ('{0}:{1:00}' -f $mm0, $ss0) } else { [string]$ss0 }
+    } catch { }
+    Play-Sfx 'alert' | Out-Null
+    # Sesli anons: ekranda geri sayac varken duyulmasi gerekiyor.
+    $dur = [int][math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
+    $sebep = [string]$data.reason
+    if ([string]::IsNullOrWhiteSpace($sebep)) { $sebep = 'Onarılamayan bağlantı sorunu' }
+    if ($dur -le 10) {
+        Speak-Text ($sebep + '. Bilgisayar şimdi yeniden başlatılıyor.') -Sfx 'reboot' -Force
+    } else {
+        Speak-Text ($sebep + '. ' + $dur + ' saniye içinde bilgisayar yeniden açılacak. İptal edebilirsiniz.') -Sfx 'reboot' -Force
+    }
+    Write-Trace ('restart modali acildi, geri sayim: ' + $dur + ' sn; anons verildi')
+}
+
+function Watch-RebootPending {
+    <#  reboot-pending.json yeni mi diye bakar; yeni ise geri sayacli modali acar. #>
+    if (-not (Test-Path -LiteralPath $RebootPendingFile)) {
+        $script:RebootSeenAt = $null
+        return
+    }
+    try { $mt = [System.IO.File]::GetLastWriteTime($RebootPendingFile) } catch { return }
+    if ($script:RebootSeenAt -and $mt -le $script:RebootSeenAt) { return }
+    $script:RebootSeenAt = $mt
+    try { Show-RebootModal } catch { Write-Trace ('restart modali acilamadi: ' + $_.Exception.Message) }
 }
 
 function Show-RepairWindow {
@@ -3070,15 +3369,15 @@ function Set-SfxMode {
 function Invoke-TrayAction {
     param([string]$Key)
     switch ($Key) {
-        'panel' { $script:Win.Show(); $script:Win.Activate(); Show-Page 'conn'; Update-Connections }
+        'panel' { if (Show-PanelWindow) { Show-Page 'conn'; Update-Connections } }
         'panelstart' {
             # Konsol penceresi acilmasin: Normal yerine Hidden (acik konsol kapatilinca program da kapaniyordu)
             Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-STA', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ScriptPath + '"')) -WindowStyle Hidden | Out-Null
             Start-Sleep 1
             Update-Connections
         }
-        'toggle' { if ($script:Win.IsVisible) { $script:Win.Hide() } else { $script:Win.Show(); $script:Win.Activate() } }
-        'check' { $script:Win.Show(); $script:Win.Activate(); Show-Page 'conn'; Start-ManualCheck }
+        'toggle' { if ($script:Win.IsVisible) { $script:Win.Hide() } else { Show-PanelWindow | Out-Null } }
+        'check' { if (Show-PanelWindow) { Show-Page 'conn'; Start-ManualCheck } }
         'silent' { Set-SilentMode -Toggle | Out-Null }
         'voice' { Set-VoiceMode -Toggle | Out-Null }
         'sfx' { Set-SfxMode -Toggle | Out-Null }
@@ -3261,16 +3560,20 @@ try { Speak-PendingVoice } catch { Write-Trace ('bekleyen anons hatasi: ' + $_.E
     $w.add_Closed({
             # Pencere kapandi: artik Show() cagirmak "Pencere kapatildi..." hatasi verir.
             $script:WinClosed = $true
-            # Cikis (tepsi > Cikis): Dispatcher'i kapat ki [Dispatcher]::Run() donup
-            # betik bitsin. ONCEDEN "statik Dispatcher.Shutdown" cagriliyordu; WPF'te boyle
-            # bir statik metot YOKTUR (statikler: Run/PushFrame/ExitAllFrames/Yield...), cagri
-            # MethodNotFound ile hata verip `catch {}` ile yutuluyor, Dispatcher hic kapanmiyor,
-            # surec sonsuza kadar ayakta kaliyor ve mutex'i tutmaya devam ediyordu. Bu yuzden
-            # tray'den ciktiktan sonra kisa yola basmak paneli geri getirmiyordu.
+            # Dispatcher'i kapat ki [Dispatcher]::Run() donup betik bitsin. ONCEDEN statik
+            # "[System.Windows.Threading.Dispatcher]::Shutdown" cagriliyordu; WPF'te boyle bir
+            # statik metot YOKTUR (statikler: Run/PushFrame/ExitAllFrames/Yield), cagri
+            # MethodNotFound ile hata verip `catch {}` ile yutuluyor, dispatcher hic kapanmiyor,
+            # surec sonsuza kadar ayakta kaliyor ve mutex'i tutmaya devam ediyordu.
             if ($script:ExitRequested) {
-                try { Write-Trace 'cikis onaylandi: dispatcher kapatiliyor' } catch { }
-                try { $script:Win.Dispatcher.InvokeShutdown() } catch { try { [System.Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown() } catch { } }
+                Write-Trace 'cikis onaylandi: dispatcher kapatiliyor'
+            } else {
+                # Cikis istenmediyse bu bir hata durumu: tray'de gorunmez bir zombie surec
+                # birakmak yerine kendini kapatiyoruz; RemoteHostPanel gorevi 1-2 dk icinde
+                # temiz bir paneli geri getirir (RestartCount 3).
+                Write-Trace 'pencere kapanmis ama cikis istenmemisti; surec kapatiliyor (gorev yeniden baslatacak)'
             }
+            try { $script:Win.Dispatcher.InvokeShutdown() } catch { try { [System.Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown() } catch { } }
         })
     $script:Timer = New-Object System.Windows.Threading.DispatcherTimer
     $script:Timer.Interval = [TimeSpan]::FromSeconds(20)
@@ -3315,6 +3618,8 @@ try { Speak-PendingVoice } catch { Write-Trace ('bekleyen anons hatasi: ' + $_.E
                         Refresh-Icon
                     }
                 } catch { Write-Trace ('damga yoklama hatasi: ' + $_.Exception.Message) }
+                # Onarilamayan baglanti sorunu -> geri sayacli restart modali
+                try { Watch-RebootPending } catch { Write-Trace ('restart yoklama hatasi: ' + $_.Exception.Message) }
             } catch { Write-Trace ('sayac hatasi: ' + $_.Exception.Message) }
         })
     $script:Tick.Start()
@@ -3325,21 +3630,7 @@ try { Speak-PendingVoice } catch { Write-Trace ('bekleyen anons hatasi: ' + $_.E
             if (-not (Test-Path -LiteralPath $ShowRequest)) { return }
             if (((Get-Date) - $script:StartedAt).TotalSeconds -lt 10) { return }
             try { Remove-Item -LiteralPath $ShowRequest -Force -ErrorAction SilentlyContinue } catch { }
-            # Cikan panel artik gosterilemez ("Pencere kapatildi..." hatasi verip YAKALANAMAYAN
-            # HATA olarak log'a duserdi). Cikar istegi gelmis demektir; bayragi birakmadan cik.
-            # NOT: $script:Win.IsLoaded kapanma sonrasi de True kaliyor, guvenilir degil;
-            # asil bayrak add_Closed icinde $script:WinClosed olarak tutuluyor.
-            if ($script:ExitRequested -or $script:WinClosed) {
-                Write-Trace 'goster istegi geldi ama panel kapali; acik kalmayan ornek kapatiliyor'
-                try { $script:Win.Dispatcher.InvokeShutdown() } catch { }
-                return
-            }
-            try {
-                $script:Win.Show()
-                $script:Win.WindowState = 'Normal'
-                $script:Win.Activate()
-                Write-Trace 'goster istegi islendi (pencere one getirildi)'
-            } catch { Write-Trace ('goster istegi islenemedi: ' + $_.Exception.Message) }
+            if (Show-PanelWindow) { Write-Trace 'goster istegi islendi (pencere one getirildi)' }
         })
     # Dispatcher uzerinde tek merkezî hata yakalayici (Window'da add_DispatcherUnhandledException
     # metodu YOKTUR; Dispatcher.UnhandledException kullanilir). Dosya sonunda tekrar KAYDEDILMEZ.
@@ -3412,6 +3703,7 @@ if ($Install) {
     Write-Host 'Panel oturum acilinda otomatik baslayacak.'
     try {
         $vbs = Join-Path $UiDir 'Start-Panel.vbs'
+        # Parametresiz cagri: panel yalnizca tepside calisir. Kisayollar "show" ile ayri.
         $pa = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"' + $vbs + '"')
         $pp = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
         $ps = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -Hidden
@@ -3722,7 +4014,7 @@ if ($SelfTest) {
     exit 0
 }
 
-if ($TrayOnly -or $script:Background) { $script:Win.Hide() } else { $script:Win.Show() }
+if ($TrayOnly -or $script:Background) { $script:Win.Hide() } else { Show-PanelWindow | Out-Null }
 # Son pencere kapansa bile tepsi/izleme ayakta kalsin (kapalisa program kapanirdi)
 try { $script:Win.ShutdownMode = [System.Windows.ShutdownMode]::OnExplicitShutdown } catch { }
 try { [System.Windows.Threading.Dispatcher]::Run() }

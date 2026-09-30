@@ -261,6 +261,9 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host restart butcesi dogrulamasi (Sync-RebootAccounting) var' ($hostText -match 'function Sync-RebootAccounting')
     Ok 'host restart icin yedek yontem (Confirm-Reboot) var' ($hostText -match 'function Confirm-Reboot')
     Ok 'host restart karari butceye yazmadan once damgalanir (PendingRebootUtc)' ($hostText -match 'PendingRebootUtc')
+    <#  Geri sayim sonunda dogrudan shutdown.exe CAGRILMEZ: cikis kodu atiliyordu ve
+        restart gerceklesmese bile butce "gerceklesmis" sayiliyordu. #>
+    Ok 'host geri sayim sonrasi dogrulanabilir restart yolunu kullanir' ($hostText -match '(?s)geri sayim bitti.{0,900}Confirm-Reboot')
     <#  -Check "hicbir sey degistirmez" sozu: SYSTEM nabzi da -Check'te yazilmamali, yoksa
         elle calistirilan bir rapor olmayan SYSTEM gorevini "saglikli" gosterir. #>
     Ok 'host -Check modu SYSTEM nabzini yazmaz' ($hostText -match '(?s)Invoke-CycleLocked \{\s*\$null = Invoke-Watchdog.{0,900}\(\(-not \$Check\) -and \(Test-Admin\)\)\s*\{[^}]*system-heartbeat')

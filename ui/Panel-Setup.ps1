@@ -1,4 +1,4 @@
-# RemoteWatchdog - panel kurulum/kaldirma isleri (oturum acilinda baslatma, gorev, kisayollar).
+﻿# RemoteWatchdog - panel kurulum/kaldirma isleri (oturum acilinda baslatma, gorev, kisayollar).
 # Panel betiginden cagrilir; tek basina da calistirilabilir:
 #   powershell -File Panel-Setup.ps1 -Action Install
 #   powershell -File Panel-Setup.ps1 -Action Uninstall
@@ -66,6 +66,7 @@ function Install-Panel {
     } catch { Warn2 ('  Run kaydi yazilamadi: ' + $_.Exception.Message) }
     try {
         $vbs = Join-Path $UiDir 'Start-Panel.vbs'
+        # Parametresiz cagri: panel yalnizca tepside calisir. Kisayollar "show" ile ayri.
         $pa = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"' + $vbs + '"')
         $pp = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
         $ps = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -Hidden

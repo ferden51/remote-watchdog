@@ -32,6 +32,11 @@ $DiagScript = Join-Path $Root 'host\Collect-Diagnostics.ps1'
 $DocsScript = Join-Path $Root 'host\Protect-OpenDocuments.ps1'
 $TrayScript = Join-Path $Root 'ui\RemoteWatchdogPanel.ps1'
 
+# Uygulama SABIT bir dizine kopyalanir ve her sey oradan calisir. Boylece depo
+# tasinsa/silinse bile zamanlanmis gorevler ve kisayollar bozulmaz; ayrica
+# "kod calisiyor" diye repodan calistirmak zorunda kalmazsin.
+$AppDir = Join-Path $env:ProgramData 'RemoteWatchdog\app'
+
 function Step { param([string]$Text) Write-Host ''; Write-Host ('==> ' + $Text) -ForegroundColor Cyan }
 function Ok { param([string]$Text) Write-Host ('    [OK] ' + $Text) -ForegroundColor Green }
 function Warn { param([string]$Text) Write-Host ('    [!] ' + $Text) -ForegroundColor Yellow }
@@ -40,6 +45,36 @@ function Die { param([string]$Text) Write-Host ('    [X] ' + $Text) -ForegroundC
 function Is-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     return (New-Object Security.Principal.WindowsPrincipal $id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Copy-AppToInstallDir {
+    <#
+        host\, ui\, lib\, VERSION klasorlerini ProgramData'ya kopyalar ve oradaki
+        betik yollarini dondurur. Panel aciliyken bir dosya kilitliyse robocopy
+        onarim modu (/M) eskiyi atlamaz; bu yuzden once paneli kapatmayi dener.
+    #>
+    $targets = @('host', 'ui', 'lib')
+    foreach ($t in $targets) {
+        $src = Join-Path $Root $t
+        if (-not (Test-Path -LiteralPath $src)) { Die ('kopyalanacak klasor yok: ' + $src) }
+    }
+    if (-not (Test-Path -LiteralPath $AppDir)) { New-Item -ItemType Directory -Force -Path $AppDir | Out-Null }
+    foreach ($t in $targets) {
+        $dst = Join-Path $AppDir $t
+        & robocopy.exe (Join-Path $Root $t) $dst /MIR /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+        if ($LASTEXITCODE -ge 8) { Die ('kopyalama basarisiz (' + $t + '): robocopy kodu ' + $LASTEXITCODE) }
+    }
+    Copy-Item -LiteralPath (Join-Path $Root 'VERSION') -Destination (Join-Path $AppDir 'VERSION') -Force -ErrorAction SilentlyContinue
+    $v = '0.0.0'
+    try { $v = ([System.IO.File]::ReadAllText((Join-Path $Root 'VERSION'))).Trim() } catch { }
+    return [pscustomobject]@{
+        Dir   = $AppDir
+        Host  = Join-Path $AppDir 'host\RemoteHostWatchdog.ps1'
+        Diag  = Join-Path $AppDir 'host\Collect-Diagnostics.ps1'
+        Docs  = Join-Path $AppDir 'host\Protect-OpenDocuments.ps1'
+        Panel = Join-Path $AppDir 'ui\RemoteWatchdogPanel.ps1'
+        Ver   = $v
+    }
 }
 
 Write-Host '=============================================='
@@ -59,16 +94,19 @@ if (-not (Is-Admin)) { Warn 'Yonetici degilsin. Zamanlanmis gorev ve servis ayar
 
 if ($DryRun) {
     Warn 'KURULUM YAPILMAYACAK (DryRun)'
+    Step '0) Kurulum dizini'
+    Warn ('  kopyalanacak: ' + $Root + '  ->  ' + $AppDir + '  (host\, ui\, lib\, VERSION)')
+    Warn '  Bundan sonra butun gorevler ve kisayollar kurulum dizininden calisir.'
     Step '1) Tehis raporu'
     Warn ('  calistirilacak: ' + $DiagScript + '  (okuma modunda)')
     Step '2) Host watchdog'
-    Warn ('  calistirilacak: ' + $HostScript + ' -Install -IntervalMinutes ' + $IntervalMinutes)
+    Warn ('  calistirilacak: ' + $AppDir + '\host\RemoteHostWatchdog.ps1 -Install -IntervalMinutes ' + $IntervalMinutes)
     if ($TelegramToken) { Warn '  -TelegramToken verilecek' } else { Warn '  Telegram token YOK: alarm ekranda gorunur, Telegram gelmez' }
     if ($KeepSleep) { Warn '  -KeepSleep: uyku ve Fast Startup ayarlarina dokunulmayacak' }
     Step '3) Belge koruyucu'
-    Warn ('  goru: ' + $DocsScript + ' (zamanlanmis gorev host -Install icinde kurulur)')
+    Warn ('  goru: ' + $AppDir + '\host\Protect-OpenDocuments.ps1 (zamanlanmis gorev host -Install icinde kurulur)')
     Step '4) Tray paneli'
-    if ($SkipTray) { Warn '  atlandi (-SkipTray)' } else { Warn ('  calistirilacak: ' + $TrayScript + ' -Install') }
+    if ($SkipTray) { Warn '  atlandi (-SkipTray)' } else { Warn ('  calistirilacak: ' + $AppDir + '\ui\RemoteWatchdogPanel.ps1 -Install') }
     Step '5) CRD kaydi'
     Warn 'https://remotedesktop.google.com/headless adresini ac, "Set up remote access" ile yeni PIN al.'
     Warn 'Bu adim watchdog ile yapilamaz; cihaz Google listesinde gorunmuyorsa bu zorunludur.'
@@ -86,6 +124,24 @@ if (-not (Is-Admin)) {
     Ok 'Yonetici yetkisiyle yeniden baslatildi. Bu pencereyi kapatabilirsiniz.'
     exit 0
 }
+
+# Panel calisiyorsa betigi kilitliyor; robocopy /MIR onarim modunda eskiyi atlamaz,
+# bu yuzden Once paneli kapatiyoruz (asagida kurulumdan sonra yeniden baslatilacak).
+$panelProcs = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -match 'RemoteWatchdogPanel' -and $_.ProcessId -ne $PID })
+if ($panelProcs.Count -gt 0) {
+    Step '0) Calisan panel kapatiliyor (dosya kilidi acilsin)'
+    foreach ($pp in $panelProcs) { try { Stop-Process -Id $pp.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
+    Start-Sleep -Seconds 2
+    Ok ('kapatildi: ' + $panelProcs.Count + ' panel surecu')
+}
+
+Step '0) Kurulum dizinine kopyalaniyor'
+$app = Copy-AppToInstallDir
+Ok ('kurulum dizini: ' + $app.Dir + '  (v' + $app.Ver + ')')
+$HostScript = $app.Host
+$DocsScript = $app.Docs
+$TrayScript = $app.Panel
 
 if (-not $SkipDiag) {
     Step '1) Tehis raporu (okuma modunda, ~40 sn)'
@@ -132,7 +188,9 @@ else {
     if (Get-ItemProperty -Path $runKey -Name 'RemoteWatchdogTray' -ErrorAction SilentlyContinue) { Ok 'panel oturum açılışında başlayacak' } else { Warn 'tray kaydi olusmadi (farkli yonetici hesabi ile calistirilmis olabilir)' }
     $vbs = Join-Path (Split-Path -Parent $TrayScript) 'Start-Panel.vbs'
     if (Test-Path -LiteralPath $vbs) {
-        Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $vbs + '"')
+        # "show" argumani ile: pencereyi one getirir. explorer.exe uzerinden calistirmak
+        # paneli arka planda baslatiyor ve kullanicinin paneli acmadigi saniliyordu.
+        Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\wscript.exe') -ArgumentList ('"' + $vbs + '" show')
         Ok 'panel etkilesimli oturumda (yoneticisiz) baslatildi'
     } else {
         Warn ('panel baslatici bulunamadi: ' + $vbs + ' - elle calistirin: ' + $TrayScript)
@@ -149,8 +207,11 @@ Warn 'Bu adim watchdog ile yapilamaz; cihazin host kaydi (host.json) yoksa liste
 Step '6) Ozet'
 $cfg = 'C:\ProgramData\RemoteWatchdog\config.json'
 if (Test-Path -LiteralPath $cfg) { Ok ('config: ' + $cfg) }
+Ok ('kurulum: ' + $AppDir)
 Ok ('log: C:\ProgramData\RemoteWatchdog\host-watchdog.log')
 Ok 'durum: tray paneli veya  powershell -File "' + $HostScript + '" -Status'
 if (-not $TelegramToken) { Warn 'Telegram bildirimi kapali; ekranda uyari gorunur. Eklemek icin: Install-Host.ps1 -TelegramToken ... -TelegramChatId ...' }
 Write-Host ''
-Write-Host 'Kurulum tamamlandı.' -ForegroundColor Green
+Write-Host 'Kurulum tamamlandı. Artık deponun yerini önemsemezsiniz; her şey' -ForegroundColor Green
+Write-Host ('  ' + $AppDir + ' altından çalışıyor. Güncelleme için bu klasörü') -ForegroundColor Green
+Write-Host '  Install-Host.ps1 ile tekrar kurulum yapman yeterli.' -ForegroundColor Green
