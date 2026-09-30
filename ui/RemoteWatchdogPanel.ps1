@@ -126,6 +126,8 @@ $script:SpeechText = ''
 $script:SpeechEngine = ''
 $script:SpeechQueue = New-Object System.Collections.ArrayList
 $script:VoiceLast = $null
+$script:LastSpokenKey = ''
+$script:LastSpokenAt = $null
 $script:VoiceNoTr = $false
 # --- Uzay filmi tarzi hazir ses efektleri (ui\sounds\*.wav); on yuklenir, aninda calar ---
 $script:SfxNames = @('online', 'ok', 'warn', 'alert', 'repair', 'recover', 'reboot', 'scan')
@@ -352,10 +354,10 @@ function Get-Json {
 function Get-HostConfig {
     $cfg = [ordered]@{
         IntervalMinutes = 5;         RestartPolicy = 'blackout'; BlackoutEnabled = $true; BlackoutStart = 18; BlackoutEnd = 8
-        MaxRestartsPerDay = 3; RebootCooldownMinutes = 60; HealthyMinutesToReset = 60
+        MaxRestartsPerDay = 3; RebootCooldownMinutes = 2; HealthyMinutesToReset = 30
         BlackoutFullDays = @('Cmt', 'Paz'); BlackoutNights = @('Pzt', 'Sal', 'Car', 'Per', 'Cum', 'Cmt', 'Paz')
         HolidayMode = 'full'; Holidays = @(); HolidaysFile = ''
-        RebootAfterFailedCycles = 3; RebootDelaySeconds = 60; MinUptimeMinutes = 30; RebootSkipIfUnregistered = $true
+        RebootAfterFailedCycles = 1; RebootDelaySeconds = 30; MinUptimeMinutes = 3; MinOutageMinutes = 0; RebootSkipIfUnregistered = $true
         ForceRestartAlways = $false; ForceRestartUntil = ''
         FixNetwork = $true; NetMaxRepairRung = 4; FixRdp = $true; FixCrd = $true; FixClock = $true
         CrdNoConnRestartCycles = 3; CrdRestartAfterHours = 0; CrdSignalPorts = @(443, 5222, 5223, 19302, 19303, 8443, 4433)
@@ -364,7 +366,7 @@ function Get-HostConfig {
         ServerMode = $true; DisableFastStartup = $true; OfficeSaveBeforeReboot = $true
         OfficeSaveTimeoutSeconds = 120; OfficeAbortRebootIfStillOpen = $true; OfficeAbortRebootIfUnsaved = $true
         TelegramToken = ''; TelegramChatId = ''; HeartbeatUrl = ''; AlertRepeatHours = 12; NotifyRepeatHours = 4
-        SesliBildirim = $true; SesliBildirimEdge = $true; LogGunDays = 30; LogDosyaMB = 2
+        SesliBildirim = $true; SesliBildirimEdge = $true; EkranMesaji = $true; LogGunDays = 30; LogDosyaMB = 2
         SesEfektleri = $true; SesEfektleriVolume = 80
     }
     if (Test-Path -LiteralPath $HostConfig) {
@@ -2404,11 +2406,41 @@ function Save-PendingVoice {
     } catch { Write-Trace ('bekleyen anons yazilamadi: ' + $_.Exception.Message) }
 }
 
+function Resolve-VoiceKeyFallback {
+    <#
+        Bir anahtar icin onbellekte dosya YOKSA ayni aileden var olan ilk klip.
+        Neden: host geri sayim suresini ayardan gonderir (10/30/45/60 sn), onbellekte ise
+        yalnizca 60/30/10 klipleri uretilmistir. Anahtar denk gelmezse anons internetsiz
+        makinede sessizce kayboluyordu (edge-tts calismaz, Turkce SAPI yok). Bu yedek,
+        "anons her zaman duyulur" garantisini verir.
+    #>
+    param([string]$Key)
+    if (-not $Key) { return '' }
+    $aileler = @{
+        reboot60    = @('reboot60', 'reboot30', 'reboot10', 'rebootplan')
+        reboot30    = @('reboot30', 'reboot10', 'reboot60', 'rebootplan')
+        reboot10    = @('reboot10', 'reboot30', 'reboot60', 'rebootplan')
+        reminder    = @('reminder', 'reminder2', 'reboot30', 'rebootplan')
+        rebootcancel = @('rebootcancel2', 'rebootcancel', 'rebootskip', 'ok')
+        netdown     = @('netdown1', 'netdown2', 'checkbad')
+    }
+    $sira = $aileler[$Key]
+    if (-not $sira) { return '' }
+    foreach ($k in $sira) {
+        try { if (Test-Path -LiteralPath (Join-Path $script:VoiceCacheDir ($k + '.mp3'))) { return $k } } catch { }
+    }
+    return ''
+}
+
 function Speak-PendingVoice {
     <#
         Panel acilinda/calisirken bekleyen anonslari konusur ve dosyalari siler.
         pending-voice.json  : restart ve genel anonslar
         pending-repair.json : anlik ag sorunu anonsu (ayri dosya; restart anonsu bunu EZMESIN diye)
+        TEKRAR BASTIRMA: ayni anons 2 dk icinde ikinci kez konusulmaz. Host tarafi ayni
+        metni 10 dk icinde yeniden yazmiyor; bu ikinci koruma, dosya yarim kalmis/elle
+        yazilmis kaldiginda konusma kuyrugunun dolmasini engeller. Surec 2 dakikadir ki
+        ag flapping'inde (kop-duzel-kop) kullanici ikinci kesintiyi de duysun.
     #>
     foreach ($pair in @(
             @{ File = 'pending-voice.json'; Etiket = 'restart' },
@@ -2422,17 +2454,29 @@ function Speak-PendingVoice {
         $ageMin = 999
         try { $ageMin = ((Get-Date) - [datetime]::Parse([string]$j.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes } catch { }
         if ($ageMin -gt 30) { Write-Trace ('bekleyen ' + $pair.Etiket + ' anonsu cok eski (' + [int]$ageMin + ' dk), konusulmadi'); continue }
+        $vk = [string]$j.voiceKey
+        $anahtar = $(if ($vk) { $vk } else { [string]$j.text })
+        if ($script:LastSpokenKey -eq $anahtar -and $script:LastSpokenAt -and (((Get-Date) - $script:LastSpokenAt).TotalMinutes -lt 2)) {
+            Write-Trace ('ayni anons 2 dk icinde konusuldu, tekrar edilmedi: ' + $j.text)
+            continue
+        }
         Write-Trace ('bekleyen ' + $pair.Etiket + ' anonsu konusuluyor: ' + $j.text)
+        $script:LastSpokenKey = $anahtar
+        $script:LastSpokenAt = Get-Date
         # voiceKey: metin kismi dinamik oldugu icin (ornegin "Eksik: IP,DNS") onbellekteki
         # kadin sesli dosyayi DOGRudan bu anahtarla caliyoruz.
-        $vk = [string]$j.voiceKey
         if ($vk) {
             if ($script:SpeechBusy) {
                 # Konusma suruyor: anahtari kuyruga tasimaliyiz, yoksa metin eslesmesine
-                # duser ve (internetsizken) edge-tts'a giderdi.
-                if (-not (Test-Path -LiteralPath (Join-Path $script:VoiceCacheDir ($vk + '.mp3')))) { $vk = '' }
+                # duser ve (internetsizken) edge-tts'a giderdi. Dosya yoksa aile yedegini dene.
+                if (-not (Test-Path -LiteralPath (Join-Path $script:VoiceCacheDir ($vk + '.mp3')))) { $vk = Resolve-VoiceKeyFallback $vk }
             } else {
                 if (Speak-CachedVoice -Key $vk) { continue }
+                # Tam anahtar yoksa aile yedegi (reboot60 -> reboot30 -> ...); o da yoksa metin eslesmesi
+                $yedeK = Resolve-VoiceKeyFallback $vk
+                if ($yedeK) {
+                    if (Speak-CachedVoice -Key $yedeK) { continue }
+                }
                 $vk = ''
             }
         }

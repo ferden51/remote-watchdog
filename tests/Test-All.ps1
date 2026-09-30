@@ -164,8 +164,12 @@ if ($Section -eq 0 -or $Section -eq 1) {
     $pwr = Get-PowerSettingAcIndex -AliasPath @('SUB_SLEEP', 'STANDBYIDLE')
     Ok ('powercfg okunabildi (STANDBYIDLE=' + $pwr + ')') ($null -ne $pwr)
     $gc = Get-Config
-    Ok 'Get-Config varsayilanlar donduruyor' (($gc.RestartPolicy -eq 'blackout') -and ($gc.RebootAfterFailedCycles -eq 3) -and ($gc.OfficeSaveBeforeReboot -eq $true))
-    Ok 'Get-Config devre kesici varsayilanlari' (($gc.MaxRestartsPerDay -eq 3) -and ($gc.RebootCooldownMinutes -eq 60) -and ($gc.HealthyMinutesToReset -eq 60))
+    Ok 'Get-Config varsayilanlar donduruyor' (($gc.RestartPolicy -eq 'blackout') -and ($gc.RebootAfterFailedCycles -eq 1) -and ($gc.OfficeSaveBeforeReboot -eq $true))
+    Ok 'Get-Config devre kesici varsayilanlari' (($gc.MaxRestartsPerDay -eq 3) -and ($gc.RebootCooldownMinutes -eq 2) -and ($gc.HealthyMinutesToReset -eq 30))
+    <#  HIZ varsayilanlari: tespitten restart'a ~1 dk. Tek anlik kopmada bile restart
+        karari gecikmemeli; blip korumasi taze toparlanma kontrolu + geri sayim iptali. #>
+    Ok 'Get-Config hizli karar varsayilanlari' (($gc.MinOutageMinutes -eq 0) -and ($gc.MinUptimeMinutes -eq 3) -and ($gc.RebootDelaySeconds -eq 30))
+    Ok 'Get-Config ekran mesaji anahtari var' (@($gc.Keys) -contains 'EkranMesaji')
     foreach ($code in (Get-FnCode $Host_ @('Get-RebootBudget', 'Get-RebootDecision'))) { Invoke-Expression $code }
     $now = [datetime]'2026-09-26T23:30:00'
     $global:cfg = [pscustomobject]@{ MaxRestartsPerDay = 3; RebootCooldownMinutes = 60; RestartPolicy = 'always'; BlackoutEnabled = $true; BlackoutStart = 18; BlackoutEnd = 8; BlackoutNights = @('Pzt', 'Sal', 'Car', 'Per', 'Cum', 'Cmt', 'Paz'); BlackoutFullDays = @('Cmt', 'Paz'); HolidayMode = 'full'; ForceRestartAlways = $false; ForceRestartUntil = '' }
@@ -247,7 +251,23 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host hizli yoklama DUSEGECI de yakalıyor' ($hostText -match 'baglanti yeniden geldi')
     Ok 'host tam dongu tetikleyici (Start-FullCycle) var' ($hostText -match 'function Start-FullCycle')
     Ok 'host tek dongu kilidi (Test-CycleRunning) var' ($hostText -match 'function Test-CycleRunning')
-    Ok 'host tam dongu kilit adi kullaniliyor' ($hostText -match 'Local\\RemoteWatchdogCycle')
+    Ok 'host tam dongu kilit adi kullaniliyor' ($hostText -match 'Global\\RemoteWatchdogCycle')
+    <#  Canli yoklamanin tetikledigi -UserFallback yolu da AYNI kilidi almali; aksi halde
+        her dakika yeni dongu acilir (gunluk yazma yarisi, cift sayim, sahte restart butcesi). #>
+    Ok 'host kilit paylasimi (Invoke-CycleLocked) var' ($hostText -match 'function Invoke-CycleLocked')
+    Ok 'host UserFallback yolu kilitli' ($hostText -match '(?s)if \(\$UserFallback\).{0,900}Invoke-CycleLocked')
+    Ok 'host probe geri sayimi (Test-FullCycleDue) var' ($hostText -match 'function Test-FullCycleDue')
+    <#  Restart butcesi yalnizca DOGRULANMIS (makine yeniden acilmis) restartlari saymali. #>
+    Ok 'host restart butcesi dogrulamasi (Sync-RebootAccounting) var' ($hostText -match 'function Sync-RebootAccounting')
+    Ok 'host restart icin yedek yontem (Confirm-Reboot) var' ($hostText -match 'function Confirm-Reboot')
+    Ok 'host restart karari butceye yazmadan once damgalanir (PendingRebootUtc)' ($hostText -match 'PendingRebootUtc')
+    <#  -Check "hicbir sey degistirmez" sozu: SYSTEM nabzi da -Check'te yazilmamali, yoksa
+        elle calistirilan bir rapor olmayan SYSTEM gorevini "saglikli" gosterir. #>
+    Ok 'host -Check modu SYSTEM nabzini yazmaz' ($hostText -match '(?s)Invoke-CycleLocked \{\s*\$null = Invoke-Watchdog.{0,900}\(\(-not \$Check\) -and \(Test-Admin\)\)\s*\{[^}]*system-heartbeat')
+    <#  Show-Status tek basina Get-ScheduledTask'a guvenmemeli: yonetici olmayan oturum
+        SYSTEM gorevlerini goremez ve "zamanlanmis gorev YOK" gibi YANLIS sonuc verir. #>
+    Ok 'host Show-Status SYSTEM gorunurluk notunu kullaniyor' ($hostText -match 'yonetici olmayan oturum SYSTEM gorevlerini goremez')
+    Ok 'host Show-Status gercek restart sayisini gosteriyor' ($hostText -match 'gercek restart \(24s\)')
     Ok 'host probe yaslama (Test-ProbeBeatDue) var' ($hostText -match 'function Test-ProbeBeatDue')
     Ok 'host konsol renk kurali (Get-LogColor) var' ($hostText -match 'function Get-LogColor')
     Ok 'host gunluk rotasyonu (Rotate-LogIfNeeded) var' ($hostText -match 'function Rotate-LogIfNeeded')
@@ -515,7 +535,11 @@ if ($Section -eq 0 -or $Section -eq 4) {
 if ($Section -eq 0 -or $Section -eq 5) {
     Head '5) Uctan uca: watchdog -Check -Json -> last-run.json -> panel satirlari'
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $Host_ -Check -NoJson | Out-Null
+    <#  -NoJson DEGISKENINI set ediyor ve Write-Status "-NoSkip" ile dosyayi HIC yazmiyor;
+        boylece "tazelik" kontrolu aslinda zamanlanmis gorevden gelen dosyayi olcuyordu ve
+        dongu 5 dk'da bir degisse test flak olurdu. -Json ile cikti ekrana basilir ama
+        last-run.json GERCEKTEN yenilenir (cikti Out-Null ile atilir). #>
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $Host_ -Check -Json | Out-Null
     $sw.Stop()
     Write-Host ('  (watchdog -Check ' + [math]::Round($sw.Elapsed.TotalSeconds, 1) + ' sn)')
     $j = Get-Json (Join-Path $env:ProgramData 'RemoteWatchdog\last-run.json')

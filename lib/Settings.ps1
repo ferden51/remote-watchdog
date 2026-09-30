@@ -17,12 +17,13 @@ function Get-SettingsDefs { return @(
     @{ Sec = 'Restart'; Key = 'BlackoutEnd'; Title = 'Blackout bitiş saati (geceye sarar)'; Type = 'int' }
     @{ Sec = 'Restart'; Key = 'BlackoutFullDays'; Title = 'Tam gün blackout (hafta sonu)'; Type = 'days' }
     @{ Sec = 'Restart'; Key = 'BlackoutNights'; Title = 'Blackout geceleri'; Type = 'days' }
-    @{ Sec = 'Restart'; Key = 'RebootAfterFailedCycles'; Title = 'Kaç başarısız denemeden sonra restart'; Type = 'int' }
-    @{ Sec = 'Restart'; Key = 'RebootDelaySeconds'; Title = 'Restart gecikmesi (saniye)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'RebootAfterFailedCycles'; Title = 'Kaç başarısız döngüden sonra restart (1 = hemen)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'RebootDelaySeconds'; Title = 'Restart geri sayımı (saniye, sesli anons süresi)'; Type = 'int' }
     @{ Sec = 'Restart'; Key = 'MaxRestartsPerDay'; Title = '24 saatte en fazla restart (0 = sınırsız)'; Type = 'int' }
     @{ Sec = 'Restart'; Key = 'RebootCooldownMinutes'; Title = 'İki restart arası bekleme (dakika)'; Type = 'int' }
     @{ Sec = 'Restart'; Key = 'HealthyMinutesToReset'; Title = 'Bu kadar sağlıklı kalınca bütçe sıfırlansın (dk)'; Type = 'int' }
-    @{ Sec = 'Restart'; Key = 'MinUptimeMinutes'; Title = 'Minimum uptime (dk, yeni açılan makine için bekle)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'MinUptimeMinutes'; Title = 'Yeniden açılıştan sonra bekleme (dk, restart döngüsünü önler)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'MinOutageMinutes'; Title = 'Kesinti bu kadar dk sürünce karar ver (1 = hemen, 0 = bekleme yok)'; Type = 'int' }
     @{ Sec = 'Restart'; Key = 'RebootSkipIfUnregistered'; Title = 'CRD kayıtsızken restart etme'; Type = 'bool' }
     @{ Sec = 'Restart'; Key = 'ForceRestartAlways'; Title = 'DAIMA zorla kapat (saat fark etmez)'; Type = 'bool' }
     @{ Sec = 'Restart'; Key = 'ForceRestartUntil'; Title = 'Daima zorla kapat bitis zamani'; Type = 'datetime' }
@@ -57,6 +58,7 @@ function Get-SettingsDefs { return @(
     @{ Sec = 'Bildirim'; Key = 'TelegramChatId'; Title = 'Telegram chat id'; Type = 'text' }
     @{ Sec = 'Bildirim'; Key = 'HeartbeatUrl'; Title = 'Healthchecks ping adresi (host için gerekli: makine açıkken kendi alarmı gidemez)'; Type = 'text' }
     @{ Sec = 'Bildirim'; Key = 'SesliBildirim'; Title = 'İnsan sesi: Türkçe sesli anons (sessiz modda susar)'; Type = 'bool' }
+    @{ Sec = 'Bildirim'; Key = 'EkranMesaji'; Title = 'Ekran mesaj kutusu (msg.exe: restart/sorun uyarısı penceresi)'; Type = 'bool' }
     @{ Sec = 'Bildirim'; Key = 'SesliBildirimEdge'; Title = 'Bulut yedeği (edge-tts; Microsoft ucu kapalıysa üretmez)'; Type = 'bool' }
     @{ Sec = 'Bildirim'; Key = 'SesEfektleri'; Title = 'Film efektleri (hazır wav: net, keskin, parlak)'; Type = 'bool' }
     @{ Sec = 'Bildirim'; Key = 'SesEfektleriVolume'; Title = 'Efekt ses seviyesi (0-100, 0 = efektler kapalı)'; Type = 'int' }

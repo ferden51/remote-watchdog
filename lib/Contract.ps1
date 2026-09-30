@@ -91,33 +91,49 @@ function Get-StatusTaskState {
         Normal kullanici SYSTEM'e ait gorevi GOREMEYEBILIR; bu durumda JSON'daki
         taskInstalled + veri yasi kullanilir.
 
-        ONEMLI: Host kontrolu BITIRDIKTEN SONRA JSON'u yazdig icin JSON'daki taskState
-        her zaman "Running" olur. Bu deger ancak veri cok tazeyse (calisma su an suruyor)
-        anlamlidir; veri yaslandiginda gorev "hazir" (Ready) durumundadir.
+        ONEMLI - "calisiyor" NASIL ANLASILIR:
+        Watchdog gorevi PERIYODIK bir gorevdir (her 5 dk'da bir tetiklenir, dongu ~10 sn
+        surer). Boyle bir gorev calistigi aralikta State = 'Ready' olur; 'Running' yalnizca
+        o ~10 sn'lik pencerede gorunur. Bu yuzden ONCEDEN "State -ne Running" kontrolu
+        kullanilip surekli "kurulu, su an calismiyor" (Warn) gosteriliyordu - bu bir ALARM
+        DEGIL, normal durumdu; kullaniciyi yaniltiyordu.
+        Dogru kural: veri yeterince tazeyse gorev KENDI ISINI YAPIYOR demektir. Esik,
+        dongu araliginin ~2 kati (en az 3 dk) olur; bu surede veri gelmezse gorev gercekten
+        takilmis demektir (Disabled / silinmis / cok uzun sürmüş / cok sık hata).
+        Görünür görevde ayrica 'Disabled' acikca hata sayilir.
     #>
     param($Status, $VisibleTask)
     $fresh = Test-StatusFresh -Status $Status
     $ageMin = 999
     if ($Status -and ([string]$Status.generated) -ne '') { $ageMin = Get-RwDateMinutesAgo $Status.generated }
-    $justRan = ($ageMin -ge 0 -and $ageMin -le 1.5)
+    # Beklenen dongu araligi (dk) -> "calisiyor" esigi.
+    # intervalMinutes yalnizca gorev GORUNURKEN yazilir; yonetici olmayan panelde 0 gelir.
+    # 0'da "3 dk" demek yanlis olur (sistem 5 dk'da bir calisir) -> guvenli varsayilan 10 dk.
+    $esik = 10
+    if ($Status -and $Status.config -and $Status.config.intervalMinutes) {
+        try { $esik = [math]::Max(3, [math]::Round([double]$Status.config.intervalMinutes * 2)) } catch { }
+    }
+    $working = ($ageMin -ge 0 -and $ageMin -le $esik)
+    $disabled = $false
     $says = $null
     if ($Status -and $Status.PSObject.Properties.Name -contains 'taskInstalled') { $says = $Status.taskInstalled }
     if ($VisibleTask) {
-        $running = ($VisibleTask.State -eq 'Running')
+        $disabled = ([string]$VisibleTask.State -eq 'Disabled')
+        $running = ($working -and -not $disabled)
         return [pscustomobject]@{
             Installed = $true; Visible = $true; Running = $running; Fresh = $fresh
-            Text = $(if ($running) { 'Zamanlanmış görev: ÇALIŞIYOR' } else { 'Zamanlanmış görev: kurulu, şu an çalışmıyor' })
-            Color = $(if ($running) { 'Ok' } else { 'Warn' })
-            Short = $(if ($running) { 'Görev: çalışıyor' } else { 'Görev: hazır' })
+            Text = $(if ($disabled) { 'Zamanlanmış görev: DEVRE DIŞI (kapalı)' } elseif ($running) { 'Zamanlanmış görev: ÇALIŞIYOR (son kontrol ' + [int][math]::Floor($ageMin) + ' dk önce)' } else { 'Zamanlanmış görev: kurulu ama son kontrol ' + [int][math]::Floor($ageMin) + ' dk önce - takılmış olabilir' })
+            Color = $(if ($running) { 'Ok' } elseif ($disabled) { 'Bad' } else { 'Warn' })
+            Short = $(if ($running) { 'Görev: çalışıyor' } else { 'Görev: takılmış?' })
         }
     }
     if ($says -eq $true -or ($says -eq 'unknown' -and $fresh)) {
-        $runNow = $false
+        $runNow = $working
         return [pscustomobject]@{
             Installed = $true; Visible = $false; Running = $runNow; Fresh = $fresh
-            Text = $(if ($runNow) { 'Zamanlanmış görev: ÇALIŞIYOR (SYSTEM hesabında, bu oturumda görünmüyor)' } else { 'Zamanlanmış görev: kurulu, şu an çalışmıyor (son kontrol ' + [int][math]::Floor($ageMin) + ' dk önce - SYSTEM hesabında)' })
+            Text = $(if ($runNow) { 'Zamanlanmış görev: ÇALIŞIYOR (SYSTEM hesabında, son kontrol ' + [int][math]::Floor($ageMin) + ' dk önce)' } else { 'Zamanlanmış görev: kurulu, SYSTEM hesabında - takılmış olabilir (son kontrol ' + [int][math]::Floor($ageMin) + ' dk önce)' })
             Color = $(if ($runNow) { 'Ok' } else { 'Warn' })
-            Short = $(if ($runNow) { 'Görev: çalışıyor' } else { 'Görev: hazır' })
+            Short = $(if ($runNow) { 'Görev: çalışıyor' } else { 'Görev: takılmış?' })
         }
     }
     return [pscustomobject]@{

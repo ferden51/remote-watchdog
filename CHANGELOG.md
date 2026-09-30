@@ -4,6 +4,149 @@ Bu dosya sürüm bazlı değişiklikleri tutar. Sürüm numarası depodaki `VERS
 panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürümleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.2.4] - 2026-09-30
+
+### Düzeltilen
+- **Geri sayım yeni kesintiyi de bastırıyordu (kendi eklediğim regresyon, düzeltildi):** canlı
+  yoklama geri sayımı "son tam döngüden beri geçen süre"ye bakıyordu. Ag 1 dakika önce
+  tetiklenmiş bir döngüden sonra 2 dakika önce sağlıklıysa ve şimdi koptuysa, **yeni** kesinti
+  geri sayımda kalıyor, "ağ sorunu algılandı" anonsu hiç duyulmuyor ve onarım 3 dakika
+  gecikmeli başlıyordu. Artık geri sayım **yalnızca kesinti zaten sürerken** (önceki yoklama
+  `bad` ise) geçerli; yeni kesinti ve "bağlantı düzeldi" geçişi her zaman beklemez.
+  `fullAt` damgası da artık sağlıklı durumda yazılmıyor (yalnızca gerçek tetiklemede).
+- **Restart gerçekleşmiyordu, üstelik "3 kez restart oldu" deniyordu.** 30.09 gecesi
+  (01:28–09:17 arası) internet 8 saat kesildi; günlük 3 kez *"yeniden başlatma tetiklendi"*
+  yazdı ama makine **hiç restart olmadı** (sistem olay günlüğünde `shutdown.exe` için 1074 kaydı
+  yok, uptime 815dk→906dk arası kesintisiz artıyordu). Yine de 24 saatlik restart bütçesi
+  "3/3 dolu" sayılıp **devre kesici 24 saat boyunca her şeyi reddetti**: gerçek bir kesintide
+  sistem hiçbir şey yapamaz hale gelmişti. Üç ayrı sebep birleşiyordu:
+  1. Bütçe **restart gerçekleşmeden önce** yazılıyordu. Geri sayımda iptal edilirse kayıt
+     siliniyordu; ama süreç geri sayımın ortasında kaybolursa veya `shutdown.exe` sessizce
+     başarısız olursa kayıt **kalıcı** olarak bütçeyi yakıyordu. Artık restart istendiğinde
+     sadece `PendingRebootUtc` damgalanıyor; bütçe kaydı **makine gerçekten yeniden açıldığında**
+     (`LastBootUtc` değiştiğinde) yazılıyor. Açılmadıysa kayıt silinip uyarıyla log'a düşüyor.
+  2. `shutdown.exe /r /t 0` hatası `2>&1 | Out-Null` ile atılıyordu, tek bir log yoktu.
+     Artık `Confirm-Reboot` çıkış kodunu kontrol ediyor ve sırasıyla **shutdown.exe → WMI
+     `Win32_OperatingSystem.Reboot` → `Restart-Computer`** deniyor; hangisinin gerçekten
+     restart ilettiği log'a yazılıyor. Elle restart (pano düğmesi) de aynı yolu kullanıyor.
+  3. 60 saniyelik geri sayımdaki kontrol `Invoke-WebRequest` ile yapılıyordu; internetsiz
+     makinede DNS'te asılı kalınca döngü ölüyor, `shutdown.exe` hiç çağrılmıyordu. Artık
+     sert zaman aşımlı soket kontrolü (`Test-InternetFast`) kullanılıyor ve geri sayım
+     `try/catch` içinde — hata olursa bile restart yine yapılıyor.
+- **Mesaj kutusu/uyarı birikimi (bir günde 276 `msg.exe` kutusu, 938 ALERT satırı).**
+  06–08 arası saatte 144 uyarı, yani dakikada ~2 kutu. Sebebi iki taneydi:
+  1. `Invoke-RebootIfNeeded` durumu başta okuyup sonra **eskisini geri yazıyordu**; arada
+     `Send-UserNotification` `LastUserNotifyUtc`'yi kaydettiği için "4 saatte bir tekrar et"
+     kısıtı her döngüde geri alınıyordu. Artık tüm durum yazmaları `Invoke-StateUpdate`
+     (oku → değiştir → yaz) ile atomik.
+  2. Aynı devre kesici durumu her döngüde hem ALERT satırı hem `msg.exe` üretiyordu. Artık
+     durum değişmedikçe tekrar edilmiyor; **farklı** bir sorun çıkarsa anında bildiriliyor.
+  Bildirim artık **konu bazlı**: aynı konu `NotifyRepeatHours` (varsayılan 4 saat) içinde bir kez,
+  yeni konu hemen. Restart geri sayımındaki hatırlatma 20 saniyede birden değil **en fazla bir kez**.
+- **Her dakika yeni tam döngü (eşzamanlı çalışma).** `-UserFallback` yolu — yani canlı yoklamanın
+  tetiklediği yol — `Global\RemoteWatchdogCycle` kilidini hiç almıyordu. Bu yüzden
+  `Test-CycleRunning` her zaman "çalışmıyor" diyor ve 1 dakikalık hızlı yoklama her seferinde
+  yeni bir döngü açıyordu (günlükte 502 tetikleme, her dakika iki ayrı `dongu basladi`).
+  Artık her iki yol da `Invoke-CycleLocked` ile aynı kilidi kullanıyor. Kesinti sürerken tam
+  döngü tetiklemesine **geri sayım** eklendi (varsayılan 3 dk, kontrol aralığından türetilir);
+  ilk tespit ve "bağlantı düzeldi" geçişi beklemez.
+- **Ağ olay dinleyicisi kendini öldürüyordu:** tam döngüyü tetikledikten sonra döngüden `break`
+  ile çıkıyor, görev zamanlayıcısının 1 dakika sonra yeniden başlatmasına kalıyordu.
+  Artık durmaz, toparlanmayı dinlemeye devam eder.
+- **"Restart değerlendirmesi bekliyor" eşiği (yeni `MinOutageMinutes`, varsayılan 10 dk).**
+  Canlı yoklama dakikada bir çalıştığı için 2 saniyelik bir kopyalanma bile "1/1 başarısız
+  döngü" sayılıp restart kararı üretiyordu. Artık restart kararı için kesintinin gerçekten
+  bu kadar sürmüş olması gerekiyor; gerçek kesintilerde restart yine kesinlikle yapılır.
+- **Panel tarafı:** aynı anons 5 dakika içinde ikinci kez konuşulmuyor; host tarafı da aynı
+  metni 10 dakika içinde yeniden yazmıyor (dosya birikmesi engellendi).
+
+### Eklenen
+- `system-heartbeat.json`: yalnızca yetkili varsayılan (SYSTEM) döngü yazar; `-Check` ve
+  kullanıcı yedeği yazmaz. Kullanıcı yedeği "SYSTEM görevi sağlıklı mı" kararını artık bu
+  dosyadan veriyor.
+  **Asıl hata şuydu:** eski kod `Get-ScheduledTask`'a bakıyordu, ama **yönetici olmayan bir
+  oturum SYSTEM hesabına ait görevleri göremez** (çağrı boş döner). Sonuç: kullanıcı yedeği
+  SYSTEM görevini "yok" sanıp her 5 dakikada devreye giriyordu → aynı anda iki tam döngü
+  (`admin=True` ve `admin=False`), durum dosyası yarışı, çift sayım ve mesaj birikimi.
+  `last-run.json`'ın `user` alanına bakmak da güvenilmez (herkes yazabilir).
+- `-Status` artık SYSTEM görevinin varlığını `system-heartbeat.json` üzerinden bildiriyor.
+  Önceden yönetici olmayan oturumdan `Get-ScheduledTask` boş döndüğü için **"zamanlanmış görev
+  YOK (-Install çalıştır)"** gibi yanıltıcı bir sonuç veriyordu; görev çalışıyor olsa bile.
+  Nabız zamanı ve "gerçek restart (24s) / bekleyen restart" bilgileri de eklendi.
+- `last-run.json` → `state`: `reboots24h` (yalnızca **doğrulanmış** restartlar),
+  `pendingRebootUtc`, `lastBootUtc`, `outageStartUtc`; `config.minOutageMinutes`.
+- `tests\Verify-OutageLogic.ps1`: kesinti senaryosu için izole doğrulama (bütçe mutabakatı,
+  sahte restart temizliği, bildirim kısıtı, geri sayım, anons birikimi, SYSTEM nabzı).
+- `EkranMesaji` ayarı (BILDIRIM bölümü): `msg.exe` ekran mesaj kutusunu kapatır. Kapatınca
+  sesli anons ve Telegram çalışmaya devam eder.
+
+### Değişen — hız (tespit → karar → eylem en hızlı)
+Amaç: gerçek ve çözülemeyen bir bağlantı sorununda **tespitten restart'a ~1 dakika**.
+
+- **Varsayılanlar en hızlıya çekildi:** `RebootAfterFailedCycles` 3→**1**,
+  `MinOutageMinutes` 10→**0** (bekleme yok), `RebootDelaySeconds` 60→**30**,
+  `MinUptimeMinutes` 30→**3**, `RebootCooldownMinutes` 60→**2**,
+  `HealthyMinutesToReset` 60→**30**, `OfficeSaveTimeoutSeconds` 120→**60**.
+  Güvenlik sınırları bilerek kaldı: `MaxRestartsPerDay=3` (restart fırtınası olmaz),
+  blip koruması (karar anında taze toparlanma kontrolü + geri sayım içinde iptal).
+- **Tetiklenen döngü artık gerçekten çalışıyor.** `Start-FullCycle` `-UserFallback` ile
+  başlatıyordu; o yol "SYSTEM sağlamsa hemen çık" demektir. Sonuç: canlı yoklama sorunu
+  görüp tetikliyor, döngü hiçbir şey yapmadan çıkıyor ve karar bir sonraki 5 dakikalık
+  SYSTEM döngüsüne kalıyordu (log: 12:21'de tetiklendi → karar 12:25'te). Artık varsayılan
+  yol başlatılıyor (aynı kilit, çift çalışma yok); geri sayım damgası da yalnızca döngü
+  gerçekten başladığında vuruluyor.
+- **Canlı yoklama hafifledi.** `Get-FastProbeDecision` tam teşhis yapan `Get-NetworkHealth`
+  yerine yeni `Get-QuickNetState` (3 kısa TCP denemesi, her biri 1,2 sn) kullanıyor;
+  aşağı ağda üst üste binen zaman aşımları (~20 sn) yerine ~1,5 sn.
+- **Boşa bekleyen problar kısıldı:** genel IP (`api.ipify.org`, 8 sn) yalnızca internet
+  varken soruluyor; heartbeat zaman aşımı 15→5 sn; geri sayım öncesi taze kontrol 4→2 sn;
+  hızlı yoklama geri sayımı (aynı anda birden çok döngüyü engelleyen fırtına koruması)
+  3→**1 dk**.
+- Ölçüm: tam döngü (sağlıklı ağ) ~9 sn; hızlı yoklama tespiti 2,5 sn (sağlıklı) / ~6 sn (ağ tamamen kapalı).
+- **Eylem zincirindeki kalan beklemeler de kısıldı (ölçümle):** restart öncesi "internet geri
+  geldi mi" taze kontrolü eskiden 3 hedef × 4 sn × 2 deneme ≈ **16 sn** yiyordu; artık tek
+  hedef (1.1.1.1) × 1,2 sn × 2 deneme + 1 sn aralık ≈ **3,4 sn**. Geri sayım içindeki
+  internet kontrolü de tek hedefe indirildi (her adımda uzun bekleme yok, döngü gerçekten
+  30 sn sürüyor). Ağ olay dinleyicisindeki "IP/DHCP otursun" beklemesi 3 sn → **1 sn**.
+  Canlı yoklamada IP açıksa isim çözümleme probları atlanıyor (duzelme tespiti hızlanır).
+
+### Düzeltilen
+- **Panel sürekli "Zamanlanmış görev: kurulu, şu an çalışmıyor" diyordu (yanlış alarm).**
+  `Get-StatusTaskState` (lib\Contract.ps1) "çalışıyor" durumunu `Get-ScheduledTask` →
+  `State -eq 'Running'` ile belirliyordu. Oysa görev **periyodik**: 5 dakikada bir tetiklenir,
+  döngü ~10 saniye sürer ve arada `State` değeri **`Ready`** olur. Yani `Running` neredeyse hiç
+  görünmediği için panel sürekli turuncu uyarı gösteriyordu — oysa her şey normal çalışıyordu.
+  Artık ölçüt **veri tazeliği**: son kontrol, döngü aralığının ~2 katından (en az 3 dk) yeni
+  ise görev "çalışıyor" sayılır. Görünen görevde ayrıca `Disabled` açık hata (kırmızı) olarak
+  işaretlenir, iki saatlik bayat veri "takılmış olabilir" uyarısı verir. Metinler artık son
+  kontrol zamanını da gösterir ("ÇALIŞIYOR (son kontrol 2 dk önce)").
+- **Geri sayım anonsu, `RebootDelaySeconds` 60'dan farklı olduğunda sessizce kayboluyordu.**
+  Önceden önbellekte yalnızca 60/30/10 sn klipleri vardı ve anahtar tam denk gelmezse
+  (örn. eski 60 sn ayarı → `reboot60` dosyası bu makinede yok) panel metin eşleştirmeye
+  düşüyor, internetsiz makinede edge-tts çalışmadığı ve Türkçe SAPI olmadığı için
+  **anons hiç duyulmuyordu**. Artık: (1) host her süreyi en yakın hazır klibe yuvarlıyor
+  (kısaya doğru: "45 sn" derken 60 demez, 30 der — makine sözden erken kapanır), (2) panel
+  eksik anahtar için aile yedeğine düşüyor (`reboot60 → reboot30 → reboot10 → rebootplan`,
+  `reminder`, `rebootcancel`, `netdown`). Böylece geri sayım anonsu **her sürede duyulur**.
+- **`EkranMesaji` kapısı hiç çalışmıyordu (yazarken yakalandı):** `Get-Config` bir
+  `OrderedDictionary` döner; onun anahtarları `.PSObject.Properties` ile görünmez
+  (oradakiler adapter üyeleridir). Artık `IDictionary.Contains` ile bakılıyor.
+  `Verify-OutageLogic` bu regresyonu yakaladı.
+- **`Start-FullCycle` çift sayaç:** geri sayım damgası `Get-FastProbeDecision` içinde
+  vuruluyordu; kilit meşgul olduğu için döngü başlatılamasa bile damga vuruluyor ve yoklama
+  boşa bekliyordu. Damga artık başarılı başlatmada.
+
+### Test
+- `tests\Verify-OutageLogic.ps1` (yeni, 26 kontrol): bütçe mutabakatı, sahte restart temizliği,
+  konu bazlı bildirim kısıtı, `MinOutageMinutes` eşiği, canlı yoklama geri sayımı, **yeni
+  kesintinin geri sayımdan muaf olması**, anons birikim engeli, SYSTEM nabzı, restart anonsu
+  kısıtı. Hepsi gerçek fonksiyon kodlarını izole bir durum dosyasıyla çalıştırır.
+- `Test-All.ps1` artık kilit paylaşımını (`Invoke-CycleLocked`), canlı yoklama geri sayımını,
+  restart bütçesi doğrulamasını ve `Confirm-Reboot` yedeğini de denetliyor. Düzeltilmiş bir
+  test de vardı: 5. bölüm `-NoJson` kullanıyordu, bu değişken `Write-Status`'ı
+  "hiç yazma" moda sokuyor; yani "tazelik" kontrolü aslında kendi ürettiği dosyayı değil,
+  zamanlanmış görevin dosyasını ölçüyordu (5 dk'da bir değişirse test flak oluyordu).
+
 ## [1.2.3] - 2026-09-29
 
 ### Düzeltilen
