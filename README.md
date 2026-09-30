@@ -59,6 +59,21 @@ yolu test edilir.
 Repo private olduğu için `irm` ile tek satır indirme yetki ister; USB/OneDrive ile kopyalamak veya
 `git clone` en pratik yol.
 
+**Kurulum yeri:** kurulum betiği uygulamayı **sabit bir dizine kopyalar**, her şey oradan çalışır —
+host için `C:\ProgramData\RemoteWatchdog\app`, client için `%LOCALAPPDATA%\RemoteWatchdog\app`.
+Zamanlanmış görevler, oturum açılış kaydı ve kısayollar bu kopyayı gösterir; yani **kopyaladığın
+klasörü (ör. bir git deposunu) taşıyabilir veya silebilirsin**, görevler bozulmaz. Güncellemede kurulum
+betiğini aynı komutla tekrar çalıştırmak yeterli: yeni dosyalar kurulum dizinine yazılır, ayarlar
+(`config.json`) korunur.
+
+### Kısayollar
+
+`RemoteWatchdog Kontrol Paneli.lnk` (masaüstü + Başlat menüsü) hedefi `wscript.exe` +
+`Start-Panel.vbs show`: konsol penceresi açılmaz ve **panel penceresi öne gelir**. Zamanlanmış
+`RemoteHostPanel` görevi aynı dosyayı parametresiz çağırır, yani yalnızca tepside çalışır (oturum
+açılışında pencere kendiliğinden açılmaz). Kısayol ikinci kez tıklandığında yeni pencere açılmaz,
+çalışan panel öne getirilir (tek kopya çalışır).
+
 
 
 `ui/RemoteWatchdogPanel.ps1` tek dosyalık bir WPF / XAML uygulamasıdır (tepsi simgesi WinForms `NotifyIcon` ile sağlanır); klavye/fare gerektirmez.
@@ -354,6 +369,29 @@ başlatmadan sonra sekmeler geri gelir.
 | `BlackoutEnabled: false` | Blackout kullanılmaz, her saat korumalı davranış. |
 | `BlackoutFullDays: []` | Hafta sonu da mesai gibi korunur. |
 | `ForceRestartAlways: true` | Saat fark etmez zorla kapatma + restart. |
+
+### Geri sayaclı, iptal edilebilir restart
+
+Onarılamayan bağlantı sorununda restart kararı verilirse panelde bir **modal** açılır: büyük saniye
+geri sayacı, sorunun adı ve iki düğme.
+
+| Düğme | Ne yapar |
+|---|---|
+| **İptal et — şimdi yeniden başlatma** | `reboot-cancel.flag` yazar. Panel "durduruldu" demeden önce **SYSTEM'deki watchdog'ın onayını bekler** (`reboot-ack.json`); onay gelirse balon + sesle bildirilir. Onay gelmezse "İptal onaylanmadı, geri sayım sürüyor" denir ve düğmeler geri açılır. Sayaç sıfırlanır, yani 5 dakika sonra aynı soru tekrar sorulmaz. |
+| **Şimdi yeniden başlat** | Beklemeden kapanır; kalan süre kadar bir daha sorulmaz. |
+
+Modal `Topmost` ve kapatılamaz; arka planda kalan geri sayım `RebootDelaySeconds` (en az 30 sn) kadar
+sürer, sonunda cihaz kapanır. **Panel açık değilse de geri sayım işler** — yani uzaktan kurtarma
+davranışı korunur, sadece iptal edebilme imkânı panel açıkken sunulur.
+
+Akış: host `reboot-pending.json` yazar → panel 1 sn'lik döngüde fark edip modalı açar ve anons yapar
+("Yeniden başlatma yapılacak: <sebep>. N saniye içinde bilgisayar yeniden açılacak. İptal edebilirsiniz.")
+→ kalan süre 30/15/10/5 saniyelerde tekrar anonslanır, son 10 saniyede sayaç kırmızıdır → geri sayım
+bitince `shutdown /r /t 0`. Geri sayım boyunca watchdog **0,5 sn'de bir** iptal dosyasına bakar;
+sayı bittikten sonra da 2 sn ek kontrol yapılır, yani son anda basılan iptal de yakalanır.
+
+Tüm restart yolları — otomatik karar, paneldeki "Şimdi zorla kapat", CRD — aynı geri sayımı kullanır,
+böylece aynı anda iki farklı restart çalışmaz ve iptal hepsi için geçerlidir.
 
 ## Testler
 

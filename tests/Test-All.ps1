@@ -247,7 +247,9 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host hizli yoklama DUSEGECI de yakalıyor' ($hostText -match 'baglanti yeniden geldi')
     Ok 'host tam dongu tetikleyici (Start-FullCycle) var' ($hostText -match 'function Start-FullCycle')
     Ok 'host tek dongu kilidi (Test-CycleRunning) var' ($hostText -match 'function Test-CycleRunning')
-    Ok 'host tam dongu kilit adi kullaniliyor' ($hostText -match 'Local\\RemoteWatchdogCycle')
+    # Kilit adı Global\ (4239340'da Local\'den Global\'e çevrildi: SYSTEM görevi ile
+    # kullanıcı yedeği farklı oturumlarda çalıştığı için Local\ ikisini eşleştiremiyordu).
+    Ok 'host tam dongu kilit adi kullaniliyor' ($hostText -match '(Local|Global)\\RemoteWatchdogCycle')
     Ok 'host probe yaslama (Test-ProbeBeatDue) var' ($hostText -match 'function Test-ProbeBeatDue')
     Ok 'host konsol renk kurali (Get-LogColor) var' ($hostText -match 'function Get-LogColor')
     Ok 'host gunluk rotasyonu (Rotate-LogIfNeeded) var' ($hostText -match 'function Rotate-LogIfNeeded')

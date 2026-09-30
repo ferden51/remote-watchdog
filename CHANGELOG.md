@@ -1,273 +1,351 @@
-﻿# Changelog
+﻿´╗┐# Changelog
 
-Bu dosya sürüm bazlı değişiklikleri tutar. Sürüm numarası depodaki `VERSION` dosyasındadır;
-panel ve host betikleri bu dosyayı okur (`-Version` ile sorgulanabilir). Sürümleme
+Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝m numaras─▒ depodaki `VERSION` dosyas─▒ndad─▒r;
+panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
+
+## [1.3.1] - 2026-09-30
+
+### Düzeltilen
+- **"İptal edildi" deniyordu ama restart gerçekleşiyordu:** geri sayım tek seferde
+  `Start-Sleep` ile bekliyordu, iptal bayrağı **sadece süre bitince** kontrol ediliyordu; arada
+  `-ForceReboot` yolu ayrı bir `shutdown.exe /r /t` çağırıyordu ve panel hangi restart'i izlediğini
+  bilemiyordu. Artık tüm restart yolları (otomatik karar **ve** paneldeki "Şimdi zorla kapat")
+  `Start-CountdownReboot` üzerinden geçiyor; geri sayım **0,5 sn'de bir iptal dosyasına bakıyor**,
+  sayı bittikten sonra da 2 sn ek kontrol var. Aynı anda iki ayrı pencere/kutu çıkmıyor.
+- **İptal gerçekleşmeden "durduruldu" deniyordu:** panel iptal dosyasını yazınca hemen başarı
+  bildiriyordu. Artık **SYSTEM'deki watchdog'ın onayını bekliyor** (`reboot-ack.json`); onay gelmezse
+  "İptal onaylanmadı, geri sayım sürüyor" deyip butonu geri açıyor. Yani "durduruldu" yalnızca
+  gerçekten durduğunda söyleniyor.
+- **Anons duyulmuyordu:** iptal onayı `MessageBox` ile veriliyordu; modal pencere panelin
+  dispatcher'ını kilitleyip sayaç anonslarını (30/15/10/5) ve sesli anonsu engelliyordu. Onay artık
+  **balon + ses** ile veriliyor, `MessageBox` tamamen kalktı. Aynı sebeple buton işleyicileri
+  `try/catch` içine alındı — kapsam hatası (`IsEnabled` bulunamadı) panelde hata kutusu çıkarıyordu.
+- **İki ayrı bildirim kutusu:** restart iptalinde `msg.exe` (10 dakika açık kalan pencere) **ve**
+  `MessageBox` birlikte çıkıyordu. `msg.exe` artık restart yollarında kullanılmıyor; bilgi panelin
+  balonu ve anonsu ile veriliyor, Telegram'a gider.
+- **Yanıltıcı metin:** blackout dışındayken/devre kesici devreye girdiğinde "Otomatik restart
+  durduruldu" yazılıyordu — oysa restart **hiç denenmemişti**. Artık "yeniden başlatma yapılmayacak:
+  <sebep>" deniyor.
+
+## [1.3.0] - 2026-09-30
+
+### Eklenen
+- **Geri sayaclı, iptal edilebilir restart uyarısı:** onarılamayan bağlantı sorununda artık
+  **Windows'un kendi diyaloğu değil**, panelin açtığı bir modal çıkıyor: büyük saniye geri sayacı
+  (`m:ss`), sorunun adı ve iki düğme — **"İptal et — şimdi yeniden başlatma"** ve
+  **"Şimdi yeniden başlat"**. Daha önce `shutdown.exe /r /t` çağrısı doğrudan Windows'un sistem
+  penceresini açıyordu; sayı panelde görünmüyor, kullanıcı müdahale edemiyordu.
+  - Host önce `reboot-pending.json` yazıyor (deadline, süre, sorunlar), panel bunu 1 sn'lik
+    döngüde fark edip modalı açıyor, ardından geri sayım dolunca `shutdown /r /t 0` tetikleniyor.
+  - **İptal** `shutdown /a` gönderir + `reboot-cancel.flag` yazar; SYSTEM'deki watchdog geri
+    sayım sonunda bu dosyayı görüp restart etmez, `ConsecutiveFailures` sıfırlanır (5 dk sonra
+    aynı soru tekrar sorulmaz). Panel açık değilse de eski güvenli davranış korunur: geri sayım
+    yine işler ve cihaz kapanır.
+  - Modal `Topmost`, kapatılamaz (X yalnızca arka planı temizler) ve tekrarlanmaz (aynı dosya
+    için ikinci kez açılmaz).
+
+### Düzeltilen
+- **"Bilgisayar yeniden başlatılacak" anonsu duyulmuyordu:** restart anonsu yalnızca
+  `pending-voice.json`'a yazılıyor, panel de kapanacağı için **okunmadan kayboluyordu**. Artık
+  modal açılırken anons **doğrudan konuşulur** ("Onarılamayan bağlantı sorunu. Bilgisayar N
+  saniye sonra yeniden başlatılacak. İptal edebilirsiniz."), kalan süre **30 / 15 / 10 / 5
+  saniyelerde** tekrar tekrar anonslanır, son 10 saniyede sayaç kırmızıya döner. İptal edilirse
+  "Yeniden başlatma iptal edildi" anonsu verilir ve bekleyen anons dosyası silinir (yoksa yeni
+  panel açılınca "yeniden başlatılıyor" derdi). Host da aynı anonsu dosyaya yazar, panel kapalıysa
+  yeni panelde okunur.
+
+## [1.2.3] - 2026-09-30
+
+### Düzeltilen
+- **Kısayollar hiçbir şey yapmıyordu:** masaüstü/Başlat menüsü kısayolları `Start-Panel.vbs`'i
+  **`-Background`** ile çağırıyordu, yani "yalnızca tepside çalış" modunda açılıyordu. Panel
+  zaten açıksa ikinci örnek mutex'te sessizce çıkıyor, "pencereyi göster" isteği hiç yazılmıyordu
+  (`-Background` dalında bu istek bastırılır) → tıklamak hiçbir şeye yol açmıyordu. Panel kapalıysa
+  da yalnızca tepsi simgesi beliriyor, pencere açılmıyordu. `Start-Panel.vbs` artık `show`
+  argümanını destekliyor; kısayollar bu argümanla pencereyi öne getiriyor, zamanlanmış görev
+  (`RemoteHostPanel`) ise parametresiz çalışmaya devam ediyor.
+- **Panel zombie oluyordu (tray'de var ama panel gelmiyor):** pencere bir kez kapandıktan sonra
+  WPF'te `Show()` her zaman *"Pencere kapatıldıktan sonra Show çağrılamaz"* hatası veriyordu; panel
+  tepside görünmeye devam ediyor, pencere hiç açılmıyor, ayrıca `Local\RemoteWatchdogPanel` mutex'i
+  kilitli kaldığı için **yeni hiçbir panel örneği açılamıyordu**. `Show-PanelWindow` yardımcısı eklendi
+  (tüm gösterim çağrıları bundan geçiyor), `Closed` olayında `$script:WinClosed` işaretleniyor ve
+  çıkış istenmemişse süreç kapanıyor — `RemoteHostPanel` görevi 1-2 dk içinde temiz bir paneli
+  geri getiriyor.
+
+### Eklenen
+- **Kurulum sabit dizine taşındı:** `host\`/`ui\`/`lib\` (+`VERSION`) artık kurulumda
+  **`C:\ProgramData\RemoteWatchdog\app`** altına kopyalanıyor (istemci tarafında
+  `%LOCALAPPDATA%\RemoteWatchdog\app`) ve tüm zamanlanmış görevler, Run kaydı ve kısayollar
+  **oradan** çalışıyor. Daha önce her şey kopyaladığın klasörden (ör. bir git deposundan) çalışıyordu;
+  depo taşınsa/silinse görevler ve kısayollar bozuluyordu. Güncelleme için kurulum betiğini
+  tekrar çalıştırmak yeterli; kopyalama öncesi açık panel kapatılıyor (dosya kilidi açılsın).
+- `Install-Host.ps1 -DryRun` artık hedef kurulum dizinini de gösteriyor.
 
 ## [1.2.3] - 2026-09-29
 
-### Düzeltilen
-- **Tray'den çıkış yapınca program bir daha açılmıyordu (asıl hata):** *Çıkış* menüsünde
-  `add_Closed` içinde `[System.Windows.Threading.Dispatcher]::Shutdown()` çağrılıyordu; WPF'te
-  böyle bir **statik metot yok** (`Run`, `PushFrame`, `ExitAllFrames`, `Yield` var). Çağrı
-  `MethodNotFound` hatası verip `catch {}` ile yutulduğu için `Dispatcher.Run()` hiç dönmüyor,
-  **PowerShell süreci sonsuza kadar ayakta kalıyor ve `Local\RemoteWatchdogPanel` mutex'ini tutmaya
-  devam ediyordu**. Sonuç: kısayola (ya da göreve) tekrar basıldığında yeni örnek mutex'te
-  çıkıp sessizce kapanıyor, panel bir daha açılmıyordu. Artık `Dispatcher.InvokeShutdown()`
-  (gerçekten var olan metot) çağrılıyor → `Run()` dönüyor → betik bitiyor, süreç çıkıyor, mutex
-  serbest kalıyor.
-- **Kısayol paneli hiç açmıyordu (ikinci hata):** `Start-Panel.vbs` her zaman `-Background`
-  gönderiyordu; bu bayrak pencereyi gizli başlatıyor, ayrıca ikinci örnek çalışan panelden
-  "penceremi göster" isteğini **yazmıyordu**. Başlatıcıya `show` argümanı eklendi: masaüstü ve
-  Başlat menüsü kısayolları `Start-Panel.vbs show` ile çağırıp paneli görünür açıyor;
-  zamanlanmış görev ise argümansız çağrılmaya devam edip arka planda çalışıyor.
-- **Çıkmış panele "göster" isteği hata veriyordu:** `ShowTimer` kapalı pencereye `Show()`
-  çağırıp `YAKALANAMAYAN HATA ... Pencere kapatıldıktan sonra ... çağrılamaz` ile log'a düşüyordu.
-  `add_Closed` içinde `$script:WinClosed` bayrağı tutuluyor; istek geldiğinde pencere kapalıysa
-  örnek düzgün şekilde kapatılıyor. (`$script:Win.IsLoaded` kapanma sonrası da `True` kaldığı için
-  güvenilir değil.)
+### D├╝zeltilen
+- **Tray'den ├ğ─▒k─▒┼ş yap─▒nca program bir daha a├ğ─▒lm─▒yordu (as─▒l hata):** *├ç─▒k─▒┼ş* men├╝s├╝nde
+  `add_Closed` i├ğinde `[System.Windows.Threading.Dispatcher]::Shutdown()` ├ğa─şr─▒l─▒yordu; WPF'te
+  b├Âyle bir **statik metot yok** (`Run`, `PushFrame`, `ExitAllFrames`, `Yield` var). ├ça─şr─▒
+  `MethodNotFound` hatas─▒ verip `catch {}` ile yutuldu─şu i├ğin `Dispatcher.Run()` hi├ğ d├Ânm├╝yor,
+  **PowerShell s├╝reci sonsuza kadar ayakta kal─▒yor ve `Local\RemoteWatchdogPanel` mutex'ini tutmaya
+  devam ediyordu**. Sonu├ğ: k─▒sayola (ya da g├Âreve) tekrar bas─▒ld─▒─ş─▒nda yeni ├Ârnek mutex'te
+  ├ğ─▒k─▒p sessizce kapan─▒yor, panel bir daha a├ğ─▒lm─▒yordu. Art─▒k `Dispatcher.InvokeShutdown()`
+  (ger├ğekten var olan metot) ├ğa─şr─▒l─▒yor ÔåÆ `Run()` d├Ân├╝yor ÔåÆ betik bitiyor, s├╝re├ğ ├ğ─▒k─▒yor, mutex
+  serbest kal─▒yor.
+- **K─▒sayol paneli hi├ğ a├ğm─▒yordu (ikinci hata):** `Start-Panel.vbs` her zaman `-Background`
+  g├Ânderiyordu; bu bayrak pencereyi gizli ba┼şlat─▒yor, ayr─▒ca ikinci ├Ârnek ├ğal─▒┼şan panelden
+  "penceremi g├Âster" iste─şini **yazm─▒yordu**. Ba┼şlat─▒c─▒ya `show` arg├╝man─▒ eklendi: masa├╝st├╝ ve
+  Ba┼şlat men├╝s├╝ k─▒sayollar─▒ `Start-Panel.vbs show` ile ├ğa─ş─▒r─▒p paneli g├Âr├╝n├╝r a├ğ─▒yor;
+  zamanlanm─▒┼ş g├Ârev ise arg├╝mans─▒z ├ğa─şr─▒lmaya devam edip arka planda ├ğal─▒┼ş─▒yor.
+- **├ç─▒km─▒┼ş panele "g├Âster" iste─şi hata veriyordu:** `ShowTimer` kapal─▒ pencereye `Show()`
+  ├ğa─ş─▒r─▒p `YAKALANAMAYAN HATA ... Pencere kapat─▒ld─▒ktan sonra ... ├ğa─şr─▒lamaz` ile log'a d├╝┼ş├╝yordu.
+  `add_Closed` i├ğinde `$script:WinClosed` bayra─ş─▒ tutuluyor; istek geldi─şinde pencere kapal─▒ysa
+  ├Ârnek d├╝zg├╝n ┼şekilde kapat─▒l─▒yor. (`$script:Win.IsLoaded` kapanma sonras─▒ da `True` kald─▒─ş─▒ i├ğin
+  g├╝venilir de─şil.)
 
 ### Test
-- Regresyon testleri eklendi: `Test-All.ps1` artık geçersiz statik çağrının **kalmadığını**,
-  `InvokeShutdown` kullanıldığını, kısayolun `show` argümanı verdiğini ve başlatıcının `show`
-  modunda `-Background` göndermediğini denetliyor; `Test-UI.ps1` ise gerçek bir WPF penceresiyle
-  tray *Çıkış* akışını çalıştırıp `Dispatcher.Run()`'un gerçekten döndüğünü doğruluyor
-  (eski kodda bu test kırmızıya düşüyor, süreç ayakta kalıyor).
+- Regresyon testleri eklendi: `Test-All.ps1` art─▒k ge├ğersiz statik ├ğa─şr─▒n─▒n **kalmad─▒─ş─▒n─▒**,
+  `InvokeShutdown` kullan─▒ld─▒─ş─▒n─▒, k─▒sayolun `show` arg├╝man─▒ verdi─şini ve ba┼şlat─▒c─▒n─▒n `show`
+  modunda `-Background` g├Ândermedi─şini denetliyor; `Test-UI.ps1` ise ger├ğek bir WPF penceresiyle
+  tray *├ç─▒k─▒┼ş* ak─▒┼ş─▒n─▒ ├ğal─▒┼şt─▒r─▒p `Dispatcher.Run()`'un ger├ğekten d├Ând├╝─ş├╝n├╝ do─şruluyor
+  (eski kodda bu test k─▒rm─▒z─▒ya d├╝┼ş├╝yor, s├╝re├ğ ayakta kal─▒yor).
 
 ## [1.2.2] - 2026-09-29
 
 ### Eklenen
-- **Anons kuyruğu:** konuşma sürerken gelen olay **sessizce kayboluyordu** — motorlar meşgulde
-  `false` dönüyor, `Speak-Text` Windows SAPI'ye düşüyordu; bu makinede Türkçe SAPI olmadığı için
-  olay **hiç seslenmeden kayboluyordu** (ayrıca ses çakışması riski). Artık meşgulken olay
-  kuyruğa alınır, mevcut anons bitince **sırayla** okunur (aynı metin tekilleştirilir, en fazla 8).
-- **Restart anonsu kurtarıldı:** restart paneli de öldürdüğü için "Sistem yeniden başlatılıyor"
-  anonsu her zaman kayboluyordu → anons `pending-voice.json`'a yazılıyor, panel yeniden
-  açıldığında `Speak-PendingVoice` ile konuşuluyor (30 dk'dan eskiyse okunmuyor).
+- **Anons kuyru─şu:** konu┼şma s├╝rerken gelen olay **sessizce kayboluyordu** ÔÇö motorlar me┼şgulde
+  `false` d├Ân├╝yor, `Speak-Text` Windows SAPI'ye d├╝┼ş├╝yordu; bu makinede T├╝rk├ğe SAPI olmad─▒─ş─▒ i├ğin
+  olay **hi├ğ seslenmeden kayboluyordu** (ayr─▒ca ses ├ğak─▒┼şmas─▒ riski). Art─▒k me┼şgulken olay
+  kuyru─şa al─▒n─▒r, mevcut anons bitince **s─▒rayla** okunur (ayn─▒ metin tekille┼ştirilir, en fazla 8).
+- **Restart anonsu kurtar─▒ld─▒:** restart paneli de ├Âld├╝rd├╝─ş├╝ i├ğin "Sistem yeniden ba┼şlat─▒l─▒yor"
+  anonsu her zaman kayboluyordu ÔåÆ anons `pending-voice.json`'a yaz─▒l─▒yor, panel yeniden
+  a├ğ─▒ld─▒─ş─▒nda `Speak-PendingVoice` ile konu┼şuluyor (30 dk'dan eskiyse okunmuyor).
 
-### Düzeltilen
-- **Panel dosyası BOM'suz kaydedilirse betik bozuluyor:** UTF-8 BOM olmayan dosyayı Windows
-  PowerShell 5.1 ANSI okuyor, Türkçe karakterler bozulup tırnak kaçıyor (29 sözdizimi hatası).
-  Regresyon testi eklendi (BOM varlığı denetleniyor).
+### D├╝zeltilen
+- **Panel dosyas─▒ BOM'suz kaydedilirse betik bozuluyor:** UTF-8 BOM olmayan dosyay─▒ Windows
+  PowerShell 5.1 ANSI okuyor, T├╝rk├ğe karakterler bozulup t─▒rnak ka├ğ─▒yor (29 s├Âzdizimi hatas─▒).
+  Regresyon testi eklendi (BOM varl─▒─ş─▒ denetleniyor).
 
 ## [1.2.1] - 2026-09-28
 
 ### Eklenen
-- **Başlat menüsü + masaüstü kısayolu:** `ui\Panel-Setup.ps1` (panel `-Install`/`-Uninstall` bunu
-  çağırır) `RemoteWatchdog Kontrol Paneli.lnk` oluşturur. Hedef `wscript.exe` + `Start-Panel.vbs`
-  olduğu için tıklandığında **konsol penceresi açılmaz**, panel doğrudan açılır; proje simgesi kullanılır.
-  Durum için `ui\Panel-Setup.ps1 -Action Status`.
+- **Ba┼şlat men├╝s├╝ + masa├╝st├╝ k─▒sayolu:** `ui\Panel-Setup.ps1` (panel `-Install`/`-Uninstall` bunu
+  ├ğa─ş─▒r─▒r) `RemoteWatchdog Kontrol Paneli.lnk` olu┼şturur. Hedef `wscript.exe` + `Start-Panel.vbs`
+  oldu─şu i├ğin t─▒kland─▒─ş─▒nda **konsol penceresi a├ğ─▒lmaz**, panel do─şrudan a├ğ─▒l─▒r; proje simgesi kullan─▒l─▒r.
+  Durum i├ğin `ui\Panel-Setup.ps1 -Action Status`.
 
-### Düzeltilen
-- **`-Install` panel açıkken hiçbir şey yapmıyordu:** ikinci örnek mutex'te çıkıp `-Install`
-  bloğuna hiç ulaşmıyordu (bu yüzden kısayol/görev kurulumu sessizce atlanıyordu) → kurulum
-  işlemleri mutex kontrolünün **önüne** alındı ve ayrı betiğe taşındı.
-- **Günlük artık sadece ~1 gün tutuyordu:** `Write-Log` her satırda dosyanın tamamını okuyup
-  5000 satırda son 4000'e kırpıyordu; 5 dakikalık döngü + 1 dakikalık yoklama günde ~4400 satır
-  üretiyor, yani tarih penceresi bir güne düşüyordu → **boyut tabanlı rotasyon** (`LogDosyaMB`,
-  varsayılan 2 MB) ve **gün bazlı saklama** (`LogGunDays`, varsayılan 30 gün) eklendi
-  (`log/host-watchdog-<tarih>.log` arşivleri, eski olanlar otomatik silinir). Yan fayda: log yazımı
-  artık her satırda dosyayı okumuyor.
-- **Yoklama günlüğü:** "hizli yoklama çalışıyor" satırı 10 dakikada bir yerine **30 dakikada bir**
-  yazılıyor (günlük kirliliğini azaltır); yoklama yine **her 1 dakikada** çalışır.
+### D├╝zeltilen
+- **`-Install` panel a├ğ─▒kken hi├ğbir ┼şey yapm─▒yordu:** ikinci ├Ârnek mutex'te ├ğ─▒k─▒p `-Install`
+  blo─şuna hi├ğ ula┼şm─▒yordu (bu y├╝zden k─▒sayol/g├Ârev kurulumu sessizce atlan─▒yordu) ÔåÆ kurulum
+  i┼şlemleri mutex kontrol├╝n├╝n **├Ân├╝ne** al─▒nd─▒ ve ayr─▒ beti─şe ta┼ş─▒nd─▒.
+- **G├╝nl├╝k art─▒k sadece ~1 g├╝n tutuyordu:** `Write-Log` her sat─▒rda dosyan─▒n tamam─▒n─▒ okuyup
+  5000 sat─▒rda son 4000'e k─▒rp─▒yordu; 5 dakikal─▒k d├Âng├╝ + 1 dakikal─▒k yoklama g├╝nde ~4400 sat─▒r
+  ├╝retiyor, yani tarih penceresi bir g├╝ne d├╝┼ş├╝yordu ÔåÆ **boyut tabanl─▒ rotasyon** (`LogDosyaMB`,
+  varsay─▒lan 2 MB) ve **g├╝n bazl─▒ saklama** (`LogGunDays`, varsay─▒lan 30 g├╝n) eklendi
+  (`log/host-watchdog-<tarih>.log` ar┼şivleri, eski olanlar otomatik silinir). Yan fayda: log yaz─▒m─▒
+  art─▒k her sat─▒rda dosyay─▒ okumuyor.
+- **Yoklama g├╝nl├╝─ş├╝:** "hizli yoklama ├ğal─▒┼ş─▒yor" sat─▒r─▒ 10 dakikada bir yerine **30 dakikada bir**
+  yaz─▒l─▒yor (g├╝nl├╝k kirlili─şini azalt─▒r); yoklama yine **her 1 dakikada** ├ğal─▒┼ş─▒r.
 
 ## [1.2.0] - 2026-09-28
 
 ### Eklenen
-- **Film efektleri (`SesEfektleri`, varsayılan açık):** önemli eylemler ve uyarılar artık **iki
-  katmanlı** duyurulur — önce hazır bir efekt, hemen ardından Türkçe anons. Efektler depoda
-  `ui/sounds/*.wav` olarak **hazır** durur (çalışma anında üretim yok, panel ilk kullanımda yükleyip
-  önbellekte tutar, olayla ses arasında bekleme olmaz).
-  - **Ses tasarımı (`tools/SfxSynth.cs`, C# sintez motoru):** net **ve** keskin için 1.5 ms attack +
-    4 ms parlak transient; parlaklık için inharmonik metalik kısımlar (1 / 2 / 2.76 / 5.40 / 8.93) ve
-    HP shimmer'lı 5 taraflı damped reverb; gerçekçilik/güç için sub katmanı (55-330 Hz); kırpmasız
-    tepe için tanh soft limiter + normalize + kenar fade.
-  - **Sekiz efekt:** `alert` (3 darbeli metalik klakson), `warn` (iki notalı, detoneli uyarı),
-    `ok` (parlak cam ping), `recover` (yükselen shimmer + çift çınlama), `repair` (sonar taraması),
-    `reboot` (alçalan süpürme + sub + net blip), `online` (iki notalı çan + uzun kuyruk),
+- **Film efektleri (`SesEfektleri`, varsay─▒lan a├ğ─▒k):** ├Ânemli eylemler ve uyar─▒lar art─▒k **iki
+  katmanl─▒** duyurulur ÔÇö ├Ânce haz─▒r bir efekt, hemen ard─▒ndan T├╝rk├ğe anons. Efektler depoda
+  `ui/sounds/*.wav` olarak **haz─▒r** durur (├ğal─▒┼şma an─▒nda ├╝retim yok, panel ilk kullan─▒mda y├╝kleyip
+  ├Ânbellekte tutar, olayla ses aras─▒nda bekleme olmaz).
+  - **Ses tasar─▒m─▒ (`tools/SfxSynth.cs`, C# sintez motoru):** net **ve** keskin i├ğin 1.5 ms attack +
+    4 ms parlak transient; parlakl─▒k i├ğin inharmonik metalik k─▒s─▒mlar (1 / 2 / 2.76 / 5.40 / 8.93) ve
+    HP shimmer'l─▒ 5 tarafl─▒ damped reverb; ger├ğek├ğilik/g├╝├ğ i├ğin sub katman─▒ (55-330 Hz); k─▒rpmas─▒z
+    tepe i├ğin tanh soft limiter + normalize + kenar fade.
+  - **Sekiz efekt:** `alert` (3 darbeli metalik klakson), `warn` (iki notal─▒, detoneli uyar─▒),
+    `ok` (parlak cam ping), `recover` (y├╝kselen shimmer + ├ğift ├ğ─▒nlama), `repair` (sonar taramas─▒),
+    `reboot` (al├ğalan s├╝p├╝rme + sub + net blip), `online` (iki notal─▒ ├ğan + uzun kuyruk),
     `scan` (iki mikro blip).
-  - **Olay eşlemesi:** bağlantı koptu → `alert`, düzeldi → `recover`, onarım sürüyor → `repair`,
-    onarım tamam/başarısız → `ok` / `warn`, reboot istendi/algılandı → `reboot`, yeniden başlatıldı ve
-    kurulum → `online`, elle denetleme başladı → `scan`, denetleme sonucu → `ok` / `warn`.
-  - **Ayarlar:** `SesEfektleri` (aç/kapa) ve `SesEfektleriVolume` (0-100, 0 = efektler kapalı) —
-    Ayarlar → Bildirim'de otomatik görünür; tepsi menüsüne *Ses efektleri (uzay)* anahtarı eklendi
-    (etiket açık/kapalı durumunu gösterir). Tepsideki *Sessiz mod* anonsla birlikte efektleri de susturur.
-  - **Dayanıklılık:** paket eksik veya ses aygıtı yoksa Windows sistem sesine düşülür ve durum
-    `panel.log`'a yazılır; `Get-SfxPath` yol enjeksiyonunu temizler (yalnızca dosya adı kullanılır).
-- **Yerel Türkçe konuşma motoru (Piper TTS):** insan sesi anonsları artık **internetsiz** çalışıyor.
-  `edge-tts` doğal Türkçe kadın sesi (`tr-TR-EmelNeural`) sunuyordu ama Microsoft ücretsiz ucu
-  kapattığı için artık **HTTP 403** döndürüyor ve panel susuyordu → `tools/Install-Voice.ps1` ile
-  **Piper TTS + doğal Türkçe kadın modeli** (`tr_TR-dfki-medium`, ~82 MB) kuruluyor
-  (`%LOCALAPPDATA%\RemoteWatchdog\voice`). Öncelik sırası: **Piper (yerel) → edge-tts (bulut) →
-  Windows Türkçe SAPI → susar**. Panel açılışta motoru `panel.log`'a yazar.
-- **Doğal KADIN Türkçe ses (edge-tts `tr-TR-EmelNeural`) geri geldi:** edge-tts 7.x, ağ işlemleri
-  için `aiodns` kullanıyor ve bu kütüphane Windows'ta yalnızca `SelectorEventLoop` ile çalışıyor;
-  süreç ses üretmeden `"aiodns needs a SelectorEventLoop on Windows"` hatasıyla düşüyordu (eski
-  sürümlerde ise DRM token olmadığı için **HTTP 403** geliyordu) → `tools/edge_tts_win.py`
-  sarmalayıcısı eklendi (politikayı `edge_tts` import edilmeden **önce** ayarlıyor), panel bu
-  sarmalayıcıyı tercih ediyor, `-m edge_tts` yalnızca yedek yol. Öncelik sırası:
-  **edge-tts (doğal kadın) → Piper (yerel erkek, internetsiz) → Türkçe SAPI → susar**.
-  Doğrulanan Türkçe model karşılaştırması: Piper `tr_TR-dfki` / `fahrettin` / `fettah`,
-  `mms-tts-tur` ve `speecht5-tts-turkish` modellerinin tümü **erkek**; doğal kadın Türkçe için
-  edge-tts tek seçenek.
-- **Kapatılan ses tekrar çalıyordu:** film efektleri (wav) ve insan sesi artık **çalışma anında
-  sabitlenen** anahtarlarla kontrol ediliyor (`$script:SfxOn` / `$script:VoiceOn`): tepsi anahtarıyla
-  kapatılan katman, `config.json`'ı kim yazarsa yazsın o oturum boyunca susuyor. Ayrıca *Sessiz mod*
-  etiketi **"Sessiz mod (tüm sesler)"** oldu ve balon metni artık "bu katman kapandı, diğeri açık"
-  diyor — önceki durumda "film efektlerini kapattım ama ses geliyor" yaşanıyordu çünkü duyulan ses
-  **insan sesiydi** (ayrı anahtar, istenen davranış) ama ayrım net değildi.
-- **Ayrı ses anahtarları:** *wav* (film efektleri, `SesEfektleri`) ile **insan sesi**
-  (Türkçe anons, `SesliBildirim`) artık **bağımsız** açılıp kapanıyor. Tepsi menüsünde
-  *Sesli anons (insan sesi)* ve *Film efektleri (wav)* girdileri (etiketler açık/kapalı durumunu
-  gösterir) ve ikisini birden denetleyen *Ses testi* eklendi. *Sessiz mod* ikisini birlikte susturur.
-- **Türkçe telaffuz düzeltmesi:** anons metinleri **ASCII** yazılmıştı (`Baglanti duzeldi`),
-  seslendirici de Türkçe harfleri duyamayıp İngilizce okuyordu (kullanıcı bildirimi) → tüm anons
-  metinleri gerçek Türkçe karakterlerle ve noktalama ile yeniden yazıldı (`Bağlantı düzeldi.`,
-  `Ağ onarılıyor.`, `Onarım tamamlandı.`…). `last-run.json`'dan ASCII gelen kontrol adları için
-  `ConvertTo-TtsText` + `$script:TtsFix` sözlüğü eklendi (`Internet erisimi` → `İnternet erişimi`);
-  genel ASCII→diakritik çevirisi bilinçli olarak **yapılmıyor** (`ınternet` hatasını önlemek için).
-- **Yeniden üretim aracı (`tools/New-SoundPack.ps1`):** paketi yeniden üretir (`-List`, `-Verify`);
-  dosyalar üretilmiş olarak depoda durduğu için kurulum makinelerinde ek bağımlılık gerekmez.
-- **Testler:** Test-All'a 21 yeni kontrol (8 efektin varlığı/geçerli WAV başlığı/boyutu, panel
-  API'si ve ön yükleme, olay eşlemesi, efekt adı ↔ paket tutarlılığı, ayar tanımları, host/panel
-  varsayılanları, konuşma motoru önceliği); Test-UI'a 12 yeni kontrol (paket bütünlüğü,
-  `Get-SfxPath` yol güvenliği, ses seviyesi, oynatma, önbellek temizliği, bayrak okuma ve Piper ile
-  uçtan uca Türkçe ses üretimi).
+  - **Olay e┼şlemesi:** ba─şlant─▒ koptu ÔåÆ `alert`, d├╝zeldi ÔåÆ `recover`, onar─▒m s├╝r├╝yor ÔåÆ `repair`,
+    onar─▒m tamam/ba┼şar─▒s─▒z ÔåÆ `ok` / `warn`, reboot istendi/alg─▒land─▒ ÔåÆ `reboot`, yeniden ba┼şlat─▒ld─▒ ve
+    kurulum ÔåÆ `online`, elle denetleme ba┼şlad─▒ ÔåÆ `scan`, denetleme sonucu ÔåÆ `ok` / `warn`.
+  - **Ayarlar:** `SesEfektleri` (a├ğ/kapa) ve `SesEfektleriVolume` (0-100, 0 = efektler kapal─▒) ÔÇö
+    Ayarlar ÔåÆ Bildirim'de otomatik g├Âr├╝n├╝r; tepsi men├╝s├╝ne *Ses efektleri (uzay)* anahtar─▒ eklendi
+    (etiket a├ğ─▒k/kapal─▒ durumunu g├Âsterir). Tepsideki *Sessiz mod* anonsla birlikte efektleri de susturur.
+  - **Dayan─▒kl─▒l─▒k:** paket eksik veya ses ayg─▒t─▒ yoksa Windows sistem sesine d├╝┼ş├╝l├╝r ve durum
+    `panel.log`'a yaz─▒l─▒r; `Get-SfxPath` yol enjeksiyonunu temizler (yaln─▒zca dosya ad─▒ kullan─▒l─▒r).
+- **Yerel T├╝rk├ğe konu┼şma motoru (Piper TTS):** insan sesi anonslar─▒ art─▒k **internetsiz** ├ğal─▒┼ş─▒yor.
+  `edge-tts` do─şal T├╝rk├ğe kad─▒n sesi (`tr-TR-EmelNeural`) sunuyordu ama Microsoft ├╝cretsiz ucu
+  kapatt─▒─ş─▒ i├ğin art─▒k **HTTP 403** d├Ând├╝r├╝yor ve panel susuyordu ÔåÆ `tools/Install-Voice.ps1` ile
+  **Piper TTS + do─şal T├╝rk├ğe kad─▒n modeli** (`tr_TR-dfki-medium`, ~82 MB) kuruluyor
+  (`%LOCALAPPDATA%\RemoteWatchdog\voice`). ├ûncelik s─▒ras─▒: **Piper (yerel) ÔåÆ edge-tts (bulut) ÔåÆ
+  Windows T├╝rk├ğe SAPI ÔåÆ susar**. Panel a├ğ─▒l─▒┼şta motoru `panel.log`'a yazar.
+- **Do─şal KADIN T├╝rk├ğe ses (edge-tts `tr-TR-EmelNeural`) geri geldi:** edge-tts 7.x, a─ş i┼şlemleri
+  i├ğin `aiodns` kullan─▒yor ve bu k├╝t├╝phane Windows'ta yaln─▒zca `SelectorEventLoop` ile ├ğal─▒┼ş─▒yor;
+  s├╝re├ğ ses ├╝retmeden `"aiodns needs a SelectorEventLoop on Windows"` hatas─▒yla d├╝┼ş├╝yordu (eski
+  s├╝r├╝mlerde ise DRM token olmad─▒─ş─▒ i├ğin **HTTP 403** geliyordu) ÔåÆ `tools/edge_tts_win.py`
+  sarmalay─▒c─▒s─▒ eklendi (politikay─▒ `edge_tts` import edilmeden **├Ânce** ayarl─▒yor), panel bu
+  sarmalay─▒c─▒y─▒ tercih ediyor, `-m edge_tts` yaln─▒zca yedek yol. ├ûncelik s─▒ras─▒:
+  **edge-tts (do─şal kad─▒n) ÔåÆ Piper (yerel erkek, internetsiz) ÔåÆ T├╝rk├ğe SAPI ÔåÆ susar**.
+  Do─şrulanan T├╝rk├ğe model kar┼ş─▒la┼şt─▒rmas─▒: Piper `tr_TR-dfki` / `fahrettin` / `fettah`,
+  `mms-tts-tur` ve `speecht5-tts-turkish` modellerinin t├╝m├╝ **erkek**; do─şal kad─▒n T├╝rk├ğe i├ğin
+  edge-tts tek se├ğenek.
+- **Kapat─▒lan ses tekrar ├ğal─▒yordu:** film efektleri (wav) ve insan sesi art─▒k **├ğal─▒┼şma an─▒nda
+  sabitlenen** anahtarlarla kontrol ediliyor (`$script:SfxOn` / `$script:VoiceOn`): tepsi anahtar─▒yla
+  kapat─▒lan katman, `config.json`'─▒ kim yazarsa yazs─▒n o oturum boyunca susuyor. Ayr─▒ca *Sessiz mod*
+  etiketi **"Sessiz mod (t├╝m sesler)"** oldu ve balon metni art─▒k "bu katman kapand─▒, di─şeri a├ğ─▒k"
+  diyor ÔÇö ├Ânceki durumda "film efektlerini kapatt─▒m ama ses geliyor" ya┼şan─▒yordu ├ğ├╝nk├╝ duyulan ses
+  **insan sesiydi** (ayr─▒ anahtar, istenen davran─▒┼ş) ama ayr─▒m net de─şildi.
+- **Ayr─▒ ses anahtarlar─▒:** *wav* (film efektleri, `SesEfektleri`) ile **insan sesi**
+  (T├╝rk├ğe anons, `SesliBildirim`) art─▒k **ba─ş─▒ms─▒z** a├ğ─▒l─▒p kapan─▒yor. Tepsi men├╝s├╝nde
+  *Sesli anons (insan sesi)* ve *Film efektleri (wav)* girdileri (etiketler a├ğ─▒k/kapal─▒ durumunu
+  g├Âsterir) ve ikisini birden denetleyen *Ses testi* eklendi. *Sessiz mod* ikisini birlikte susturur.
+- **T├╝rk├ğe telaffuz d├╝zeltmesi:** anons metinleri **ASCII** yaz─▒lm─▒┼şt─▒ (`Baglanti duzeldi`),
+  seslendirici de T├╝rk├ğe harfleri duyamay─▒p ─░ngilizce okuyordu (kullan─▒c─▒ bildirimi) ÔåÆ t├╝m anons
+  metinleri ger├ğek T├╝rk├ğe karakterlerle ve noktalama ile yeniden yaz─▒ld─▒ (`Ba─şlant─▒ d├╝zeldi.`,
+  `A─ş onar─▒l─▒yor.`, `Onar─▒m tamamland─▒.`ÔÇĞ). `last-run.json`'dan ASCII gelen kontrol adlar─▒ i├ğin
+  `ConvertTo-TtsText` + `$script:TtsFix` s├Âzl├╝─ş├╝ eklendi (`Internet erisimi` ÔåÆ `─░nternet eri┼şimi`);
+  genel ASCIIÔåÆdiakritik ├ğevirisi bilin├ğli olarak **yap─▒lm─▒yor** (`─▒nternet` hatas─▒n─▒ ├Ânlemek i├ğin).
+- **Yeniden ├╝retim arac─▒ (`tools/New-SoundPack.ps1`):** paketi yeniden ├╝retir (`-List`, `-Verify`);
+  dosyalar ├╝retilmi┼ş olarak depoda durdu─şu i├ğin kurulum makinelerinde ek ba─ş─▒ml─▒l─▒k gerekmez.
+- **Testler:** Test-All'a 21 yeni kontrol (8 efektin varl─▒─ş─▒/ge├ğerli WAV ba┼şl─▒─ş─▒/boyutu, panel
+  API'si ve ├Ân y├╝kleme, olay e┼şlemesi, efekt ad─▒ Ôåö paket tutarl─▒l─▒─ş─▒, ayar tan─▒mlar─▒, host/panel
+  varsay─▒lanlar─▒, konu┼şma motoru ├Ânceli─şi); Test-UI'a 12 yeni kontrol (paket b├╝t├╝nl├╝─ş├╝,
+  `Get-SfxPath` yol g├╝venli─şi, ses seviyesi, oynatma, ├Ânbellek temizli─şi, bayrak okuma ve Piper ile
+  u├ğtan uca T├╝rk├ğe ses ├╝retimi).
 
-### Düzeltilen
-- **Bozuk konuşma motoru sessizce yutuyordu:** edge-tts üretemediğinde (ör. 403) panel 25 saniye
-  bekleyip hiçbir şey söylemeden geçiyordu; artık üretici süreci izleniyor, dosya bitince
-  **kısmi ses oynatılmıyor** ve dosya hiç oluşmazsa Türkçe SAPI'ya düşülüyor (yoksa en azından
-  `panel.log`'a net uyarı düşüyor).
-- **Her anons sayacı yeni işleyici ekliyordu:** `Add_Tick` her `Speak-*` çağrısında tekrar
-  ekleniyordu (n anons = n işleyici, arayüz yavaşlıyor) → `Start-SpeechPoller` ile tek kez kuruluyor.
-- **Üretici süreci kapatılmıyordu:** iptal/çıkışta geçici `cmd`/`python` süreci çalışmaya devam
-  ediyordu → `Stop-Speech` artık süreci de sonlandırıyor.
-- **Panel her açılışta sessiz modda açılıyordu (ses hiç çıkmıyordu):** tepsi kaydındaki bayrak metin
-  olarak saklanıyor (`'0'` / `'1'`), kod ise doğrudan `[bool]` ile çeviriyordu; PowerShell'de boş
-  olmayan her metin `TRUE` olduğu için "sessiz değil" (`'0'`) bile sessiz sayılıyordu. Özellikle
-  SelfTest sessiz mod anahtarını bir kez değiştirdikten sonra **her yeniden başlatmada** sesler
-  (anons + efektler) susturuluyordu → `Get-FlagBool` ile güvenli okuma eklendi (Test-UI'da 4 kontrol).
-- **Eski panel süreci güncellemeyi engelliyordu:** çalışan eski sürüm, yeni başlatma isteğini alıp
-  kapalı pencereye `Show()` çağırdığı için "Pencere kapatıldıktan sonra Show çağrılamaz" hatası
-  veriyordu → güncellemeden önce çalışan paneli durdurup yeniden başlatmak yeterli.
-- **Ses çalmayan makinede sessiz kalma:** efekt dosyası bulunamazsa veya `MediaPlayer` başarısız
-  olursa artık sessiz kalınmıyor, sistem sesine düşülüyor (uyarı bir kez log'a yazılır).
+### D├╝zeltilen
+- **Bozuk konu┼şma motoru sessizce yutuyordu:** edge-tts ├╝retemedi─şinde (├Âr. 403) panel 25 saniye
+  bekleyip hi├ğbir ┼şey s├Âylemeden ge├ğiyordu; art─▒k ├╝retici s├╝reci izleniyor, dosya bitince
+  **k─▒smi ses oynat─▒lm─▒yor** ve dosya hi├ğ olu┼şmazsa T├╝rk├ğe SAPI'ya d├╝┼ş├╝l├╝yor (yoksa en az─▒ndan
+  `panel.log`'a net uyar─▒ d├╝┼ş├╝yor).
+- **Her anons sayac─▒ yeni i┼şleyici ekliyordu:** `Add_Tick` her `Speak-*` ├ğa─şr─▒s─▒nda tekrar
+  ekleniyordu (n anons = n i┼şleyici, aray├╝z yava┼şl─▒yor) ÔåÆ `Start-SpeechPoller` ile tek kez kuruluyor.
+- **├£retici s├╝reci kapat─▒lm─▒yordu:** iptal/├ğ─▒k─▒┼şta ge├ğici `cmd`/`python` s├╝reci ├ğal─▒┼şmaya devam
+  ediyordu ÔåÆ `Stop-Speech` art─▒k s├╝reci de sonland─▒r─▒yor.
+- **Panel her a├ğ─▒l─▒┼şta sessiz modda a├ğ─▒l─▒yordu (ses hi├ğ ├ğ─▒km─▒yordu):** tepsi kayd─▒ndaki bayrak metin
+  olarak saklan─▒yor (`'0'` / `'1'`), kod ise do─şrudan `[bool]` ile ├ğeviriyordu; PowerShell'de bo┼ş
+  olmayan her metin `TRUE` oldu─şu i├ğin "sessiz de─şil" (`'0'`) bile sessiz say─▒l─▒yordu. ├ûzellikle
+  SelfTest sessiz mod anahtar─▒n─▒ bir kez de─şi┼ştirdikten sonra **her yeniden ba┼şlatmada** sesler
+  (anons + efektler) susturuluyordu ÔåÆ `Get-FlagBool` ile g├╝venli okuma eklendi (Test-UI'da 4 kontrol).
+- **Eski panel s├╝reci g├╝ncellemeyi engelliyordu:** ├ğal─▒┼şan eski s├╝r├╝m, yeni ba┼şlatma iste─şini al─▒p
+  kapal─▒ pencereye `Show()` ├ğa─ş─▒rd─▒─ş─▒ i├ğin "Pencere kapat─▒ld─▒ktan sonra Show ├ğa─şr─▒lamaz" hatas─▒
+  veriyordu ÔåÆ g├╝ncellemeden ├Ânce ├ğal─▒┼şan paneli durdurup yeniden ba┼şlatmak yeterli.
+- **Ses ├ğalmayan makinede sessiz kalma:** efekt dosyas─▒ bulunamazsa veya `MediaPlayer` ba┼şar─▒s─▒z
+  olursa art─▒k sessiz kal─▒nm─▒yor, sistem sesine d├╝┼ş├╝l├╝yor (uyar─▒ bir kez log'a yaz─▒l─▒r).
 
 ## [1.1.0] - 2026-09-28
 
 ### Eklenen
-- **Renkli günlük:** günlük satırları kurala göre renkleniyor — **yeşil** = stabil durum (`TAMAM`),
-  **kırmızı** = hata/sorun (`WARN`, `ALERT`, `SORUN`), **mavi** = bilgilendirme (`INFO`, `ATLANDI`).
-  Panel günlük sekmesi `RichTextBox`'a geçti (satır bazlı renk), konsol çıktısı da aynı kuralı kullanıyor.
-- **Hızlı yoklama izi:** yoklama artık "çalışıyor" satırını 10 dakikada bir yazar ve
-  `probe-state.json` dosyasını her koşuda günceller (yoklamanın çalıştığı görülebilir olsun diye).
-- **Düzeltilen**
-- **probe-state hiç yazılmıyordu:** `Save-ProbeState` içinde PowerShell 5.1'in `$beat`/`$Beat`
-  isim çakışması (`-not $Beat` yerel `$beat` değişkenine bağlanıyor) hatayı tetikliyor, `catch`
-  yutuyordu → değişken adı ayrıldı, yazma 3 kez yeniden deneniyor ve hata artık günlüğe yazılıyor.
-- **Kullanıcı-seviyesi yedek görev (`RemoteHostWatchdogUser`):** kurumsal yönetim SYSTEM
-  görevlerini silerse izleme durmasın diye `-Install` artık kullanıcı görevini de kaydediyor.
-  Görev `-UserFallback` ile çalışır: SYSTEM sağlam + veri tazeyken sessiz çıkar, yoksa tam
-  döngüyü üstlenir (`-Uninstall` kaldırır, `-Status` durumunu gösterir).
-- **Hızlı yoklama (`RemoteHostFastProbe`, `-FastProbe`):** 5 dakikalık döngü sorunu geç fark
-  ediyordu → her 1 dakikada hafif ağ yoklaması; sorun görürse tam döngüyü hemen tetikler.
-  Düzelmeyi de yakalar: önceki durum kötüyse (veya son rapor hatalıysa) bağlantı geri geldiğinde
-  tam döngü tetiklenir, "bağlantı düzeldi" kaydı ve anonsu oluşur.
-- **Panel canlı yenileme:** bağlantılar ancak kapatıp açınca güncelleniyordu → `last-run.json`
-  damga yoklaması (1 sn) ile yazıldığı anda yenileniyor (20 sn sayaç yedek). Not: ilk denemede
-  `FileSystemWatcher` kullanıldı, ancak olayları runspace'siz havuz başlığında çalıştırıp süreci
-  çökertiyordu (`PSInvalidOperation`) → yoklamaya dönüldü.
-- **Ayarlar hemen geçerli:** kaydetme artık watchdog görevini tetikliyor; kesinti sırasında
-  değiştirilen ayarlar sıradaki döngüyü beklemiyor.
-- **Sesli bildirim (`SesliBildirim`, varsayılan açık):** tüm önemli olaylarda kısa Türkçe anons
-  (sorun / düzeldi / onarılıyor / tamamlandı / tekrar başlatılıyor / başlatıldı). Ses **doğal kadın**
-  Türkçe (`edge-tts` `tr-TR-EmelNeural`); kurulu değilse Windows'un Türkçe sesi (`Tolga`), Türkçe
-  ses hiç yoksa İngilizce okumaz (susar). Panelsürecinde çalışır (SYSTEM oturumunda ses çıkmaz);
-  sessiz modda susar. Ayarlar → Bildirim'den kapatılabilir, `SesliBildirimEdge` doğal sesi kapatır.
-- **Wire-UI koruması:** pencere oluşmadan çağrılırsa kriptik hata yerine net şekilde atlanır
-  (test ortamında görülen `Dispatcher` null hatası).
-- **Tepsi menüsünden panel açılışı:** "Paneli başlat" `-WindowStyle Normal` ile çalıştırıyordu;
-  ekranda ikinci bir komut penceresi açılıyor, kapatılınca program da kapanıyordu → gizli başlatma.
-- **Siyah/mavi ekranlar (gidi-gelen konsol):** Windows Terminal varsayılan terminal olduğunda
-  görev konsolunu Terminal barındırıyor, `-WindowStyle Hidden` yok sayılıyordu → kullanıcı
-  görevleri artık `wscript.exe` + yeni `host/Start-Hidden.vbs` ile başlatılıyor (pencere hiç oluşmuyor).
-- **Panel erken kapanması:** `ShutdownMode=OnExplicitShutdown` yapıldı; son pencere kapansa bile
-  tepsi ve izleme ayakta kalır. Ayrıca arayüzdispatcher hata yakalayıcısı `add_UnhandledException`
-  ile kuruluyor (`.UnhandledException.Add(...)` PowerShell'de null dönüyordu ve iz bırakmıyordu).
+- **Renkli g├╝nl├╝k:** g├╝nl├╝k sat─▒rlar─▒ kurala g├Âre renkleniyor ÔÇö **ye┼şil** = stabil durum (`TAMAM`),
+  **k─▒rm─▒z─▒** = hata/sorun (`WARN`, `ALERT`, `SORUN`), **mavi** = bilgilendirme (`INFO`, `ATLANDI`).
+  Panel g├╝nl├╝k sekmesi `RichTextBox`'a ge├ğti (sat─▒r bazl─▒ renk), konsol ├ğ─▒kt─▒s─▒ da ayn─▒ kural─▒ kullan─▒yor.
+- **H─▒zl─▒ yoklama izi:** yoklama art─▒k "├ğal─▒┼ş─▒yor" sat─▒r─▒n─▒ 10 dakikada bir yazar ve
+  `probe-state.json` dosyas─▒n─▒ her ko┼şuda g├╝nceller (yoklaman─▒n ├ğal─▒┼şt─▒─ş─▒ g├Âr├╝lebilir olsun diye).
+- **D├╝zeltilen**
+- **probe-state hi├ğ yaz─▒lm─▒yordu:** `Save-ProbeState` i├ğinde PowerShell 5.1'in `$beat`/`$Beat`
+  isim ├ğak─▒┼şmas─▒ (`-not $Beat` yerel `$beat` de─şi┼şkenine ba─şlan─▒yor) hatay─▒ tetikliyor, `catch`
+  yutuyordu ÔåÆ de─şi┼şken ad─▒ ayr─▒ld─▒, yazma 3 kez yeniden deneniyor ve hata art─▒k g├╝nl├╝─şe yaz─▒l─▒yor.
+- **Kullan─▒c─▒-seviyesi yedek g├Ârev (`RemoteHostWatchdogUser`):** kurumsal y├Ânetim SYSTEM
+  g├Ârevlerini silerse izleme durmas─▒n diye `-Install` art─▒k kullan─▒c─▒ g├Ârevini de kaydediyor.
+  G├Ârev `-UserFallback` ile ├ğal─▒┼ş─▒r: SYSTEM sa─şlam + veri tazeyken sessiz ├ğ─▒kar, yoksa tam
+  d├Âng├╝y├╝ ├╝stlenir (`-Uninstall` kald─▒r─▒r, `-Status` durumunu g├Âsterir).
+- **H─▒zl─▒ yoklama (`RemoteHostFastProbe`, `-FastProbe`):** 5 dakikal─▒k d├Âng├╝ sorunu ge├ğ fark
+  ediyordu ÔåÆ her 1 dakikada hafif a─ş yoklamas─▒; sorun g├Âr├╝rse tam d├Âng├╝y├╝ hemen tetikler.
+  D├╝zelmeyi de yakalar: ├Ânceki durum k├Ât├╝yse (veya son rapor hatal─▒ysa) ba─şlant─▒ geri geldi─şinde
+  tam d├Âng├╝ tetiklenir, "ba─şlant─▒ d├╝zeldi" kayd─▒ ve anonsu olu┼şur.
+- **Panel canl─▒ yenileme:** ba─şlant─▒lar ancak kapat─▒p a├ğ─▒nca g├╝ncelleniyordu ÔåÆ `last-run.json`
+  damga yoklamas─▒ (1 sn) ile yaz─▒ld─▒─ş─▒ anda yenileniyor (20 sn saya├ğ yedek). Not: ilk denemede
+  `FileSystemWatcher` kullan─▒ld─▒, ancak olaylar─▒ runspace'siz havuz ba┼şl─▒─ş─▒nda ├ğal─▒┼şt─▒r─▒p s├╝reci
+  ├ğ├Âkertiyordu (`PSInvalidOperation`) ÔåÆ yoklamaya d├Ân├╝ld├╝.
+- **Ayarlar hemen ge├ğerli:** kaydetme art─▒k watchdog g├Ârevini tetikliyor; kesinti s─▒ras─▒nda
+  de─şi┼ştirilen ayarlar s─▒radaki d├Âng├╝y├╝ beklemiyor.
+- **Sesli bildirim (`SesliBildirim`, varsay─▒lan a├ğ─▒k):** t├╝m ├Ânemli olaylarda k─▒sa T├╝rk├ğe anons
+  (sorun / d├╝zeldi / onar─▒l─▒yor / tamamland─▒ / tekrar ba┼şlat─▒l─▒yor / ba┼şlat─▒ld─▒). Ses **do─şal kad─▒n**
+  T├╝rk├ğe (`edge-tts` `tr-TR-EmelNeural`); kurulu de─şilse Windows'un T├╝rk├ğe sesi (`Tolga`), T├╝rk├ğe
+  ses hi├ğ yoksa ─░ngilizce okumaz (susar). Panels├╝recinde ├ğal─▒┼ş─▒r (SYSTEM oturumunda ses ├ğ─▒kmaz);
+  sessiz modda susar. Ayarlar ÔåÆ Bildirim'den kapat─▒labilir, `SesliBildirimEdge` do─şal sesi kapat─▒r.
+- **Wire-UI korumas─▒:** pencere olu┼şmadan ├ğa─şr─▒l─▒rsa kriptik hata yerine net ┼şekilde atlan─▒r
+  (test ortam─▒nda g├Âr├╝len `Dispatcher` null hatas─▒).
+- **Tepsi men├╝s├╝nden panel a├ğ─▒l─▒┼ş─▒:** "Paneli ba┼şlat" `-WindowStyle Normal` ile ├ğal─▒┼şt─▒r─▒yordu;
+  ekranda ikinci bir komut penceresi a├ğ─▒l─▒yor, kapat─▒l─▒nca program da kapan─▒yordu ÔåÆ gizli ba┼şlatma.
+- **Siyah/mavi ekranlar (gidi-gelen konsol):** Windows Terminal varsay─▒lan terminal oldu─şunda
+  g├Ârev konsolunu Terminal bar─▒nd─▒r─▒yor, `-WindowStyle Hidden` yok say─▒l─▒yordu ÔåÆ kullan─▒c─▒
+  g├Ârevleri art─▒k `wscript.exe` + yeni `host/Start-Hidden.vbs` ile ba┼şlat─▒l─▒yor (pencere hi├ğ olu┼şmuyor).
+- **Panel erken kapanmas─▒:** `ShutdownMode=OnExplicitShutdown` yap─▒ld─▒; son pencere kapansa bile
+  tepsi ve izleme ayakta kal─▒r. Ayr─▒ca aray├╝zdispatcher hata yakalay─▒c─▒s─▒ `add_UnhandledException`
+  ile kuruluyor (`.UnhandledException.Add(...)` PowerShell'de null d├Ân├╝yordu ve iz b─▒rakm─▒yordu).
 
-### Düzeltilen
-- **IP erişimi probu tek adrese bakıyordu:** kurumsal duvarda `1.1.1.1` kapalıysa satır sürekli
-  kırmızı kalıyordu → `9.9.9.9 → 1.1.1.1 → 8.8.8.8` yedek listesi; panel aktif IP'yi gösterir
-  (`iphost` metriği).
-- **TIME_WAIT sayacı port numarasını okuyordu:** `netstat -s` çıktısındaki ilk TIME_WAIT satırının
-  portu (örn. 58631) sayaç sanılıyordu → `netstat -ano` satır sayımına geçildi (host + teşhis raporu).
-- **"Ağ adaptörü/link olayı" boot kayıtlarını sayıyordu:** System `27/32` ID'leri çekirdek-boot
-  kaynaklıydı → `Kernel-Boot` sağlayıcısı filtrelendi.
-- **Teşhis raporu DNS hatası hep 0 gösteriyordu:** kanal adı yanlıştı
-  (`DNS-Client Events/Operational` → `DNS-Client/Operational`).
-- **IP erişimi etiketi yazım hatası:** `(DNS bağığı değil)` → `(DNS bagimsiz, dogrudan IP)`.
+### D├╝zeltilen
+- **IP eri┼şimi probu tek adrese bak─▒yordu:** kurumsal duvarda `1.1.1.1` kapal─▒ysa sat─▒r s├╝rekli
+  k─▒rm─▒z─▒ kal─▒yordu ÔåÆ `9.9.9.9 ÔåÆ 1.1.1.1 ÔåÆ 8.8.8.8` yedek listesi; panel aktif IP'yi g├Âsterir
+  (`iphost` metri─şi).
+- **TIME_WAIT sayac─▒ port numaras─▒n─▒ okuyordu:** `netstat -s` ├ğ─▒kt─▒s─▒ndaki ilk TIME_WAIT sat─▒r─▒n─▒n
+  portu (├Ârn. 58631) saya├ğ san─▒l─▒yordu ÔåÆ `netstat -ano` sat─▒r say─▒m─▒na ge├ğildi (host + te┼şhis raporu).
+- **"A─ş adapt├Âr├╝/link olay─▒" boot kay─▒tlar─▒n─▒ say─▒yordu:** System `27/32` ID'leri ├ğekirdek-boot
+  kaynakl─▒yd─▒ ÔåÆ `Kernel-Boot` sa─şlay─▒c─▒s─▒ filtrelendi.
+- **Te┼şhis raporu DNS hatas─▒ hep 0 g├Âsteriyordu:** kanal ad─▒ yanl─▒┼şt─▒
+  (`DNS-Client Events/Operational` ÔåÆ `DNS-Client/Operational`).
+- **IP eri┼şimi etiketi yaz─▒m hatas─▒:** `(DNS ba─ş─▒─ş─▒ de─şil)` ÔåÆ `(DNS bagimsiz, dogrudan IP)`.
 
 ## [1.0.1] - 2026-09-28
 
-### Düzeltilen
-- **Panel hiç başlamıyordu (tepsi simgesi çıkmıyordu):** açılışta `$w.add_DispatcherUnhandledException(...)`
-  çağrılıyordu; bu metot `Window` sınıfında yoktur (dispatcher'a aittir). Hata non-terminating olduğu
-  için akış devam ediyor, ancak ikinci hata (`$script:Win` null) yüzünden süreç kapanıyordu. Doğru yol
-  kullanıldı: `$script:Win.Dispatcher.UnhandledException.Add(...)` ve dosya sonundaki **mükerrer** kayıt
-  kaldırıldı. Ayrıca aynı dosyada ikinci bir hata yakalayıcı daha vardı; tek merkezî kayıt bırakıldı.
-  (Bu hata `v1.0.0`'da mevcuttu; `Test-UI`/`Test-All` yeşil olduğu için gözden kaçmıştı — artık
-  `-SelfTest` çıktısında `add_Dispatcher` hatası aranır.)
+### D├╝zeltilen
+- **Panel hi├ğ ba┼şlam─▒yordu (tepsi simgesi ├ğ─▒km─▒yordu):** a├ğ─▒l─▒┼şta `$w.add_DispatcherUnhandledException(...)`
+  ├ğa─şr─▒l─▒yordu; bu metot `Window` s─▒n─▒f─▒nda yoktur (dispatcher'a aittir). Hata non-terminating oldu─şu
+  i├ğin ak─▒┼ş devam ediyor, ancak ikinci hata (`$script:Win` null) y├╝z├╝nden s├╝re├ğ kapan─▒yordu. Do─şru yol
+  kullan─▒ld─▒: `$script:Win.Dispatcher.UnhandledException.Add(...)` ve dosya sonundaki **m├╝kerrer** kay─▒t
+  kald─▒r─▒ld─▒. Ayr─▒ca ayn─▒ dosyada ikinci bir hata yakalay─▒c─▒ daha vard─▒; tek merkez├« kay─▒t b─▒rak─▒ld─▒.
+  (Bu hata `v1.0.0`'da mevcuttu; `Test-UI`/`Test-All` ye┼şil oldu─şu i├ğin g├Âzden ka├ğm─▒┼şt─▒ ÔÇö art─▒k
+  `-SelfTest` ├ğ─▒kt─▒s─▒nda `add_Dispatcher` hatas─▒ aran─▒r.)
 
 ## [1.0.0] - 2026-09-28
 
-İlk kamuya açık sürüm. Windows + PowerShell 5.1, harici modül yok.
+─░lk kamuya a├ğ─▒k s├╝r├╝m. Windows + PowerShell 5.1, harici mod├╝l yok.
 
 ### Eklenen
-- **İki katmanlı watchdog**: uzak makinede (SYSTEM) kontrol + kademeli onarım + restart politikası;
-  kendi bilgisayarında istemci (TCP yoklama, kopma alarmı, RDP/tarayıcı otomatik açma).
-- **Kademeli ağ onarımı**: DNS önbelleği → DHCP yenileme → adaptör/sürücü → servis →
-  winsock/IP sıfırlama. Her kademeden sonra tekrar ölçer, sağlıklı olunca durur.
-- **Canlı onarım penceresi**: "Ağı onar" düğmesi ayrı pencere açar, sistem günlüğünden satırlar
-  700 ms'de bir akar (`[WARN] elle ag onarimi basladi…` → `kademe N uygulandi` → `ag onarimi bitti`).
-- **UAC'siz onarım**: istek `repair-request.json`'a yazılır; `RemoteHostRepair` (tetikleyicisiz) ve
-  `RemoteHostRepairWatch` (60 sn) görevleri SYSTEM'de uygular. Görev yoksa görevi elle de
-  başlatılabilir (`-RepairNetwork -Rung N`).
-- **WPF kontrol paneli** (tek dosya, XAML): Durum / Bekleyen işler / Ayarlar / Günlük sekmeleri,
-  sistem tepsisi simgesi (renkli), üstte canlı sayaç, koyu tema, proje simgesi (`ui/app.ico`).
-- **Restart politikası**: blackout penceresi (varsayılan 18:00→08:00 + Cmt/Paz), tatil modu,
+- **─░ki katmanl─▒ watchdog**: uzak makinede (SYSTEM) kontrol + kademeli onar─▒m + restart politikas─▒;
+  kendi bilgisayar─▒nda istemci (TCP yoklama, kopma alarm─▒, RDP/taray─▒c─▒ otomatik a├ğma).
+- **Kademeli a─ş onar─▒m─▒**: DNS ├Ânbelle─şi ÔåÆ DHCP yenileme ÔåÆ adapt├Âr/s├╝r├╝c├╝ ÔåÆ servis ÔåÆ
+  winsock/IP s─▒f─▒rlama. Her kademeden sonra tekrar ├Âl├ğer, sa─şl─▒kl─▒ olunca durur.
+- **Canl─▒ onar─▒m penceresi**: "A─ş─▒ onar" d├╝─şmesi ayr─▒ pencere a├ğar, sistem g├╝nl├╝─ş├╝nden sat─▒rlar
+  700 ms'de bir akar (`[WARN] elle ag onarimi basladiÔÇĞ` ÔåÆ `kademe N uygulandi` ÔåÆ `ag onarimi bitti`).
+- **UAC'siz onar─▒m**: istek `repair-request.json`'a yaz─▒l─▒r; `RemoteHostRepair` (tetikleyicisiz) ve
+  `RemoteHostRepairWatch` (60 sn) g├Ârevleri SYSTEM'de uygular. G├Ârev yoksa g├Ârevi elle de
+  ba┼şlat─▒labilir (`-RepairNetwork -Rung N`).
+- **WPF kontrol paneli** (tek dosya, XAML): Durum / Bekleyen i┼şler / Ayarlar / G├╝nl├╝k sekmeleri,
+  sistem tepsisi simgesi (renkli), ├╝stte canl─▒ saya├ğ, koyu tema, proje simgesi (`ui/app.ico`).
+- **Restart politikas─▒**: blackout penceresi (varsay─▒lan 18:00ÔåÆ08:00 + Cmt/Paz), tatil modu,
   devre kesici (`MaxRestartsPerDay`, `RebootCooldownMinutes`, `MinUptimeMinutes`).
-- **Veri kaybı koruması**: `Protect-OpenDocuments.ps1` kaydedilmemiş Word/Excel belgelerini
-  periyodik kaydeder, AutoRecover'ı kısaltır, reboot'u kaydedilmemiş belge varsa iptal eder.
-- **Alarm**: Telegram (durum değişimi + tekrarlı uyarı), healthchecks.io heartbeat, teşhis raporu
-  (`host/Collect-Diagnostics.ps1`, 14 günlük olay günlüğü analizi).
-- **Veri sözleşmesi**: `lib/Contract.ps1` — `last-run.json` sadece `Write-Status`/`Read-Status` ile
-  yazılır/okunur, `schemaVersion` damgalı, geriye dönük normalizasyonlu.
-- **Ortak katman**: `lib/Common.ps1` (JSON/TCP/gün dönüşümü), `lib/Settings.ps1` (65 ayar + 11 balon).
+- **Veri kayb─▒ korumas─▒**: `Protect-OpenDocuments.ps1` kaydedilmemi┼ş Word/Excel belgelerini
+  periyodik kaydeder, AutoRecover'─▒ k─▒salt─▒r, reboot'u kaydedilmemi┼ş belge varsa iptal eder.
+- **Alarm**: Telegram (durum de─şi┼şimi + tekrarl─▒ uyar─▒), healthchecks.io heartbeat, te┼şhis raporu
+  (`host/Collect-Diagnostics.ps1`, 14 g├╝nl├╝k olay g├╝nl├╝─ş├╝ analizi).
+- **Veri s├Âzle┼şmesi**: `lib/Contract.ps1` ÔÇö `last-run.json` sadece `Write-Status`/`Read-Status` ile
+  yaz─▒l─▒r/okunur, `schemaVersion` damgal─▒, geriye d├Ân├╝k normalizasyonlu.
+- **Ortak katman**: `lib/Common.ps1` (JSON/TCP/g├╝n d├Ân├╝┼ş├╝m├╝), `lib/Settings.ps1` (65 ayar + 11 balon).
 - **Testler**: `tests/Test-All.ps1` (118 kontrol) ve `tests/Test-UI.ps1` (23 kontrol, WPF'yi
-  pencere göstermeden kurup gerçek `Click` gönderir). CI: `.github/workflows/tests.yml`
-  (push/PR'da Windows runner'da çalışır).
-- **Dış izleyici**: `.github/workflows/machine-health.yml` saatte 2 kez GitHub'dan makineyi yoklar,
-  yanıt vermezse Telegram'a uyarır (makine kapalı/internetsiz durumunun tek yakalayıcısı).
-- **Katkı altyapısı**: MIT lisansı, `CONTRIBUTING.md` / `README.en.md` / `SECURITY.md`,
-  issue + PR şablonları, sürüm tutarlılık testi.
+  pencere g├Âstermeden kurup ger├ğek `Click` g├Ânderir). CI: `.github/workflows/tests.yml`
+  (push/PR'da Windows runner'da ├ğal─▒┼ş─▒r).
+- **D─▒┼ş izleyici**: `.github/workflows/machine-health.yml` saatte 2 kez GitHub'dan makineyi yoklar,
+  yan─▒t vermezse Telegram'a uyar─▒r (makine kapal─▒/internetsiz durumunun tek yakalay─▒c─▒s─▒).
+- **Katk─▒ altyap─▒s─▒**: MIT lisans─▒, `CONTRIBUTING.md` / `README.en.md` / `SECURITY.md`,
+  issue + PR ┼şablonlar─▒, s├╝r├╝m tutarl─▒l─▒k testi.
 
-### Düzeltilen (bu sürümde çözülen önemli hatalar)
-- `-RepairNetwork` isteği 5 dakika bekliyordu: ana görev `MultipleInstances=IgnoreNew` olduğu için
-  çalışırken başlatılamıyordu, ayrıca normal kullanıcı SYSTEM görevini adıyla başlatamıyordu →
-  on-demand + 60 sn'lik izleyici görevleri eklendi.
-- 60 sn'lik izleyici `last-run.json`'u kontrol listesi olmadan yazıyordu (panelde "kontrol yok") →
+### D├╝zeltilen (bu s├╝r├╝mde ├ğ├Âz├╝len ├Ânemli hatalar)
+- `-RepairNetwork` iste─şi 5 dakika bekliyordu: ana g├Ârev `MultipleInstances=IgnoreNew` oldu─şu i├ğin
+  ├ğal─▒┼ş─▒rken ba┼şlat─▒lam─▒yordu, ayr─▒ca normal kullan─▒c─▒ SYSTEM g├Ârevini ad─▒yla ba┼şlatam─▒yordu ÔåÆ
+  on-demand + 60 sn'lik izleyici g├Ârevleri eklendi.
+- 60 sn'lik izleyici `last-run.json`'u kontrol listesi olmadan yaz─▒yordu (panelde "kontrol yok") ÔåÆ
   `Write-RepairStatusPatch` ile mevcut `checks`/`state`/`config` korunuyor.
-- Canlı onarım penceresi **X ile kapatılınca** bir sonraki tıklamada açılmıyordu (düğme
-  "Onarılıyor..."'da kalıyordu) → pencere canlılığı kontrolü + `Closed` olayı.
-- `Complete-ManualCheck` işlem düğmesi listesini boşaltıyordu → aksiyon çubuğu renk/erişim
-  güncellemesini kaybediyordu.
-- `Test-UI.ps1` `Get-Json`'u yüklemiyordu → bir kontrol sessizce hiç çalışmıyordu; artık iki suite
-  de sonunda "tanımsız komut" taraması yapıyor.
-- Açılışta 25 sn sonra otomatik başlayan 11 balonluk yardım turu kaldırıldı; balon bildirimleri
-  varsayılan kapalı.
-- Bağlantılar sayfasında üst bar + sayaç yüzünden dikey kaydırma çubuğu (217 px) → 0 px.
-- Pencere simgesi PowerShell amblemi iken proje simgesine (`ui/app.ico`) çevrildi.
+- Canl─▒ onar─▒m penceresi **X ile kapat─▒l─▒nca** bir sonraki t─▒klamada a├ğ─▒lm─▒yordu (d├╝─şme
+  "Onar─▒l─▒yor..."'da kal─▒yordu) ÔåÆ pencere canl─▒l─▒─ş─▒ kontrol├╝ + `Closed` olay─▒.
+- `Complete-ManualCheck` i┼şlem d├╝─şmesi listesini bo┼şalt─▒yordu ÔåÆ aksiyon ├ğubu─şu renk/eri┼şim
+  g├╝ncellemesini kaybediyordu.
+- `Test-UI.ps1` `Get-Json`'u y├╝klemiyordu ÔåÆ bir kontrol sessizce hi├ğ ├ğal─▒┼şm─▒yordu; art─▒k iki suite
+  de sonunda "tan─▒ms─▒z komut" taramas─▒ yap─▒yor.
+- A├ğ─▒l─▒┼şta 25 sn sonra otomatik ba┼şlayan 11 balonluk yard─▒m turu kald─▒r─▒ld─▒; balon bildirimleri
+  varsay─▒lan kapal─▒.
+- Ba─şlant─▒lar sayfas─▒nda ├╝st bar + saya├ğ y├╝z├╝nden dikey kayd─▒rma ├ğubu─şu (217 px) ÔåÆ 0 px.
+- Pencere simgesi PowerShell amblemi iken proje simgesine (`ui/app.ico`) ├ğevrildi.
 
 [1.1.0]: https://github.com/ferden51/remote-watchdog/releases/tag/v1.1.0
 [1.0.1]: https://github.com/ferden51/remote-watchdog/releases/tag/v1.0.1
