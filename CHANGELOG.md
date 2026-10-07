@@ -4,6 +4,79 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [Unreleased] — Planlanan (v1.4.0 hedefi)
+
+Bu bölüm **yapılacak** işleri tutar; henüz uygulanmamıştır. Her madde tek bir commit ile
+kapatılır ve ilgili regresyon testi eklenir.
+
+### 🔴 Kritik — güvenlik
+
+**1. Telegram token'ları düz metin saklanıyor (config.json + komut satırı sızıntısı)**
+
+- **Bulgu:** `config.json` içindeki `TelegramToken` şifreli değil; dosya ACL'i
+  `BUILTIN\Users → ReadAndExecute` verdiği için **her yerel kullanıcı okuyabilir**. Ayrıca
+  `install\Install-Host.ps1` ve `host\RemoteHostWatchdog.ps1 -Install` token'ı **komut
+  satırından** geçiriyor; işlem listesi (`Get-Process`, Task Manager) ve 4688 olay günlüğü
+  üzerinden sızabilir. `Send-Telegram` her çağrıda bu değeri okuyor.
+- **Çözüm:**
+  1. Token'ı **DPAPI** ile koru: `ConvertFrom-SecureString` / `ConvertTo-SecureString`
+     (`-Key` veya makine/servis kapsamı). `Get-Config` okurken çözer, `Set-Config`
+     yazarken şifreler. Mevcut düz metin değerler ilk çalıştırmada otomatik dönüştürülür
+     (geriye dönük uyum).
+  2. Kurulum betiğinde `-TelegramToken` **komut satırından kaldır**; istenirse
+     `Read-Host -AsSecureString` ile veya tek seferlik `telegram-token.txt` dosyasından
+     okunup hemen silinerek alınır. `Get-CimInstance Win32_Process` çıktısında token
+     görünmemeli.
+  3. `Send-Telegram` içinde çağrı zincirine token sızdıran `Write-Log`/`Write-Host`
+     yokluğunu doğrula; hata mesajları URL içerebilir, `Send-Telegram`'e özel
+     log-redaksiyonu ekle.
+  4. `config.json` ACL'ini daralt: `BUILTIN\Users` → yalnızca okuma kalabilir ama token
+     alanı şifreli olacağı için asıl koruma DPAPI'de; yine de `icacls` ile
+     kullanıcıyı dosya sahibi yapar.
+
+**2. VBScript parametre enjeksiyonu (`host/Start-Hidden.vbs`)**
+
+- **Bulgu:** `Start-Hidden.vbs:29` → `cmd = cmd & " " & WScript.Arguments(i)`.
+  Argümanlar **tırnaksız** birleştiriliyor. Değer `&`, `|` veya `"` içerirse komut
+  enjeksiyonu olur. Betik yolu (`WScript.Arguments(0)`) doğru tırnaklı, **parametreler değil**.
+- **Çözüm:** Her argümanı çift tırnakla sar ve içteki `"` karakterlerini `""` ile kaçır:
+  ```vbscript
+  Function Quote(s)   ' VBScript'te Function: (Parametreler) yapisi farklidir
+      Quote = """" & Replace(CStr(s), """", """""") & """"
+  End Function
+  cmd = cmd & " " & Quote(WScript.Arguments(i))
+  ```
+  VBScript'te fonksiyon `Function Quote(s)` şeklinde tanımlanır; `Replace(s, find, replace)`
+  kullanılır. Ek olarak bu yol yalnızca **sabit, kod içinden** verilen argümanlarla
+  çağrıldığı için saldırı yüzeyi dardır — yine de savunma katmanı olarak kapatılmalıdır.
+
+**3. İndirilen dosya hash doğrulaması yok (MITM riski)**
+
+- **Bulgu:** `README.md:237` ve `:281` `irm https://raw.githubusercontent.com/... -OutFile`
+  ile tek satır indirme yapıyor ve indirilen betik `-ExecutionPolicy Bypass` ile
+  çalıştırılıyor. **Doğrulama yok**; ağ MITM'i veya ele geçirilmiş depo erişimi
+  keyfi kod çalıştırmaya yol açar. `irm` PowerShell 5.1'de TLS 1.2'yi zorlamaz.
+- **Çözüm:**
+  1. Kurulum talimatlarına indirme sonrası **SHA256 doğrulaması** ekle:
+     `irm <url> -OutFile f.tmp; (Get-FileHash f.tmp -Algorithm SHA256).Hash -eq <yayınlanan hash>`.
+     Hash'ler sürüm başına `host/RemoteHostWatchdog.ps1.sha256` ve
+     `client/RemoteClientWatchdog.ps1.sha256` dosyalarında tutulur; kurulum betikleri
+     `New-SoundPack.ps1 -Verify` benzeri bir `-Verify` adımıyla bunları doğrular.
+  2. `irm` yerine `[Net.ServicePointManager]::SecurityProtocol = Tls12` zorlayan bir
+     yardımcı kullan (betiklerde zaten var) ve indirmeyi TLS 1.2'ye sabitle.
+  3. Kurulum betiklerine `-VerifyHash` seçeneği: sağlama başarısızsa **kurulumu durdur**.
+  4. Uzun vadede imzalı yayın (GitHub Release + `minisign`/GPG) tercih edilebilir; ancak
+     DPAPI/ACL zorunlu olduğu için hash doğrulaması asgari çözümdür.
+
+### Notlar / izleme maddeleri
+
+- `Verify-OutageLogic.ps1` bu ortamda önceden mevcut olan **5 kırmızı** test içeriyor
+  (bütçe mutabakatı / `MinOutageMinutes` eşiği). v1.3.2 ve öncesi `HEAD` sürümlerinde de
+  aynı 5 test kırmızı; v1.4.0'da ayrı bir iş olarak ele alınacak.
+- `Test-SystemWatchdogActive` yanlış pozitif verebiliyor (bkz. 1.3.2 "Bilinen").
+- `host/Enable-ConsoleAutoLogon.ps1` parolayı registry'de düz metin saklıyor
+  (opt-in, riskli) — bu planın kapsamı dışında ama bilinçli bir istisna olarak duruyor.
+
 ## [1.3.2] - 2026-10-01
 
 Bu sürüm, 30.09 22:48 – 01.10 05:25 arasında yaşanan **6,5 saatlik kesintide restart'ın
