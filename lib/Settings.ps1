@@ -64,6 +64,7 @@ function Get-SettingsDefs { return @(
     @{ Sec = 'Bildirim'; Key = 'SesEfektleriVolume'; Title = 'Efekt ses seviyesi (0-100, 0 = efektler kapalı)'; Type = 'int' }
     @{ Sec = 'Bildirim'; Key = 'LogGunDays'; Title = 'Günlük kaç gün saklansın (0 = sadece mevcut dosya)'; Type = 'int' }
     @{ Sec = 'Bildirim'; Key = 'LogDosyaMB'; Title = 'Günlük dosyası kaç MB olunca arşivlensin'; Type = 'int' }
+@{ Sec = 'Bildirim'; Key = 'DiskUyariMB'; Title = 'Boş disk alanı bu MB altına düşünce uyarı ver (0 = kapalı)'; Type = 'int' }
 
     @{ Sec = 'TATIL'; Type = 'section' }
     @{ Sec = 'Tatil'; Key = 'HolidayMode'; Title = 'Tatil modu (full = tam blackout)'; Type = 'enum'; Options = @('full', 'default', 'none') }

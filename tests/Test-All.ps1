@@ -295,6 +295,29 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'panel bayat dosyayla geri sayimli modal ACMIYOR' ($panelText -match '(?s)function Show-RebootModal.*BAYAT reboot-pending.*return')
     Ok 'panel -Check modunda bayat temizligi yapmiyor' ($hostText -match 'if \(-not \$Check\) \{ try \{ Clear-StaleRebootPending')
     <#
+        REGRESYON (I/O): client Write-Log her satirda TUM dosyayi okuyup bastan yaziyordu
+        (3000 satir esigi). Istemci 10 dk'da bir calistigi icin bu, dongu basina tam
+        dosya taramasi + yeniden yazma demekti. Host 1.3.1'de boyut tabanli rotasyona
+        gecmisti; istemci de ayni modeli kullanmali.
+    #>
+    Ok 'client Write-Log artik dosyayi her satirda okumuyor' ($clientText2 -notmatch 'Get-Content -LiteralPath \$LogFile -Encoding UTF8\)')
+    Ok 'client Write-Log boyut tabanli rotasyon kullanıyor' (($clientText2 -match 'function Rotate-LogIfNeeded') -and ($clientText2 -match 'Rotate-LogIfNeeded'))
+    Ok 'client log arsivi klasoru tanimli' ($clientText2 -match "\`$LogDir = Join-Path \`$BaseDir 'log'")
+    Ok 'client eski log arsivlerini temizliyor' ($clientText2 -match 'function Remove-OldLogFiles')
+    <#  Telegram gonderimi SENKRON donguyu blokluyordu (TimeoutSec 15); ustelik tam da ag
+        koptugunda cagriliyor. Kisa timeout + dongu basina devre kesici. #>
+    Ok 'host Telegram zaman asimi 15 sn degil (bloklamaz)' ($hostText -match "(?s)function Send-Telegram.*TimeoutSec 8")
+    Ok 'host Telegram devre kesicisi var (dongude tekrar denemez)' (($hostText -match '\$script:TelegramKacti') -and ($hostText -match '(?s)function Send-Telegram.*TelegramKacti'))
+    Ok 'istemci Telegram zaman asimi 15 sn degil' ($clientText2 -match "(?s)function Send-Telegram.*TimeoutSec 8")
+    Ok 'istemci Telegram devre kesicisi var' ($clientText2 -match '\$script:TelegramKacti')
+    <#  Disk dolulugu hic denetlenmiyordu: disk %100 dolunca log/state yazimi sessizce
+        basarisiz olur ve watchdog "sessizce olu" hale gelir. Yalnizca uyari uretir. #>
+    Ok 'host disk bosluk kontrolu var (Test-DiskSpace)' ($hostText -match 'function Test-DiskSpace')
+    Ok 'host disk kontrolu dongu basinda cagriliyor' ($hostText -match '(?s)dongu basladi.{0,900}Test-DiskSpace')
+    $dsFn = [regex]::Match($hostText, '(?s)function Test-DiskSpace.*?\r?\n}\r?\n')
+    Ok 'host disk kontrolu hicbir sey SILMIYOR (veri kaybi riski yok)' ($dsFn.Success -and ($dsFn.Value -notmatch 'Remove-Item'))
+    Ok 'host disk esigi ayarlanabilir (DiskUyariMB)' ($hostText -match 'DiskUyariMB = ')
+    <#
         REGRESYON 1 (gece olayi): geri sayim dongusu Invoke-Probe/Invoke-WebRequest
         kullaniyordu; -TimeoutSec DNS beklemesini KAPSAMAZ, yonlendirici asili
         kalinca tek cagri 11-30 sn blokladi. Sonuc: 325 kez "geri sayimi basladi",

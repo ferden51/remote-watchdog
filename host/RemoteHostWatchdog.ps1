@@ -128,6 +128,36 @@ function Rotate-LogIfNeeded {
     } catch { }
 }
 
+function Test-DiskSpace {
+    <#
+        DISK DOLULUK KORUMASI. Log rotasyonu var ama ana diskin bos alani HICBIR denetlenmiyordu.
+        Disk %100 doldugunda Add-Content / Set-Content sessizce basarisiz olur: log yazimi,
+        last-run.json ve host-state.json yazilamaz -> watchdog "sessizce olu" hale gelir
+        (bulgular state'e yazilamaz, panel veri gormez) ve restart butcesi bozulur.
+        Yalnizca UYARI uretir, hicbir seyi SILLMEZ (veri kaybi riski olmasin diye).
+        Esik: Varsayilan 500 MB altinda "kritik", 2000 MB altinda "uyari".
+    #>
+    $minCritical = 500MB
+    try { if ($global:cfg.PSObject.Properties.Name -contains 'DiskUyariMB') { $minCritical = [int]$global:cfg.DiskUyariMB * 1MB } } catch { }
+    if ($minCritical -lt 50MB) { $minCritical = 500MB }
+    try {
+        $root = [IO.Path]::GetPathRoot($BaseDir)
+        if (-not $root) { $root = 'C:\' }
+        $s = Get-CimInstance -ClassName Win32_LogicalDisk -Filter ("DeviceID='" + $root.TrimEnd('\') + "'") -ErrorAction Stop
+        if (-not $s -or $null -eq $s.FreeSpace) { return }
+        $free = [int64]$s.FreeSpace
+        if ($free -ge $minCritical) { $script:DiskUyariAt = ''; return }
+        # Disk gercekten dolu: bir kez uyari ver, her dongude spam yapma.
+        $uyariMB = [int][math]::Round(($minCritical * 4) / 1MB)
+        if ($free -ge $uyariMB) { return }
+        $anahtar = 'disk-dolu'
+        if ($script:DiskUyariAt -ne $anahtar) {
+            $script:DiskUyariAt = $anahtar
+            Write-Log 'ALERT' ('DISK ALANI YETERSIZ: ' + [int][math]::Round(($free / 1MB)) + ' MB bos. Log/state yazimi basarisiz olabilir; butce ve gecmis kayitlar kaybolur. En eski log arsivlerini silin.')
+        }
+    } catch { }
+}
+
 function Write-Log {
     param([string]$Level = 'INFO', [string]$Message)
     $line = '{0} [{1}] {2}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $Level.ToUpperInvariant(), $Message
@@ -191,6 +221,7 @@ function Get-Config {
         EkranMesaji = $true
         LogGunDays = 30
         LogDosyaMB = 2
+        DiskUyariMB = 500
         SesEfektleri = $true
         SesEfektleriVolume = 80
         ForceRestartAlways = $false
@@ -914,9 +945,23 @@ function Send-Telegram {
     param([string]$Text)
     $cfg = $global:cfg
     if (-not $cfg.TelegramToken -or -not $cfg.TelegramChatId) { return }
+    <#
+        BLOKLAYAN CAGRI AZALTILDI. Telegram gonderimi watchdog dongusunu senkron
+        bekletiyordu (-TimeoutSec 15). Ustelik TAM DA ag koptugunda cagriliyor; yani
+        beklenecek en cok durumda 15 sn donuyordu. Iki onlem:
+          1) Zaman asimi 8 sn'ye indirildi (normal API cagrisi ~1 sn).
+          2) DEVRE KESICI: bu surecte bir kez basarisiz olursa sonraki cagrilar ATLANIR
+             (surec 5-10 kez Send-Telegram cagirabilir; her biri ayri ayri 8 sn beklemesin).
+        Is-kritik yollar (restart geri sayimi, belgeleri kaydetme) mesaj gonderimini
+        ASLA beklemez; bu yuzden bekleme burada sinirli kalmalidir.
+    #>
+    if ($script:TelegramKacti) { return }
     try {
-        Invoke-RestMethod -Method Post -Uri ('https://api.telegram.org/bot' + $cfg.TelegramToken + '/sendMessage') -Body @{ chat_id = $cfg.TelegramChatId; text = $Text } -TimeoutSec 15 -ErrorAction Stop | Out-Null
-    } catch { Write-Log 'WARN' ('telegram gonderilemedi: ' + $_.Exception.Message) }
+        Invoke-RestMethod -Method Post -Uri ('https://api.telegram.org/bot' + $cfg.TelegramToken + '/sendMessage') -Body @{ chat_id = $cfg.TelegramChatId; text = $Text } -TimeoutSec 8 -ErrorAction Stop | Out-Null
+    } catch {
+        $script:TelegramKacti = $true
+        Write-Log 'WARN' ('telegram gonderilemedi (bu dongude tekrar denenmeyecek): ' + $_.Exception.Message)
+    }
 }
 
 function Invoke-Alerts {
@@ -2158,6 +2203,9 @@ function Invoke-Watchdog {
     Write-Log 'INFO' ('dongu basladi | admin=' + (Test-Admin) + ' | rapor=' + $Check.IsPresent + ' | uptime=' + (Get-UptimeMinutes) + 'dk')
     # ONCE bayat restart bildirimini temizle: panel bu dosyayi gorup yanlis modal acmasin.
     if (-not $Check) { try { Clear-StaleRebootPending } catch { Write-Log 'WARN' ('bayat pending temizligi hatasi: ' + $_.Exception.Message) } }
+    # Disk bos alani denetimi: dolu diskte state/log yazimi sessizce basarisiz olur ve
+    # watchdog "sessizce olu" hale gelir. Yalnizca uyari uretir, hicbir sey silmez.
+    if (-not $Check) { try { Test-DiskSpace } catch { } }
     <#
         ANA SYSTEM GÖREVİ KENDİNİ ONARIR. Gerekçe: bu görev silinirse (kurulum
         sırasında, güncellemede veya elle) watchdog yalnızca açık oturuma bağımlı

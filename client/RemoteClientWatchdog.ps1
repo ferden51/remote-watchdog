@@ -39,6 +39,7 @@ $ErrorActionPreference = 'Continue'
 $ScriptPath = $PSCommandPath
 $BaseDir = Join-Path $env:LOCALAPPDATA 'RemoteClientWatchdog'
 $LogFile = Join-Path $BaseDir 'client-watchdog.log'
+$LogDir = Join-Path $BaseDir 'log'
 $StateFile = Join-Path $BaseDir 'state.json'
 $ConfigFile = Join-Path $BaseDir 'config.json'
 $TaskName = 'RemoteClientWatchdog'
@@ -58,6 +59,8 @@ function Get-Config {
         HeartbeatUrl = ''
         HeartbeatFailPath = '/fail'
         AlertRepeatHours = 3
+        LogDosyaMB = 2
+        LogGunDays = 14
     }
     if (Test-Path -LiteralPath $ConfigFile) {
         try {
@@ -74,14 +77,48 @@ function Save-Config {
     $Cfg | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $ConfigFile -Encoding UTF8
 }
 
+function Remove-OldLogFiles {
+    <#  LogGunDays gunden eski arsivleri siler. #>
+    $days = 14
+    try { if ($global:cfg.PSObject.Properties.Name -contains 'LogGunDays') { $days = [int]$global:cfg.LogGunDays } } catch { }
+    if ($days -le 0) { return }
+    try {
+        $cut = (Get-Date).AddDays(-$days)
+        foreach ($f in @(Get-ChildItem -LiteralPath $LogDir -Filter 'client-watchdog-*.log' -ErrorAction SilentlyContinue)) {
+            if ($f.LastWriteTime -lt $cut) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+        }
+    } catch { }
+}
+
+function Rotate-LogIfNeeded {
+    <#
+        Gunluk + BOYUT tabanli rotasyon.
+        ONCEDEN: her log satirinda dosyanin TAMAMI okunuyor, dizi kirpiliyor ve bastan
+        yaziliyordu. 3000 satir asilca -> istemci her 10 dakikada calistigi icin bu,
+        dongu basina tam dosya taramasi + yeniden yazma demekti: asil I/O darbozazi.
+        Host tarafi 1.3.1'de ayni sorunu boyut tabanli rotasyonla cozdu; istemci de
+        simdi ayni modeli kullaniyor -> normalde hic okuma yok, sadece bir Get-Item.
+    #>
+    $maxBytes = 2MB
+    try { if ($global:cfg.PSObject.Properties.Name -contains 'LogDosyaMB') { $maxBytes = [int]$global:cfg.LogDosyaMB * 1MB } } catch { }
+    if ($maxBytes -lt 256KB) { $maxBytes = 2MB }
+    try {
+        if (-not (Test-Path -LiteralPath $LogFile)) { return }
+        if ((Get-Item -LiteralPath $LogFile).Length -lt $maxBytes) { return }
+        if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Force -Path $LogDir | Out-Null }
+        $arch = Join-Path $LogDir ('client-watchdog-' + (Get-Date).ToString('yyyyMMdd-HHmmss') + '.log')
+        Move-Item -LiteralPath $LogFile -Destination $arch -Force -ErrorAction Stop
+        Remove-OldLogFiles
+    } catch { }
+}
+
 function Write-Log {
     param([string]$Level = 'INFO', [string]$Message)
     $line = '{0} [{1}] {2}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $Level.ToUpperInvariant(), $Message
     try {
         if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
         Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8
-        $all = @(Get-Content -LiteralPath $LogFile -Encoding UTF8)
-        if ($all.Count -gt 3000) { $all[($all.Count - 2000)..($all.Count - 1)] | Set-Content -LiteralPath $LogFile -Encoding UTF8 }
+        Rotate-LogIfNeeded
     } catch { }
     Write-Host $line
 }
@@ -188,9 +225,15 @@ function Send-Telegram {
     param([string]$Text)
     $cfg = $global:cfg
     if (-not $cfg.TelegramToken -or -not $cfg.TelegramChatId) { return }
+    <#  Zaman asimi 15 -> 8 sn + devre kesici: gonderim senkron donguyu bloklamasin,
+        bir kez basarisiz olunca bu surecte tekrar denenmesin. Detay: host ayni desen. #>
+    if ($script:TelegramKacti) { return }
     try {
-        Invoke-RestMethod -Method Post -Uri ('https://api.telegram.org/bot' + $cfg.TelegramToken + '/sendMessage') -Body @{ chat_id = $cfg.TelegramChatId; text = $Text } -TimeoutSec 15 -ErrorAction Stop | Out-Null
-    } catch { Write-Log 'WARN' ('telegram gonderilemedi: ' + $_.Exception.Message) }
+        Invoke-RestMethod -Method Post -Uri ('https://api.telegram.org/bot' + $cfg.TelegramToken + '/sendMessage') -Body @{ chat_id = $cfg.TelegramChatId; text = $Text } -TimeoutSec 8 -ErrorAction Stop | Out-Null
+    } catch {
+        $script:TelegramKacti = $true
+        Write-Log 'WARN' ('telegram gonderilemedi (bu dongude tekrar denenmeyecek): ' + $_.Exception.Message)
+    }
 }
 
 function Invoke-Alerts {
