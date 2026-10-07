@@ -2,6 +2,123 @@
 # Dot-source edilir:  . <repo>\lib\Common.ps1
 # Bu dosya veri yazmaz; sadece okuma/yazma yardimcilari ve donusumleri icerir.
 
+# =====================================================================
+# GIZLI DEGERLER (DPAPI) - v1.4.0
+# ---------------------------------------------------------------------
+# Neden: Telegram bot token'i config.json'da DUZ METIN saklaniyordu. Dosya ACL'i
+# BUILTIN\Users -> ReadAndExecute veriyordu, yani HER yerel kullanici okuyabiliyordu;
+# ayrica kurulum betigi token'i komut satirindan geciriyordu (islem listesi + 4688
+# olay gunlugu sizintisi).
+#
+# KAPSAM NEDEN LocalMachine: config.json'u PANEL (kullanici hesabi) yaziyor ama
+# SYSTEM'deki watchdog OKUYOR. CurrentUser kapsami kullaniciya ozel oldugu icin
+# SYSTEM ayni makinede cozemezdi -> alarm sessizce susardi. LocalMachine kapsami
+# makine anahtariyla korur ve her iki hesap da cozer; sifreli metin baska makineye
+# tasinsa COZULEMEZ (yedek/ekip paylasimi sizintisi engellenir).
+#
+# Prefix: "dpapi:" - duz metin degerler ("123:ABC") onceden kayitlidir; okunurken
+# prefix yoksa DEGISMEDEN donulur (geriye donuk uyum, ilk calistirmada otomatik
+# donusum saglanir).
+# =====================================================================
+
+$script:RwSecretPrefix = 'dpapi:'
+
+function Initialize-RwCrypto {
+    <#  System.Security assembly'sini yukler (PS 5.1'de otomatik gelmeyebilir). #>
+    try {
+        Add-Type -AssemblyName System.Security -ErrorAction Stop
+        return $true
+    } catch { return $false }
+}
+
+function Protect-RwSecret {
+    <#
+        Duz metni sifreler (DPAPI LocalMachine). Bos/gecersiz girdi bos doner.
+        Cikis: "dpapi:<base64>"
+    #>
+    param([string]$Plain)
+    if ([string]::IsNullOrWhiteSpace($Plain)) { return '' }
+    if ($Plain.StartsWith($script:RwSecretPrefix)) { return $Plain }   # zaten sifreli
+    try {
+        if (-not (Initialize-RwCrypto)) { return $Plain }            # assembly yok: duz metin kalsin (veri kaybi olmasin)
+        $bytes = [Text.Encoding]::UTF8.GetBytes($Plain)
+        $enc = [System.Security.Cryptography.ProtectedData]::Protect(
+            $bytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+        return ($script:RwSecretPrefix + [Convert]::ToBase64String($enc))
+    } catch { return $Plain }
+}
+
+function Unprotect-RwSecret {
+    <#
+        Sifreli degeri cozer. Duz metin (prefix yok) DEGISMEDEN doner -> eski
+        config.json'lar ve elle girilmis degerler bozulmaz.
+    #>
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
+    if (-not $Value.StartsWith($script:RwSecretPrefix)) { return $Value }
+    try {
+        if (-not (Initialize-RwCrypto)) { return '' }
+        $raw = $Value.Substring($script:RwSecretPrefix.Length)
+        $bytes = [Convert]::FromBase64String($raw)
+        $dec = [System.Security.Cryptography.ProtectedData]::Unprotect(
+            $bytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+        return [Text.Encoding]::UTF8.GetString($dec)
+    } catch {
+        # Cozulemiyorsa (makine degisti, yedekten geri yuklendi) sessizce yutma:
+        # cagiran taraf "kirik" deger olarak bos gormeli, ham sifreli metni ASLA kullanmamali.
+        return ''
+    }
+}
+
+function Test-RwSecretProtected {
+    <#  Deger DPAPI ile korunmus mu? #>
+    param([string]$Value)
+    return (-not [string]::IsNullOrWhiteSpace($Value)) -and $Value.StartsWith($script:RwSecretPrefix)
+}
+
+function Protect-RwSecretInObject {
+    <#
+        Bir config nesnesinin (PSCustomObject / [ordered] hashtable) gizli alanlarini
+        sifreler. Alan adlari verilir. Alan yoksa dokunmaz.
+        Get-Config cikisinda cagrilir: config.json'a DUZ METIN sizmasin.
+    #>
+    param($Obj, [string[]]$Field = @('TelegramToken', 'TelegramChatId'))
+    if (-not $Obj) { return $Obj }
+    foreach ($f in $Field) {
+        try {
+            $has = $false
+            if ($Obj -is [System.Collections.IDictionary]) { $has = $Obj.Contains($f) }
+            elseif ($Obj.PSObject.Properties.Name -contains $f) { $has = $true }
+            if (-not $has) { continue }
+            $cur = [string]$Obj.$f
+            if ([string]::IsNullOrWhiteSpace($cur)) { continue }
+            $Obj.$f = Protect-RwSecret -Plain $cur
+        } catch { }
+    }
+    return $Obj
+}
+
+function Unprotect-RwSecretInObject {
+    <#
+        Ters islem: config.json'dan okunan degeri COZER. Boylece cagiran kod
+        ($cfg.TelegramToken) her zaman duz metin gorur, API cagrisi degismez.
+    #>
+    param($Obj, [string[]]$Field = @('TelegramToken', 'TelegramChatId'))
+    if (-not $Obj) { return $Obj }
+    foreach ($f in $Field) {
+        try {
+            $has = $false
+            if ($Obj -is [System.Collections.IDictionary]) { $has = $Obj.Contains($f) }
+            elseif ($Obj.PSObject.Properties.Name -contains $f) { $has = $true }
+            if (-not $has) { continue }
+            $cur = [string]$Obj.$f
+            if ([string]::IsNullOrWhiteSpace($cur)) { continue }
+            $Obj.$f = Unprotect-RwSecret -Value $cur
+        } catch { }
+    }
+    return $Obj
+}
+
 function Get-RwJson {
     <#  JSON dosyasi okur. Hata olursa null doner (cagiran taraf karar verir). #>
     param([Parameter(Mandatory = $true)][string]$Path)

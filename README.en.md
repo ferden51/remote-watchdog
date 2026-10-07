@@ -30,9 +30,16 @@ and `tests/` (regression suites).
 
 Copy or clone the whole folder to the target machine, then:
 
+> **Security: verify hashes before running anything.** The install scripts check every
+> file's SHA256 themselves and abort if anything fails. You can also run it manually:
+> `.\tools\Verify-Hashes.ps1` → expect `DOGRULAMA BASARILI` (use `-SkipHash` only when
+> installing from a copy you already trust). The Telegram bot token is stored DPAPI-
+> encrypted in `config.json` and is never passed on the command line.
+
 ### Remote PC (host, needs Administrator)
 
 ```powershell
+.\tools\Verify-Hashes.ps1
 powershell -ExecutionPolicy Bypass -File .\install\Install-Host.ps1 -TelegramToken '123:ABC' -TelegramChatId '456'
 ```
 

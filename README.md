@@ -233,18 +233,33 @@ Kaydet dediğinde `config.json` güncellenir, bir sonraki denetimde geçerli olu
 
 ## Kurulum — uzak bilgisayar (fiziksel erişim gerekir)
 
+> ⚠️ **Güvenlik: hash doğrulaması zorunlu.** Aşağıdaki indirme komutu tek satırdır ve
+> indirilen betiği `-ExecutionPolicy Bypass` ile çalıştırır. **Önce SHA256 doğrulaması
+> yapın** — ağ MITM'i, ele geçirilmiş depo erişimi veya bozuk indirme aksi hâlde
+> sessizce keyfi kod çalıştırır. Kurulum betikleri (`install\Install-Host.ps1`)
+> doğrulamayı kendisi yapar ve tutmuyorsa **kurulumu durdurur** (`-SkipHash` ile
+> yalnızca elinizdeki kopyadan kuruyorsanız atlanır).
+
 ```powershell
-irm https://raw.githubusercontent.com/ferden51/remote-watchdog/main/host/RemoteHostWatchdog.ps1 -OutFile "$env:TEMP\RemoteHostWatchdog.ps1"
+# 1) Depoyu indir (USB / OneDrive / git clone - en pratik yol)
+#    Repo private: irm ile indirme icin GitHub kimlik dogrulamasi gerekir.
 
-# once rapor al (hicbir sey degistirmez)
-powershell -ExecutionPolicy Bypass -File "$env:TEMP\RemoteHostWatchdog.ps1" -Check
+# 2) SHA256 DOGRULAMASI - calistirmadan once
+.\tools\Verify-Hashes.ps1
+#   DOGRULAMA BASARILI: 10 dosya  -> devam et
+#   DOGRULAMA BASARISIZ          -> CALISTIRMA, depoyu yeniden indir
 
-# sonra kur (admin, kendini yeniden baslatir)
-powershell -ExecutionPolicy Bypass -File "$env:TEMP\RemoteHostWatchdog.ps1" -Install -IntervalMinutes 5 `
-  -TelegramToken '123456:ABC' -TelegramChatId '987654'
+# 3) once rapor al (hicbir sey degistirmez)
+powershell -ExecutionPolicy Bypass -File .\host\RemoteHostWatchdog.ps1 -Check
+
+# 4) sonra kur (admin, kendini yeniden baslatir)
+.\install\Install-Host.ps1 -TelegramToken '123456:ABC' -TelegramChatId '987654'
 ```
 
-Repo **private** olduğu için indirme için GitHub kimlik doğrulaması gerekir (`gh`, PAT veya USB/OneDrive).
+> **Telegram güvenliği:** bot token `config.json` içinde **düz metin saklanmaz** — DPAPI
+> ile şifrelenir (`dpapi:...`). Kurulum token'ı **komut satırından geçirmez** (işlem
+> listesi ve 4688 olay günlüğü sızıntısını önler); geçici bir dosyadan okunur ve
+> hemen silinir. Mevcut düz metin kayıtlar ilk çalıştırmada otomatik şifrelenir.
 
 Kurulumdan sonra: `Get-ScheduledTask RemoteHostWatchdog`, log: `C:\ProgramData\RemoteWatchdog\host-watchdog.log`,
 config: `C:\ProgramData\RemoteWatchdog\config.json`.
@@ -277,11 +292,14 @@ uzaktan kullanılan makine** → varsayılan; **taşınabilir, günlük kullanı
 
 ## Kurulum — kendi bilgisayarın (istemci, admin gerektirmez)
 
-```powershell
-irm https://raw.githubusercontent.com/ferden51/remote-watchdog/main/client/RemoteClientWatchdog.ps1 -OutFile "$env:TEMP\RemoteClientWatchdog.ps1"
+> Önce `.\tools\Verify-Hashes.ps1` ile SHA256 doğrulaması yapın (bkz. yukarıdaki
+> güvenlik notu). Kurulum betiği doğrulamayı kendisi yapar ve tutmuyorsa durur.
 
-powershell -ExecutionPolicy Bypass -File "$env:TEMP\RemoteClientWatchdog.ps1" -Install -IntervalMinutes 10 `
-  -Target '100.64.1.5:3389' -RdpFile 'C:\rdp\finrex.rdp' -TelegramToken '123456:ABC' -TelegramChatId '987654'
+```powershell
+.\tools\Verify-Hashes.ps1          # DOGRULAMA BASARILI -> devam
+
+.\install\Install-Client.ps1 -Target '100.64.1.5:3389' -RdpFile 'C:\rdp\finrex.rdp' `
+  -TelegramToken '123456:ABC' -TelegramChatId '987654'
 ```
 
 `-Target` verilmezse yalnızca Google/CRD sinyal yolu kontrol edilir. RDP yerel dosyası verilirse

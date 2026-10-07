@@ -4,12 +4,51 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.3] - 2026-10-07
+
+Bu sürüm, **güvenlik planındaki üç kritik maddeyi kapatır** (aşağıdaki `[Unreleased]`
+bölümüne bakın — plan artık uygulandı, kayıt burada). Üçü de "kimse fark etmeden
+çalışıyordu" türdendi: bot token'ı düz metin duruyordu, bir VBS betiği komut enjeksiyonuna
+açıktı ve indirilen kod hiç doğrulanmıyordu.
+
+### 🔴 Güvenlik — düzeltilen
+
+- **Telegram token'ı artık DPAPI ile şifreli** (`lib/Common.ps1` → `Protect-RwSecret` /
+  `Unprotect-RwSecret`). Kapsam bilinçli olarak **LocalMachine**: `config.json`'u **panel
+  (kullanıcı hesabı) yazıyor** ama **SYSTEM watchdog okuyor**; `CurrentUser` kapsamı
+  SYSTEM'in çözmesini engellerdi ve alarm sessizce susardı. LocalMachine hem iki hesabı
+  hem de "başka makineye taşınmış yedek" senaryosunu korur.
+  Host/client/panelin **hepsi** okurken çözer, yazarken şifreler — panel bir sonraki
+  "Kaydet"te token'ı düz metne geri yazmaz.
+- **Token komut satırından kaldırıldı.** `Install-Host.ps1` / `Install-Client.ps1`
+  artık `-TelegramTokenFile` kullanıyor: geçici dosyaya **DPAPI ile** yazılır, hedefe
+  **parametre olarak değil dosya yoluyla** geçer, okunur okunmaz **silinir**. İşlem listesi
+  (`Get-Process`/Task Manager) ve 4688 olay günlüğünde token görünmez. Elle çalıştırmada
+  `-TelegramToken` geriye dönük uyum için duruyor.
+- **`Start-Hidden.vbs` parametre enjeksiyonu kapatıldı.** Betik yolu tırnaklıydı ama
+  **parametreler tırnaksız** birleştiriliyordu (`cmd & " " & Arguments(i)`); `&`, `|` veya
+  `"` içeren bir değer komut enjeksiyonu yapıyordu. Artık her argüman `QuoteArg()` ile
+  sarılıyor, içteki tırnaklar `""` ile kaçırılıyor. *Canlı doğrulandı: `a&b|c` ve
+  `&calc.exe` artık tek argüman olarak geçiyor.*
+- **SHA256 doğrulaması eklendi** (`tools\Verify-Hashes.ps1` + `hashes.sha256.json`).
+  Kurulum betikleri çalıştırılacak koddan **önce** tüm dosyaları doğrular ve tutmuyorsa
+  **kurulumu durdurur** (`-SkipHash` yalnızca güvendiğiniz kopyadan kurarken).
+  *Bozuk dosya test edildi: `[BOZUK]` + çıkış kodu 1.* README'deki hashsiz `irm` tek satır
+  indirme kaldırıldı, yerine doğrulama adımı kondu.
+
+### Testler
+
+`Test-All 357/0`, `Test-UI 54/0`, panel `-SelfTest` temiz. 33 yeni regresyon testi;
+DPAPI için gerçek `config.json` üzerinde gidiş-dönüş ve geriye dönük uyum sınandı
+(eskiden düz metin kayıtlı değerler bozulmadan okunuyor).
+
 ## [Unreleased] — Planlanan (v1.4.0 hedefi)
 
-Bu bölüm **yapılacak** işleri tutar; henüz uygulanmamıştır. Her madde tek bir commit ile
-kapatılır ve ilgili regresyon testi eklenir.
+> **Durum:** aşağıdaki üç kritik güvenlik maddesi **1.3.3'te uygulandı** (yukarıya bakın).
+> Bu bölüm, çözüm tasarımını ve gerekçeleri kayıt altında tutar; kalan izleme maddeleri
+> günceldir.
 
-### 🔴 Kritik — güvenlik
+### 🔴 Kritik — güvenlik (✅ 1.3.3'te uygulandı)
 
 **1. Telegram token'ları düz metin saklanıyor (config.json + komut satırı sızıntısı)**
 

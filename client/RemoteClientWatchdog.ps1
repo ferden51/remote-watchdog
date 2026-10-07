@@ -25,6 +25,9 @@ param(
     [string]$BrowserUrl = 'https://remotedesktop.google.com',
     [string]$TelegramToken = '',
     [string]$TelegramChatId = '',
+    <#  GUVENLI TOKEN KANALI: gecici dosyadan okunur (kurulum betigi token'i komut
+        satirinda gecirmiyor), okunduktan sonra silinir. #>
+    [string]$TelegramTokenFile = '',
     [string]$HeartbeatUrl = ''
 )
 
@@ -68,13 +71,19 @@ function Get-Config {
             foreach ($k in @($cfg.Keys)) { if ($saved.PSObject.Properties.Name -contains $k) { $cfg[$k] = $saved.$k } }
         } catch { }
     }
+    # Gizli alanlari COZ (bkz. lib\Common.ps1 / Protect-RwSecret). Duz metin kayitli
+    # eski config'ler degismez: prefix yoksa oldugu gibi donulur.
+    $null = Unprotect-RwSecretInObject -Obj $cfg
     return $cfg
 }
 
 function Save-Config {
     param($Cfg)
     if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
-    $Cfg | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $ConfigFile -Encoding UTF8
+    $kopye = [ordered]@{}
+    foreach ($k in @($Cfg.Keys)) { $kopye[$k] = $Cfg[$k] }
+    $null = Protect-RwSecretInObject -Obj $kopye
+    $kopye | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $ConfigFile -Encoding UTF8
 }
 
 function Remove-OldLogFiles {
@@ -322,6 +331,15 @@ function Invoke-Cycle {
 }
 
 function Install-Watchdog {
+    # Guvenli token kanali: dosyadan oku ve dosyayi ANINDA sil (kurulum betigi
+    # token'i komut satirinda gecirmemesi icin).
+    if ($TelegramTokenFile -and (Test-Path -LiteralPath $TelegramTokenFile)) {
+        try {
+            $blob = Get-Content -LiteralPath $TelegramTokenFile -Raw -ErrorAction Stop
+            $TelegramToken = [Net.NetworkCredential]::new('', (ConvertTo-SecureString -String $blob.Trim())).Password
+        } catch { Write-Log 'WARN' ('token dosyasi okunamadi: ' + $_.Exception.Message) }
+        try { Remove-Item -LiteralPath $TelegramTokenFile -Force -ErrorAction SilentlyContinue } catch { }
+    }
     $global:cfg = Get-Config
     if ($Target.Count -gt 0) { $global:cfg.Targets = @($Target) }
     if ($RdpFile) { $global:cfg.RdpFile = $RdpFile }

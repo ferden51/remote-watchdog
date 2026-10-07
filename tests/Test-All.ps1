@@ -355,6 +355,62 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'panel CRD kayitsizken bekleyen islerde uyariyor' ($panelText -match 'Google Remote Desktop KAYITLI DEĞİL')
     Ok 'panel CRD uyarisi kayit sayfasini acacak anahtar veriyor' ($panelText -match "(?s)KAYITLI DEĞİL.*Key\s*=\s*'crd'")
     <#
+        GUVENLIK (Unreleased plan madde 1): Telegram token config.json'da DUZ METIN
+        saklaniyordu (ACL: BUILTIN\Users -> ReadAndExecute) ve kurulum token'i komut
+        satirindan geciriyordu. Artik DPAPI (LocalMachine kapsami) ile korunuyor.
+    #>
+    $commonText = Get-Content -LiteralPath (Join-Path $Root 'lib\Common.ps1') -Raw
+    Ok 'gizli deger sifreleme/cozme yardimcilari var' (($commonText -match 'function Protect-RwSecret') -and ($commonText -match 'function Unprotect-RwSecret'))
+    Ok 'DPAPI LocalMachine kapsami kullaniliyor (SYSTEM de cozebilmeli)' ($commonText -match 'DataProtectionScope\]::LocalMachine')
+    Ok 'CurrentUser kapsami KULLANILMIYOR (SYSTEM erisemez)' ($commonText -notmatch 'DataProtectionScope\]::CurrentUser')
+    Ok 'gizli deger prefix''i tanimli (dpapi:)' ($commonText -match "RwSecretPrefix = 'dpapi:'")
+    Ok 'geriye donuk uyum: duz metin degismez donulur' ($commonText -match "(?s)function Unprotect-RwSecret.*-not \`$Value\.StartsWith\(\`$script:RwSecretPrefix\).*return \`$Value")
+    Ok 'cozulemeyen deger BOS doner (ham sifreli metin kullanilmaz)' ($commonText -match "(?s)catch \{[\s\S]*?return ''[\s\S]*?\n    \}")
+    Ok 'nesne uzerinde toplu sifreleme/cozme var' (($commonText -match 'function Protect-RwSecretInObject') -and ($commonText -match 'function Unprotect-RwSecretInObject'))
+    Ok 'host config okurken gizli alanlari cozuyor' ($hostText -match '(?s)function Get-Config.*Unprotect-RwSecretInObject')
+    Ok 'host config yazarken gizli alanlari sifreliyor' ($hostText -match '(?s)function Save-Config.*Protect-RwSecretInObject')
+    Ok 'istemci config okurken cozuyor, yazarken sifreliyor' (($clientText2 -match '(?s)function Get-Config.*Unprotect-RwSecretInObject') -and ($clientText2 -match '(?s)function Save-Config.*Protect-RwSecretInObject'))
+    Ok 'panel config okurken cozuyor, yazarken sifreliyor' (($panelText -match '(?s)function Read-ConfigFile.*Unprotect-RwSecretInObject') -and ($panelText -match '(?s)function Write-ConfigFile.*Protect-RwSecretInObject'))
+    Ok 'panel Save-HostConfig da sifreliyor (yoksa kaydetme duz metne cevirirdi)' ($panelText -match '(?s)function Save-HostConfig.*Protect-RwSecretInObject')
+    <#  Token artik komut satirinda GECIRILMEZ; gecici DPAPI dosyasi ile verilir. #>
+    # Kurulum betiklerinin metni (guvenlik testleri icin; yollar burada bir kez tanimlanir).
+    $instHost = Join-Path $Root 'install\Install-Host.ps1'
+    $instClient = Join-Path $Root 'install\Install-Client.ps1'
+    $instHostText = if (Test-Path -LiteralPath $instHost) { Get-Content -LiteralPath $instHost -Raw } else { '' }
+    $instClientText = if (Test-Path -LiteralPath $instClient) { Get-Content -LiteralPath $instClient -Raw } else { '' }
+    Ok 'kurulum host token''i komut satirinda gecirmiyor' ($instHostText -notmatch "(?s)args \+= @\('-TelegramToken'")
+    Ok 'kurulum guvenli token dosyasi kullaniyor' ($instHostText -match '-TelegramTokenFile')
+    Ok 'gecici token dosyasi okunduktan sonra SILINIYOR' (($instHostText -match '(?s)-TelegramTokenFile.*Remove-Item') -or ($instHostText -match '(?s)Remove-Item -LiteralPath \$TelegramTokenFile'))
+    Ok 'host -TelegramTokenFile kanalini destekliyor' ($hostText -match '\[string\]\$TelegramTokenFile')
+    Ok 'istemci -TelegramTokenFile kanalini destekliyor' ($clientText2 -match '\[string\]\$TelegramTokenFile')
+    <#
+        GUVENLIK (Unreleased plan madde 2): Start-Hidden.vbs parametreleri TIRNAKSIZ
+        birlestiriliyordu -> & | " iceren deger komut enjeksiyonu yapardi.
+    #>
+    $vbsText = Get-Content -LiteralPath (Join-Path $Root 'host\Start-Hidden.vbs') -Raw
+    Ok 'Start-Hidden.vbs argumanlari tirnakli birlestiriyor' ($vbsText -match 'QuoteArg\(WScript\.Arguments\(i\)\)')
+    Ok 'Start-Hidden.vbs tirnak kacis fonksiyonu tanimli' ($vbsText -match 'Function QuoteArg\(s\)')
+    Ok 'Start-Hidden.vbs ic tirnaklari kaciriyor (Replace ile)' ($vbsText -match 'Replace\(CStr\(s\), Chr\(34\), Chr\(34\) & Chr\(34\)\)')
+    Ok 'Start-Hidden.vbs tirnaksiz birlestirme KALDIRILDI' ($vbsText -notmatch 'cmd = cmd & " " & WScript\.Arguments\(i\)')
+    <#
+        GUVENLIK (Unreleased plan madde 3): README'deki irm ile indirme dogrulamasizdi;
+        betikler -ExecutionPolicy Bypass ile calistiriliyordu (MITM riski).
+    #>
+    $hashToolPath = Join-Path $Root 'tools\Verify-Hashes.ps1'
+    Ok 'SHA256 dogrulama araci var' (Test-Path -LiteralPath $hashToolPath)
+    Ok 'hash manifest dosyasi var' (Test-Path -LiteralPath (Join-Path $Root 'hashes.sha256.json'))
+    if (Test-Path -LiteralPath $hashToolPath) {
+        $hashText = Get-Content -LiteralPath $hashToolPath -Raw
+        Ok 'dogrulama SHA256 kullaniyor' ($hashText -match 'Get-FileHash.*-Algorithm SHA256')
+        Ok 'dogrulama manifestten okuyor' ($hashText -match 'hashes\.sha256\.json')
+        Ok 'dogrulama -Update ile manifest uretebiliyor' ($hashText -match '\[switch\]\$Update')
+        Ok 'dogrulama hata durumunda HATALI cikis kodu donuyor' ($hashText -match 'exit 1')
+    }
+    Ok 'host kurulumu dogrulama adimi iceriyor' ($instHostText -match 'Verify-Hashes\.ps1')
+    Ok 'istemci kurulumu dogrulama adimi iceriyor' ($instClientText -match 'Verify-Hashes\.ps1')
+    Ok 'kurulum dogrulama basarisizsa DURUYOR' (($instHostText -match '(?s)SHA256 DOGRULAMASI BASARISIZ.*Die') -or ($instHostText -match '(?s)LASTEXITCODE -eq 0.*Die'))
+    Ok 'kurulum -SkipHash ile atlanabiliyor' (($instHostText -match '\[switch\]\$SkipHash') -and ($instClientText -match '\[switch\]\$SkipHash'))
+    <#
         REGRESYON 1 (gece olayi): geri sayim dongusu Invoke-Probe/Invoke-WebRequest
         kullaniyordu; -TimeoutSec DNS beklemesini KAPSAMAZ, yonlendirici asili
         kalinca tek cagri 11-30 sn blokladi. Sonuc: 325 kez "geri sayimi basladi",

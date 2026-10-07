@@ -23,6 +23,10 @@ param(
     [string]$HeartbeatUrl = '',
     [string]$TelegramToken = '',
     [string]$TelegramChatId = '',
+    <#  GUVENLI TOKEN KANALI: token'i gecici bir dosyadan okur (kurulum betigi
+        komut satirinda gecirmemesi icin). Dosya okunduktan sonra SILINIR.
+        Eski kullanim (-TelegramToken) geriye donuk uyum icin duruyor. #>
+    [string]$TelegramTokenFile = '',
     [string]$TunnelName = '',
     [switch]$EnableTunnelRepair,
     [switch]$KeepSleep,
@@ -248,13 +252,20 @@ function Get-Config {
             foreach ($k in @($cfg.Keys)) { if ($saved.PSObject.Properties.Name -contains $k) { $cfg[$k] = $saved.$k } }
         } catch { }
     }
+    # Gizli alanlari COZ: config.json'da "dpapi:..." olarak saklanir, ama cagiran kod
+    # ($cfg.TelegramToken) duz metin gorur -> Telegram cagrisi hic degismez.
+    $null = Unprotect-RwSecretInObject -Obj $cfg
     return $cfg
 }
 
 function Save-Config {
     param($Cfg)
     if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
-    $Cfg | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ConfigFile -Encoding UTF8
+    # GIZLI: yazmadan once sifrele. Kopyala-yapistir ile duz metin sizmasin.
+    $kopye = [ordered]@{}
+    foreach ($k in @($Cfg.Keys)) { $kopye[$k] = $Cfg[$k] }
+    $null = Protect-RwSecretInObject -Obj $kopye
+    $kopye | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ConfigFile -Encoding UTF8
 }
 
 function Get-State {
@@ -2321,6 +2332,18 @@ function Invoke-Watchdog {
 }
 
 function Install-Watchdog {
+    <#
+        Guvenli token kanali: -TelegramTokenFile verildiyse dosyadan okunur ve dosya
+        ANINDA silinir. -TelegramToken (eski yol) geriye donuk uyum icin duruyor
+        ama komut satirinda gorunur; kurulum betigi artik dosya yolunu kullanir.
+    #>
+    if ($TelegramTokenFile -and (Test-Path -LiteralPath $TelegramTokenFile)) {
+        try {
+            $blob = Get-Content -LiteralPath $TelegramTokenFile -Raw -ErrorAction Stop
+            $TelegramToken = [Net.NetworkCredential]::new('', (ConvertTo-SecureString -String $blob.Trim())).Password
+        } catch { Write-Log 'WARN' ('token dosyasi okunamadi: ' + $_.Exception.Message) }
+        try { Remove-Item -LiteralPath $TelegramTokenFile -Force -ErrorAction SilentlyContinue } catch { }
+    }
     $forward = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ScriptPath + '"'), '-Install', '-IntervalMinutes', $IntervalMinutes)
     if ($HeartbeatUrl) { $forward += @('-HeartbeatUrl', ('"' + $HeartbeatUrl + '"')) }
     if ($TelegramToken) { $forward += @('-TelegramToken', ('"' + $TelegramToken + '"')) }

@@ -432,6 +432,9 @@ function Get-HostConfig {
             foreach ($k in @($cfg.Keys)) { if ($s.PSObject.Properties.Name -contains $k) { $cfg[$k] = $s.$k } }
         } catch { }
     }
+    # Gizli alanlari COZ (DPAPI, bkz. lib\Common.ps1): ekranda duz metin gorunur,
+    # dosyada "dpapi:..." olarak durur. Duz metin kayitli eski config degismez.
+    $null = Unprotect-RwSecretInObject -Obj $cfg
     return $cfg
 }
 
@@ -446,6 +449,9 @@ function Save-HostConfig {
         } catch { }
     }
     foreach ($k in $Values.Keys) { $obj[$k] = $Values[$k] }
+    # GIZLI: yazmadan once sifrele. Aksi halde panel bir sonraki "Kaydet"te token'i
+    # duz metin geri yazardi ve koruma sessizce kaybolurdu.
+    $null = Protect-RwSecretInObject -Obj $obj
     $obj | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $HostConfig -Encoding UTF8
 }
 
@@ -2395,6 +2401,8 @@ function Read-ConfigFile {
             foreach ($p in $raw.PSObject.Properties) { $obj[$p.Name] = $p.Value }
         } catch { }
     }
+    # Gizli alanlari COZ (DPAPI): hem host hem client config'i bu yoldan gecer.
+    $null = Unprotect-RwSecretInObject -Obj $obj
     return $obj
 }
 
@@ -2403,6 +2411,8 @@ function Write-ConfigFile {
     $obj = Read-ConfigFile $Path
     foreach ($k in $Values.Keys) { $obj[$k] = $Values[$k] }
     if (-not (Test-Path -LiteralPath (Split-Path -Parent $Path))) { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null }
+    # GIZLI: yazmadan once sifrele (bkz. lib\Common.ps1).
+    $null = Protect-RwSecretInObject -Obj $obj
     $obj | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 

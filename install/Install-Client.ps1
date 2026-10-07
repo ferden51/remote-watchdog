@@ -17,11 +17,24 @@ param(
     [string]$BrowserUrl = 'https://remotedesktop.google.com',
     [string]$TelegramToken = '',
     [string]$TelegramChatId = '',
+    <#  GUVENLI TOKEN KANALI: token'i gecici dosyadan okur (komut satirinda sizmasin). #>
+    [string]$TelegramTokenFile = '',
     [string]$HeartbeatUrl = '',
     [int]$IntervalMinutes = 10,
     [switch]$SkipTray,
+    <#  SHA256 dogrulamasini atla (yalnizca elinizdeki kopyadan kuruyorsaniz). #>
+    [switch]$SkipHash,
     [switch]$DryRun
 )
+
+# --- Token'i guvenli sekilde al (dosyadan) ---
+if ($TelegramTokenFile -and (Test-Path -LiteralPath $TelegramTokenFile)) {
+    try {
+        $blob = Get-Content -LiteralPath $TelegramTokenFile -Raw -ErrorAction Stop
+        $TelegramToken = [Net.NetworkCredential]::new('', (ConvertTo-SecureString -String $blob.Trim())).Password
+    } catch { Write-Host ('token dosyasi okunamadi: ' + $_.Exception.Message) -ForegroundColor Yellow }
+    try { Remove-Item -LiteralPath $TelegramTokenFile -Force -ErrorAction SilentlyContinue } catch { }
+}
 
 $ErrorActionPreference = 'Continue'
 $InstallDir = Split-Path -Parent $PSCommandPath
@@ -96,15 +109,43 @@ Ok ('kurulum dizini: ' + $AppDir)
 $ClientScript = Join-Path $AppDir 'client\RemoteClientWatchdog.ps1'
 $TrayScript = Join-Path $AppDir 'ui\RemoteWatchdogPanel.ps1'
 
+<#  SHA256 dogrulamasi (bkz. Install-Host.ps1): calistirilacak kod dogrulanmadan
+    kurulmaz. MITM / bozuk indirme sessizce keyfi kod calistirmaya yol acardi. #>
+Step '0b) SHA256 dogrulamasi'
+if ($SkipHash) {
+    Warn '  atlandi (-SkipHash)'
+} else {
+    $hashTool = Join-Path $Root 'tools\Verify-Hashes.ps1'
+    if (-not (Test-Path -LiteralPath $hashTool)) {
+        Warn '  dogrulama araci bulunamadi, atlandi'
+    } else {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $hashTool
+        if ($LASTEXITCODE -eq 0) { Ok 'tum dosyalar dogrulandi (SHA256)' }
+        else { Die ('SHA256 DOGRULAMASI BASARISIZ. Kurulum DURDURULDU (cikis ' + $LASTEXITCODE + ').') }
+    }
+}
+
 Step '1) Istemci watchdog kurulumu'
 $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ClientScript + '"'), '-Install', '-IntervalMinutes', $IntervalMinutes)
 if ($Target) { $a += @('-Target', ('"' + $Target + '"')) }
 if ($RdpFile) { $a += @('-RdpFile', ('"' + $RdpFile + '"')) }
 if ($BrowserUrl) { $a += @('-BrowserUrl', ('"' + $BrowserUrl + '"')) }
-if ($TelegramToken) { $a += @('-TelegramToken', ('"' + $TelegramToken + '"')) }
+<#  Token komut satirinda GECIRILMEZ: gecici DPAPI dosyasi ile verilir, okunduktan
+    sonra silinir. Eski yol (-TelegramToken) elle calistirmada geriye donuk uyum icin
+    duruyor ama islem listesinde gorunur. #>
+if ($TelegramToken) {
+    try {
+        $tf = Join-Path $env:TEMP ('rw-token-c-' + [guid]::NewGuid().ToString('N') + '.tmp')
+        $sec = ConvertTo-SecureString -String $TelegramToken -AsPlainText -Force
+        [IO.File]::WriteAllText($tf, (ConvertFrom-SecureString -SecureString $sec), (New-Object Text.UTF8Encoding $false))
+        $a += @('-TelegramTokenFile', ('"' + $tf + '"'))
+        $TelegramToken = ''
+    } catch { Warn ('token dosyasi yazilamadi: ' + $_.Exception.Message) }
+}
 if ($TelegramChatId) { $a += @('-TelegramChatId', ('"' + $TelegramChatId + '"')) }
 if ($HeartbeatUrl) { $a += @('-HeartbeatUrl', ('"' + $HeartbeatUrl + '"')) }
 $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $a -Wait -PassThru -WindowStyle Hidden
+if ($tf) { try { Remove-Item -LiteralPath $tf -Force -ErrorAction SilentlyContinue } catch { } }
 if ($p.ExitCode -eq 0) { Ok ('zamanlanmış görev kuruldu (her ' + $IntervalMinutes + ' dk)') } else { Warn ('kurulum donus kodu: ' + $p.ExitCode) }
 Start-ScheduledTask -TaskName 'RemoteClientWatchdog' -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 3

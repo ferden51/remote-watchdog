@@ -17,14 +17,29 @@
 param(
     [string]$TelegramToken = '',
     [string]$TelegramChatId = '',
+    <#  GUVENLI TOKEN KANALI. -TelegramToken komut satirinda sizinti yapiyordu
+        (islem listesi + 4688 olay gunlugu); bu secenek gecici bir dosyadan okur.
+        Parametre verilmezse ve Telegram ayarli degilse, Read-Host ile sorulur. #>
+    [string]$TelegramTokenFile = '',
     [int]$IntervalMinutes = 5,
     [switch]$KeepSleep,
     [switch]$SkipDiag,
     [switch]$SkipTray,
+    [switch]$SkipHash,
     [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Continue'
+
+# --- Token'i guvenli sekilde al (dosyadan veya etkilesel) ---
+if ($TelegramTokenFile -and (Test-Path -LiteralPath $TelegramTokenFile)) {
+    try {
+        $blob = Get-Content -LiteralPath $TelegramTokenFile -Raw -ErrorAction Stop
+        $TelegramToken = [Net.NetworkCredential]::new('', (ConvertTo-SecureString -String $blob.Trim())).Password
+    } catch { Warn ('token dosyasi okunamadi: ' + $_.Exception.Message) }
+    # Dosyayi ANINDA sil: duz metin kalmasin.
+    try { Remove-Item -LiteralPath $TelegramTokenFile -Force -ErrorAction SilentlyContinue } catch { }
+}
 $InstallDir = Split-Path -Parent $PSCommandPath
 $Root = Split-Path -Parent $InstallDir
 $HostScript = Join-Path $Root 'host\RemoteHostWatchdog.ps1'
@@ -117,14 +132,36 @@ if ($DryRun) {
 }
 
 if (-not (Is-Admin)) {
+    <#
+        TOKEN YUKSELTILEN SURECE GUVENLI TASINIR. Token'i komut satirinda gecirmek
+        islem listesi (Get-Process/Task Manager) ve 4688 olay gunlugunde sizinti
+        yapiyordu. Bunun yerine: gecici dosyaya yazilir (Sadece yazma yetkili),
+        yonetici surece parametre OLARAK DEGIL dosya yolu ile gecilir, sonra dosya
+        ANINDA silinir. Dosya icerigi DPAPI ile korunur.
+    #>
+    $tokenFile = ''
+    if ($TelegramToken) {
+        try {
+            $tokenFile = Join-Path $env:TEMP ('rw-token-' + [guid]::NewGuid().ToString('N') + '.tmp')
+            $secure = ConvertTo-SecureString -String $TelegramToken -AsPlainText -Force
+            $blob = ConvertFrom-SecureString -SecureString $secure
+            [IO.File]::WriteAllText($tokenFile, $blob, (New-Object Text.UTF8Encoding $false))
+            # Dosyayi yalnizca bu kullanicinin okuyabilecegi sekilde daralt.
+            $me = "$env:COMPUTERNAME\$env:USERNAME"
+            icacls $tokenFile /inheritance:r /grant:r "${me}:(R)" 2>&1 | Out-Null
+            $TelegramToken = ''   # bellekteki duz metni de temizle
+        } catch { Warn 'token dosyasi yazilamadi; token bu bicimde iletilemiyor' }
+    }
     $forward = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), '-IntervalMinutes', $IntervalMinutes)
-    if ($TelegramToken) { $forward += @('-TelegramToken', ('"' + $TelegramToken + '"')) }
+    if ($tokenFile) { $forward += @('-TelegramTokenFile', ('"' + $tokenFile + '"')) }
     if ($TelegramChatId) { $forward += @('-TelegramChatId', ('"' + $TelegramChatId + '"')) }
     if ($KeepSleep) { $forward += '-KeepSleep' }
     if ($SkipDiag) { $forward += '-SkipDiag' }
     if ($SkipTray) { $forward += '-SkipTray' }
+    if ($SkipHash) { $forward += '-SkipHash' }
     Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $forward
     Ok 'Yonetici yetkisiyle yeniden baslatildi. Bu pencereyi kapatabilirsiniz.'
+    if ($tokenFile) { Warn ('gecici token dosyasi yonetici kurulumu bitince silinecek: ' + $tokenFile) }
     exit 0
 }
 
@@ -146,6 +183,28 @@ $HostScript = $app.Host
 $DocsScript = $app.Docs
 $TrayScript = $app.Panel
 
+<#
+    SHA256 DOGRULAMA. README'deki indirme komutu dogrulama yapmiyordu; MITM veya
+    bozuk indirme sessizce keyfi kod calistirabilirdi. Kurulum, calistirilacak
+    betiklerden ONCE butun dosyalarin hash'ini dogrular. -SkipHash ile atlanabilir
+    (yalnizca elinizdeki kopyadan kuruyorsaniz).
+#>
+Step '0b) SHA256 dogrulamasi (MITM / bozuk indirme korumasi)'
+if ($SkipHash) {
+    Warn '  atlandi (-SkipHash)'
+} else {
+    $hashTool = Join-Path $Root 'tools\Verify-Hashes.ps1'
+    if (-not (Test-Path -LiteralPath $hashTool)) {
+        Warn '  dogrulama araci bulunamadi, atlandi (tools\Verify-Hashes.ps1)'
+    } else {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $hashTool
+        if ($LASTEXITCODE -eq 0) { Ok 'tum dosyalar dogrulandi (SHA256)' }
+        else {
+            Die ('SHA256 DOGRULAMASI BASARISIZ (cikis ' + $LASTEXITCODE + '). Guvenlik icin kurulum DURDURULDU. Depoyu yeniden indirip tekrar deneyin.')
+        }
+    }
+}
+
 if (-not $SkipDiag) {
     Step '1) Tehis raporu (okuma modunda, ~40 sn)'
     & powershell -NoProfile -ExecutionPolicy Bypass -File $DiagScript | Out-Null
@@ -156,10 +215,21 @@ if (-not $SkipDiag) {
 
 Step '2) Host watchdog kurulumu'
 $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $HostScript + '"'), '-Install', '-IntervalMinutes', $IntervalMinutes)
-if ($TelegramToken) { $args += @('-TelegramToken', ('"' + $TelegramToken + '"')) }
+# Token YINE komut satirinda gecirilmez: gecici DPAPI dosyasi ile verilir ve
+# host betigi okuduktan sonra silinir (kimse islem listesinde gormez).
+$hostTokenFile = ''
+if ($TelegramToken) {
+    try {
+        $hostTokenFile = Join-Path $env:TEMP ('rw-token-h-' + [guid]::NewGuid().ToString('N') + '.tmp')
+        $secure = ConvertTo-SecureString -String $TelegramToken -AsPlainText -Force
+        [IO.File]::WriteAllText($hostTokenFile, (ConvertFrom-SecureString -SecureString $secure), (New-Object Text.UTF8Encoding $false))
+        $args += @('-TelegramTokenFile', ('"' + $hostTokenFile + '"'))
+    } catch { Warn ('host icin token dosyasi yazilamadi: ' + $_.Exception.Message) }
+}
 if ($TelegramChatId) { $args += @('-TelegramChatId', ('"' + $TelegramChatId + '"')) }
 if ($KeepSleep) { $args += '-KeepSleep' }
 $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $args -Wait -PassThru -WindowStyle Hidden
+if ($hostTokenFile) { try { Remove-Item -LiteralPath $hostTokenFile -Force -ErrorAction SilentlyContinue } catch { } }
 if ($p.ExitCode -eq 0) { Ok 'zamanlanmış görev kuruldu (acilista + oturum acilista + her ' + $IntervalMinutes + ' dk)' } else { Warn ('kurulum donus kodu: ' + $p.ExitCode) }
 
 $cfgPath = 'C:\ProgramData\RemoteWatchdog'
