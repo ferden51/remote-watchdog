@@ -318,6 +318,43 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host disk kontrolu hicbir sey SILMIYOR (veri kaybi riski yok)' ($dsFn.Success -and ($dsFn.Value -notmatch 'Remove-Item'))
     Ok 'host disk esigi ayarlanabilir (DiskUyariMB)' ($hostText -match 'DiskUyariMB = ')
     <#
+        BELGE KORUMA ÇIKMAZI. OfficeAbortRebootIfStillOpen/IfUnsaved acikken reboot belge
+        kaydedilemeden iptal EDILIR. Bu veri kaybi korumasi, ama uzaktan mudahale
+        edemeyen kullanici icin sistem erisilemez hale gelebilir. Cozum: host engeli
+        docs-block.json'a yazar, panel kirmizi kart + "Yine de kapat" (cift onayli) sunar.
+    #>
+    Ok 'host belge engelini dosyaya yaziyor (Write-DocsBlockNotice)' ($hostText -match 'function Write-DocsBlockNotice')
+    Ok 'host belge engeli dosyasi tanimli' ($hostText -match "\`$DocsBlockFile = Join-Path \`$BaseDir 'docs-block.json'")
+    Ok 'host kaydedilmemis belgede engel bildirimi yaziyor' ($hostText -match '(?s)OfficeAbortRebootIfUnsaved.*Write-DocsBlockNotice')
+    Ok 'host belge kaydetme zaman asiminda engel bildirimi yaziyor' ($hostText -match '(?s)OfficeAbortRebootIfStillOpen.*Write-DocsBlockNotice')
+    Ok 'host engel kalkinca uyariyi temizliyor' ($hostText -match 'function Clear-DocsBlockNotice')
+    Ok 'panel belge engelini kirmizi kart olarak gosteriyor' ($panelText -match 'BELGE KORUYUCU YENİDEN BAŞLATMAYI ENGELLİYOR')
+    Ok 'panel belge adlarini gosteriyor' ($panelText -match '(?s)docs-block.*@\(\$db\.names\) -join')
+    Ok 'panel yine de kapat yolu var (docsforce)' ($panelText -match "'docsforce'")
+    Ok 'panel veri kaybi riskini ACIKCA onaylatiyor (cift onay)' ($panelText -match '(?s)docsforce.*KAYDEDİLMEMİŞ BELGELER KAYBOLABİLİR.*Son kez doğrulama')
+    <#
+        SES = EKRAN. Canli olay (07.10 12:14): ekranda "Eksik: IP" yazarken ses
+        "Onarım başlatılıyor" diyordu; panel voiceKey ile hazir klibi caldig icin
+        dinamik "Eksik: ..." kismi hic konusulmuyordu.
+    #>
+    # VoiceLines: sabit anons cumlelerinin tek kaynagi (panel bunu okur).
+    $toolsText = ''
+    $voicePath = Join-Path $Root 'tools\VoiceLines.ps1'
+    if (Test-Path -LiteralPath $voicePath) { $toolsText = Get-Content -LiteralPath $voicePath -Raw }
+    Ok 'VoiceLines eksik katmanlari iceriyor (Eksik: ...)' (($toolsText -match "'eksikip'") -and ($toolsText -match "'eksikdns'") -and ($toolsText -match "'eksiksinyal'"))
+    Ok 'VoiceLines belge engeli anonsu iceriyor' ($toolsText -match "'docsblock'")
+    Ok 'host eksik katmana gore voiceKey seciyor' ($hostText -match '(?s)\$vk = ''eksikip''' -or $hostText -match "(?s)\`$vk = 'eksikip'")
+    Ok 'host ses anonsu sabit netdown degil (dinamik anahtar)' ($hostText -notmatch "voiceKey = 'netdown'")
+    <#  AYAR ARAMA: 60+ ayar tek duz listedeydi (Expander=0, filtre=0). #>
+    Ok 'panel ayar arama kutusu var' ($panelText -match 'x:Name="TxtSettingsFilter"')
+    Ok 'panel ayar filtresi baslik/anahtar/bolumde arar' ($panelText -match "\`$hay = \(\(\[string\]\`$d\.Title\) \+ ' ' \+ \(\[string\]\`$d\.Key\) \+ ' ' \+ \(\[string\]\`$d\.Sec\)\)")
+    Ok 'panel filtre buyuk/kucuk harf duyarsiz' ($panelText -match '\.Trim\(\)\.ToLowerInvariant\(\)')
+    Ok 'panel filtre sonuc sayaci gosteriyor' ($panelText -match 'TxtSettingsFilterInfo')
+    Ok 'panel filtre degisince formu yeniden kurar' ($panelText -match 'SettingsFilterTimer')
+    <#  CRD kayit hatirlatmasi: en kritik manuel adim yesil mesajlar arasinda kayboluyordu. #>
+    Ok 'panel CRD kayitsizken bekleyen islerde uyariyor' ($panelText -match 'Google Remote Desktop KAYITLI DEĞİL')
+    Ok 'panel CRD uyarisi kayit sayfasini acacak anahtar veriyor' ($panelText -match "(?s)KAYITLI DEĞİL.*Key\s*=\s*'crd'")
+    <#
         REGRESYON 1 (gece olayi): geri sayim dongusu Invoke-Probe/Invoke-WebRequest
         kullaniyordu; -TimeoutSec DNS beklemesini KAPSAMAZ, yonlendirici asili
         kalinca tek cagri 11-30 sn blokladi. Sonuc: 325 kez "geri sayimi basladi",

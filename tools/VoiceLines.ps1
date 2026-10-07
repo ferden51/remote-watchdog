@@ -37,4 +37,21 @@ $script:VwVoiceLines = [ordered]@{
     # yeniden başlatılacak"); onun da hazir varyantini koyuyoruz.
     'reminder'   = 'Ağ sorunları çözülemedi, bilgisayar yeniden başlatılacak.'
     'reminder2'  = 'Ağ sorunları çözülemedi. Bilgisayar yeniden başlatılacak.'
+
+    # --- SES/EKRAN TUTARLILIĞI ---
+    # Canli olay (07.10 12:14): ekranda "Ağ sorunu algılandı. Eksik: IP. Onarım
+    # başlatılıyor." yaziyordu ama SES "Ağ sorunu algılandı. Onarım başlatılıyor."
+    # diyordu; panel voiceKey ile hazir klibi caldigi icin DINAMIK "Eksik: ..." kismi
+    # hic konusulmuyordu. Kullanici "bu bozuk mu?" diye fark ediyordu.
+    #
+    # COZUM: "Eksik: <x>" kismi icin AYRI onbellekli sabit cumleler uretilir ve host
+    # voiceKey'i eksik olan katmana gore secer. Boylece ses de ekranla AYNI bilgiyi
+    # verir. Her yeni kombinasyon icin tools\Build-VoiceCache.ps1 yeniden calistirilir.
+    'eksikip'      = 'Eksik: internet erişimi.'
+    'eksikdns'     = 'Eksik: adres çözümleme.'
+    'eksiksinyal'  = 'Eksik: sinyal yolu.'
+    'eksiktumu'    = 'Eksik: tüm bağlantı.'
+    'eksikbaglanti' = 'Eksik: bağlantı.'
+    # Belge engeli anonslari (restart iptali): ekranda da ayni bilgi veriliyor.
+    'docsblock'  = 'Yeniden başlatma iptal edildi. Kaydedilmemiş belge var. Lütfen belgeleri kaydedin.'
 }

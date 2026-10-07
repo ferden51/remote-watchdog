@@ -64,6 +64,9 @@ $ConfigFile = Join-Path $BaseDir 'config.json'
 $RebootPendingFile = Join-Path $BaseDir 'reboot-pending.json'
 $RebootCancelFile = Join-Path $BaseDir 'reboot-cancel.flag'
 $RebootAckFile = Join-Path $BaseDir 'reboot-ack.json'
+# Belge koruyucu ENGELINI bildiren dosya: reboot belge kaydedilemeden iptal edildiginde
+# yazilir; panel okuyup "yine de kapat" yolunu sunar (bkz. Write-DocsBlockNotice).
+$DocsBlockFile = Join-Path $BaseDir 'docs-block.json'
 # Restart'i sayac surecinden bagimsiz yapan tek seferlik gorev (bkz. Start-DeadlineRebootGuard).
 $DeadlineTaskName = 'RemoteHostDeadlineReboot'
 $TaskName = 'RemoteHostWatchdog'
@@ -1276,6 +1279,47 @@ function Stop-OfficeForced {
     return $killed
 }
 
+function Write-DocsBlockNotice {
+    <#
+        BELGE KORUMA ÇIKMAZI. OfficeAbortRebootIfStillOpen/IfUnsaved acikken reboot
+        belge kaydedilemedigi iptal EDILIR; bu bilincli bir veri kaybi korumasidir ama
+        uzaktan müdahale edemeyen bir kullanici icin sistem erisilemez hale gelebilir
+        (restart SONSUZA kadar iptal). Burada durumu bir dosyaya yaziyoruz; panel
+        "BELGE KORUYUCU ENGELLIYOR" diye gosterip iki secenek sunuyor:
+          - Belgeleri kaydet/kapat (guvenli, varsayilan)
+          - Yine de yeniden baslat (veri kaybi riski, bilincli kabul)
+        Dosya yalnizca ENGEL varken yazilir; engel kalkinca temizlenir.
+    #>
+    param([string]$Sebep = '')
+    try {
+        $unsaved = 0; $names = @(); $failed = @()
+        $stateFile = Join-Path ($env:windir + '\Temp') 'RemoteWatchdog-docs.json'
+        if (Test-Path -LiteralPath $stateFile) {
+            try {
+                $ds = Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
+                $unsaved = [int]$ds.unsaved
+                $names = @($ds.names)
+                $failed = @($ds.failed)
+            } catch { }
+        }
+        $ofis = @(Get-Process -Name 'WINWORD', 'EXCEL' -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName })
+        $j = [ordered]@{
+            at        = (Get-Date).ToString('o')
+            reason    = $Sebep
+            unsaved   = $unsaved
+            names     = @($names)
+            failed    = @($failed)
+            office    = @($ofis)
+            canForce  = $true
+        }
+        [System.IO.File]::WriteAllText($DocsBlockFile, ($j | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding $true))
+    } catch { }
+}
+
+function Clear-DocsBlockNotice {
+    try { Remove-Item -LiteralPath $DocsBlockFile -Force -ErrorAction SilentlyContinue } catch { }
+}
+
 function Request-OfficeSave {
     param([int]$TimeoutSeconds)
     $cfg = $global:cfg
@@ -1298,7 +1342,10 @@ function Request-OfficeSave {
             $ds = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
             if ([int]$ds.unsaved -gt 0) {
                 Write-Log 'ALERT' ('belge koruyucu ' + $ds.unsaved + ' kaydedilmemiş belge bildiriyor (' + ((@($ds.names)) -join ', ') + '); reboot yapilmiyor')
-                if ([bool]$cfg.OfficeAbortRebootIfUnsaved) { return $false }
+                if ([bool]$cfg.OfficeAbortRebootIfUnsaved) {
+                    Write-DocsBlockNotice -Sebep ('kaydedilmemiş belge: ' + ((@($ds.names)) -join ', '))
+                    return $false
+                }
             }
         } catch { }
     }
@@ -1325,8 +1372,15 @@ function Request-OfficeSave {
     try { Remove-Item -LiteralPath $requestFile -Force -ErrorAction SilentlyContinue } catch { }
     if (-not $done -and $waited -ge $TimeoutSeconds) {
         Write-Log 'ERR' ('belge kaydetme zaman asimina ugradi (' + $TimeoutSeconds + ' sn); Word/Excel acik olabilir')
-        return (-not [bool]$cfg.OfficeAbortRebootIfStillOpen)
+        if ([bool]$cfg.OfficeAbortRebootIfStillOpen) {
+            Write-DocsBlockNotice -Sebep ('belge kaydetme zaman aşımı (' + $TimeoutSeconds + ' sn); Word/Excel kapanmadı'
+        )
+            return $false
+        }
+        return $true
     }
+    # Engel yok: onceki turdan kalan uyariyi temizle.
+    Clear-DocsBlockNotice
     return $cleared
 }
 
@@ -1700,7 +1754,15 @@ function Invoke-RebootIfNeeded {
     Send-Telegram ('[KRİTİK] ' + $env:COMPUTERNAME + ' ' + $state.ConsecutiveFailures + ' kez onarılamadı, ' + $cfg.RebootDelaySeconds + ' sn sonra yeniden başlatılıyor')
     if (-not (Request-OfficeSave -TimeoutSeconds ([int]$cfg.OfficeSaveTimeoutSeconds))) {
         Write-Log 'ALERT' 'yeniden başlatma iptal edildi: Word/Excel belgeleri kaydedilemedi (kayıp olmaması için durduruldu)'
-        Send-Telegram ('[UYARI] ' + $env:COMPUTERNAME + ' yeniden başlatma iptal: kaydedilmemiş Word/Excel belgesi var, önce kaydedip kapatın')
+        <#
+            Kullaniciya ACIK yol sun: mesaj "restart yapilmayacak" deyip bitmemeli.
+            Panel docs-block.json'u okuyup "Kaydet ve kapat / Yine de kapat" kartini
+            gosteriyor; Telegram'da da ayni secenek yazilir. Aksi halde kullanici
+            uzaktan ne yapacagini bilemez ve makine erisilemez kalir.
+        #>
+        Send-Telegram ('[UYARI] ' + $env:COMPUTERNAME + ' yeniden başlatma iptal: kaydedilmemiş Word/Excel belgesi var. Panelden "Kaydet ve kapat" ya da bilinçli olarak "Yine de kapat" seçeneğini kullanın; aksi halde makine yeniden başlamayacak.')
+        # Sesli anons: panel pending-voice.json'u okuyup konuşur (host'ta Speak-Text yok).
+        $null = Write-RebootAnnounce -Text 'Yeniden başlatma iptal edildi. Kaydedilmemiş belge var. Lütfen belgeleri kaydedin.' -CountdownSeconds 0 -Force -VoiceKey 'docsblock'
         return
     }
     $hist = @()
@@ -2475,6 +2537,20 @@ function Send-NetDownAnnounce {
     if (-not $eksik) { $eksik = 'baglanti' }
     $metin = 'Ağ sorunu algılandı. Eksik: ' + $eksik + '. Onarım başlatılıyor.'
     Write-Log 'ALERT' ('ANLIK AG SORUNU: ' + $metin)
+    <#
+        SES = EKRAN. voiceKey sabit 'netdown' idi; panel hazir klibi caldig icin
+        "Eksik: ..." kismi HIC konusulmuyordu (ekranda IP yazarken ses genel cumleyi
+        soyluyordu -> "bu bozuk mu?" hissi). Artik eksik katmana gore AYRI onbellekli
+        cumle seciliyor; ses de ekranla ayni bilgiyi veriyor. Bilinmeyen katman
+        varsa genel 'netdown' dusulur.
+    #>
+    $vk = 'netdown'
+    $e = $eksik.ToLowerInvariant()
+    if ($e -match 'ip') { $vk = 'eksikip' }
+    elseif ($e -match 'dns|cozum') { $vk = 'eksikdns' }
+    elseif ($e -match 'sinyal|mtalk') { $vk = 'eksiksinyal' }
+    elseif ($e -match 'tumu|hepsi') { $vk = 'eksiktumu' }
+    elseif ($e -match 'baglanti|internet') { $vk = 'eksikbaglanti' }
 
     # 1) Panel icin bekleyen anons (dosya; panel okuyup konusur)
     # NOT: pending-voice.json TEK dosya ve restart anonsu da onu yazar. Buraya yazdigimiz
@@ -2499,7 +2575,7 @@ function Send-NetDownAnnounce {
             } catch { }
         }
         if ($yazilsin) {
-            ([ordered]@{ text = [string]$metin; sfx = 'warn'; voiceKey = 'netdown'; at = (Get-Date).ToString('o') } | ConvertTo-Json) |
+            ([ordered]@{ text = [string]$metin; sfx = 'warn'; voiceKey = $vk; at = (Get-Date).ToString('o') } | ConvertTo-Json) |
                 Set-Content -LiteralPath $vfRepair -Encoding UTF8
         }
     } catch { Write-Log 'WARN' ('anlik sorun anonsu dosyasi yazilamadi: ' + $_.Exception.Message) }

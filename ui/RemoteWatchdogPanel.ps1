@@ -509,6 +509,56 @@ function Get-Actions {
         [void]$a.Add([pscustomobject]@{ Level = $lvl; Title = $c.name; Detail = [string]$c.detail; Key = $key; Action = $act })
     }
     $docsState = Join-Path $env:windir 'Temp\RemoteWatchdog-docs.json'
+    <#
+        CRD KAYIT HATIRLATMASI. Kurulumun en kritik MANUEL adimi budur ve watchdog
+        yapamaz; ancak panelde yalnizca "host_id=YOK" kontrolu kirmizi gosteriyordu,
+        kullanici yesil mesajlar arasinda kaybediyordu. Artik "Bekleyen isler" listesinde
+        acik bir kart olarak durur ve tıklanınca kayıt sayfasını açar.
+    #>
+    $crdC = @($hj.checks | Where-Object { $_.name -eq 'CRD servisi' }) | Select-Object -First 1
+    if ($crdC) {
+        $hid = ''
+        try { if ($crdC.metrics -and ($crdC.metrics.PSObject.Properties.Name -contains 'hostId')) { $hid = [string]$crdC.metrics.hostId } } catch { }
+        if ($hid -ne 'var') {
+            [void]$a.Add([pscustomobject]@{
+                Level  = 'warn'
+                Title  = 'Google Remote Desktop KAYITLI DEĞİL'
+                Detail = 'Bu adım yalnızca siz yapabilirsiniz: remotedesktop.google.com/headless → "Set up remote access" → PIN alın, sonra kendi cihazınızda Machines → + ile ekleyin. Kayıt olmadan uzak erişim çalışmaz.'
+                Key    = 'crd'
+                Action = 'Kayıt sayfasını aç'
+            })
+        }
+    }
+    <#
+        BELGE KORUMA ÇIKMAZI. Host reboot'u belge kaydedilemeden iptal edince
+        docs-block.json yazar. Bu dosya varsa restart KALICI olarak engellidir
+        (belge koruma ayari acik oldugu icin) ve kullanici uzaktan mudahale edemezse
+        makine erisilemez kalabilir. Kart EN USTTE ve kirmizi: iki yol sunulur
+        (Kaydet ve kapat / Yine de kapat).
+    #>
+    $docsBlock = Join-Path $HostData 'docs-block.json'
+    if (Test-Path -LiteralPath $docsBlock) {
+        try {
+            $db = Get-Content -LiteralPath $docsBlock -Raw -Encoding UTF8 | ConvertFrom-Json
+            $det = [string]$db.reason
+            if (@($db.names).Count -gt 0) { $det = (@($db.names) -join ', ') }
+            elseif (-not $det) { $det = 'Word/Excel kaydedilemedi' }
+            [void]$a.Add([pscustomobject]@{
+                Level  = 'bad'
+                Title  = 'BELGE KORUYUCU YENİDEN BAŞLATMAYI ENGELLİYOR'
+                Detail = ($det + ' — kaydedip kapatın ya da bilinçli olarak veriden vazgeçin')
+                Key    = 'docs'
+                Action = 'Kaydet ve kapat'
+            })
+            [void]$a.Add([pscustomobject]@{
+                Level  = 'warn'
+                Title  = 'Yine de yeniden başlat (kaydedilmemiş veri kaybolabilir)'
+                Detail = 'Belge koruma ayarını atlayarak kapatır. Yalnızca veriyi kaybetmeyi göze alıyorsanız.'
+                Key    = 'docsforce'
+                Action = 'Yine de kapat'
+            })
+        } catch { }
+    }
     if (Test-Path -LiteralPath $docsState) {
         try {
             $ds = Get-Content -LiteralPath $docsState -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -890,6 +940,21 @@ $Xaml = @'
               <Border Background="#16191E" CornerRadius="8" Padding="12,8" Margin="0,0,0,12" BorderBrush="#2A2F36" BorderThickness="1">
                 <TextBlock x:Name="TxtSettingsStatus" Text="Watchdog durumu yukleniyor..." Style="{StaticResource Small}" TextWrapping="Wrap"/>
               </Border>
+            <!-- AYAR ARAMA: 60+ ayar tek duz listedeydi; deneyimsiz kullanici kaydirip
+                 aramak zorunda kaliyordu. Baslik/anahtar yazilirsa yalnizca eslesenler
+                 gosterilir, eslesme yoksa baslik gosterilir. Bos birakilirsa hepsi. -->
+            <Grid Margin="0,0,0,10">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <TextBox x:Name="TxtSettingsFilter" Grid.Column="0" Padding="8,6" FontSize="13"
+                       Background="#16191E" Foreground="{StaticResource Tx}" BorderBrush="#2A2F36" BorderThickness="1"
+                       ToolTip="Ayar ara (ornek: telegram, blackout, RDP, ses)"/>
+              <Button x:Name="BtnSettingsFilterClear" Grid.Column="1" Content="Temizle" Style="{StaticResource Btn}"
+                      Margin="8,0,0,0" Padding="12,6" ToolTip="Arama kutusunu temizle ve tum ayarlari goster"/>
+            </Grid>
+            <TextBlock x:Name="TxtSettingsFilterInfo" Style="{StaticResource Small}" Margin="0,0,0,6" Text=""/>
             <StackPanel x:Name="SettingsPanel"/>
             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
               <Button x:Name="BtnSave" Content="Ayarları kaydet" Style="{StaticResource BtnAccent}" Margin="0,0,10,0"/>
@@ -1925,6 +1990,29 @@ function Invoke-ConnAction {
         'repair' { Invoke-NetworkRepair }
         'crd' { Start-Process 'https://remotedesktop.google.com/headless' }
         'docs' { Invoke-Script -Path $HostDocs -Args @('-Force') -Wait }
+        'docsforce' {
+            <#
+                BELGE KORUMAYI BILINCLI OLARAK ATLA. Bu, veri kaybi riski taşir; onay
+                metni bunu AÇIKÇA söyler ve kullanıcıdan iki kez onay ister (OnceUse
+                yerine 'Evet, kaybedebilirim' butonu). Yalnizca belge koruyucu gercekten
+                engelliyorsa gosterilir (docs-block.json).
+            #>
+            $r = [System.Windows.MessageBox]::Show(
+                'Yine de yeniden başlatılacak.' + "`n`n" +
+                'KAYDEDİLMEMİŞ BELGELER KAYBOLABİLİR. Bu işlem geri alınamaz.' + "`n`n" +
+                'Devam edilsin mi?',
+                'Veri kaybı riski - onay gerekli', 'YesNo', 'Exclamation')
+            if ($r -ne 'Yes') { return }
+            $r2 = [System.Windows.MessageBox]::Show(
+                'Son kez doğrulama: kaydedilmemiş değişiklikler kalıcı olarak silinecek.' + "`n" +
+                'Emin misiniz?',
+                'Emin misiniz?', 'YesNo', 'Stop')
+            if ($r2 -ne 'Yes') { return }
+            # Belge engelini kaldır ki yeniden başlatma yeniden bloklanmasın.
+            try { Remove-Item -LiteralPath (Join-Path $HostData 'docs-block.json') -Force -ErrorAction SilentlyContinue } catch { }
+            Announce-Reboot
+            Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait
+        }
         'log' { Show-Page 'log'; Update-Log }
         'settings' { Show-Page 'settings'; Build-Settings }
         'reboot' {
@@ -2444,8 +2532,23 @@ function Build-Settings {
         $cur = Get-CurrentValues
         $panel = El $script:Win 'SettingsPanel'
         $panel.Children.Clear()
+        # AYAR ARAMA: kutu bos degilse yalnizca eslesen ayarlar (ve basliklari) gosterilir.
+        $filtre = ''
+        try { $fbox = El $script:Win 'TxtSettingsFilter'; if ($fbox) { $filtre = ([string]$fbox.Text).Trim().ToLowerInvariant() } } catch { }
         $first = $true
+        $sayilan = 0
+        $toplam = 0
         foreach ($d in $script:Defs) {
+            if ($d.Type -ne 'section') { $toplam++ }
+            <#  Eslesme: baslik VEYA anahtar icinde arama. Bolum basligini da tutuyoruz
+                ki eslesen ayarin hangi grupta oldugu gorunsun. #>
+            if ($filtre) {
+                $hay = (([string]$d.Title) + ' ' + ([string]$d.Key) + ' ' + ([string]$d.Sec)).ToLowerInvariant()
+                $uyum = $hay -like ('*' + $filtre + '*')
+                if ($d.Type -eq 'section') {
+                    if (-not $uyum) { $first = $true; continue }   # basligi goster, sonra devam
+                } elseif (-not $uyum) { continue }
+            }
             if ($d.Type -eq 'section') {
                 $hdr = New-Object System.Windows.Controls.TextBlock
                 $hdr.Text = [string]$d.Sec
@@ -2499,7 +2602,27 @@ function Build-Settings {
                 }
             }
             [void]$panel.Children.Add((New-SettingRow -Title ([string]$d.Title) -Control $ctrl))
+            $sayilan++
         }
+        <#  Filtre ozeti: kac ayar gosteriliyor / toplam. Arama kutusu bosken butun
+            ayarlar listelenir; doluyken yalnizca eslesenler. #>
+        try {
+            $fbox2 = El $script:Win 'TxtSettingsFilterInfo'
+            if ($fbox2) {
+                if ($filtre) {
+                    if ($sayilan -eq 0) {
+                        $fbox2.Text = ('"' + $filtre + '" için eşleşen ayar yok. Aramayı temizleyip tüm ayarları görebilirsiniz.')
+                        $fbox2.Foreground = Bx 'Warn'
+                    } else {
+                        $fbox2.Text = ('"' + $filtre + '" için ' + $sayilan + ' / ' + $toplam + ' ayar gösteriliyor.')
+                        $fbox2.Foreground = Bx 'Muted'
+                    }
+                } else {
+                    $fbox2.Text = ($toplam + ' ayar. Aramak için yukarıya yazın (ör. telegram, blackout, RDP, ses).')
+                    $fbox2.Foreground = Bx 'Muted'
+                }
+            }
+        } catch { }
     } catch {
         Write-Trace ('Build-Settings hata: ' + $_.Exception.Message)
         [System.Windows.MessageBox]::Show('Ayarlar yuklenirken hata olustu: ' + $_.Exception.Message, 'RemoteWatchdog') | Out-Null
@@ -3654,6 +3777,34 @@ try { Speak-PendingVoice } catch { Write-Trace ('bekleyen anons hatasi: ' + $_.E
             }
             try { $btnReload.Content = 'Formu yenile'; $btnReload.IsEnabled = $true; if ($statusBox) { $statusBox.Foreground = Bx 'Ok' } } catch { }
         })
+    <#
+        AYAR ARAMA olaylari. TextChanged her tus vurusunda formu yeniden kurar; 60+ ayar
+        icin bu birkac on milisaniye (kabul edilebilir) ve kullanicinin aninda sonuc
+        gormesini saglar. "Temizle" dugmesi kutuya odaklanip sifirlar.
+    #>
+    try {
+        $fbox = El $script:Win 'TxtSettingsFilter'
+        if ($fbox) {
+            $script:SettingsFilterTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:SettingsFilterTimer.Interval = [TimeSpan]::FromMilliseconds(220)
+            $script:SettingsFilterTimer.Add_Tick({
+                    if ($script:SettingsFilterTimer) { $script:SettingsFilterTimer.Stop() }
+                    try { Build-Settings } catch { Write-Trace ('ayar filtresi hatasi: ' + $_.Exception.Message) }
+                })
+            $fbox.add_TextChanged({ if ($script:SettingsFilterTimer) { $script:SettingsFilterTimer.Stop(); $script:SettingsFilterTimer.Start() } })
+        }
+        $fclear = El $script:Win 'BtnSettingsFilterClear'
+        if ($fclear) {
+            $fclear.Add_Click({
+                    try {
+                        $fb = El $script:Win 'TxtSettingsFilter'
+                        if ($fb) { $fb.Text = ''; $fb.Focus() | Out-Null }
+                        Build-Settings
+                    } catch { Write-Trace ('ayar filtresi temizleme hatasi: ' + $_.Exception.Message) }
+                })
+        }
+    } catch { Write-Trace ('ayar arama baglantisi kurulamadi: ' + $_.Exception.Message) }
+
     (El $script:Win 'BtnLogRefresh').Add_Click({ Update-Log })
     (El $script:Win 'BtnLogCopy').Add_Click({ try { [System.Windows.Clipboard]::SetText((Get-LogText)) } catch { } })
     (El $script:Win 'BtnLogOpen').Add_Click({ if (Test-Path $HostLog) { Start-Process notepad.exe $HostLog } })
