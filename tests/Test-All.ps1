@@ -264,6 +264,183 @@ if ($Section -eq 0 -or $Section -eq 1) {
     <#  Geri sayim sonunda dogrudan shutdown.exe CAGRILMEZ: cikis kodu atiliyordu ve
         restart gerceklesmese bile butce "gerceklesmis" sayiliyordu. #>
     Ok 'host geri sayim sonrasi dogrulanabilir restart yolunu kullanir' ($hostText -match '(?s)geri sayim bitti.{0,900}Confirm-Reboot')
+    <#
+        REGRESYON 1 (gece olayi): geri sayim dongusu Invoke-Probe/Invoke-WebRequest
+        kullaniyordu; -TimeoutSec DNS beklemesini KAPSAMAZ, yonlendirici asili
+        kalinca tek cagri 11-30 sn blokladi. Sonuc: 325 kez "geri sayimi basladi",
+        0 kez "geri sayim bitti", shutdown.exe HIC cagrilmadi; makineyi ancak
+        Windows Update kapatti. Dongu icinde DNS'e giren YOL OLMAMALI.
+        NOT: yorumlar temizlenir; aksi halde hatayi anlatan yorum satiriyla eslesir.
+    #>
+    function Strip-CodeComments {
+        param([string]$Text)
+        if (-not $Text) { return '' }
+        $t = [regex]::Replace($Text, '(?s)<#.*?#>', ' ')   # blok yorumlari
+        $t = [regex]::Replace($t, '(?m)^\s*#.*$', ' ')      # tam satir yorumlari
+        $t = [regex]::Replace($t, "(?m)(?<!')#(?!\s*\{).*$", ' ')  # satir sonu yorumlari
+        return $t
+    }
+    $cdFn = [regex]::Match($hostText, '(?s)function Start-CountdownReboot.*?\r?\n}\r?\n')
+    Ok 'host Start-CountdownReboot bulundu' ($cdFn.Success)
+    if ($cdFn.Success) {
+        $cdCode = Strip-CodeComments $cdFn.Value
+        $whilePart = [regex]::Match($cdCode, '(?s)while \(\(Get-Date\) -lt \$end\).*')
+        $whileCode = if ($whilePart.Success) { $whilePart.Value } else { '' }
+        Ok 'geri sayim dongusu DNS''e girmiyor (Invoke-Probe yok)' ($whileCode -notmatch 'Invoke-Probe|Invoke-WebRequest|generate_204')
+        Ok 'geri sayim dongusu sert zaman asimli TCP kullaniyor (Get-TcpMs)' ($whileCode -match 'Get-TcpMs')
+    }
+    <#
+        REGRESYON 2: sayac yapan surec olurse restart de olmamaliydi. Restart artik
+        deadline tabanli, SYSTEM, tek seferlik bir goreve devrediliyor.
+    #>
+    $guardFn = [regex]::Match($hostText, '(?s)function Start-DeadlineRebootGuard.*?\r?\n}\r?\n')
+    Ok 'host deadline restart nöbetçisi var (Start-DeadlineRebootGuard)' ($guardFn.Success)
+    Ok 'host deadline nöbetçisi görev gövdesi var (Invoke-DeadlineReboot)' ($hostText -match 'function Invoke-DeadlineReboot')
+    Ok 'host deadline nöbetçisi -DeadlineReboot anahtarıyla çalışıyor' ($hostText -match '\[switch\]\$DeadlineReboot')
+    Ok 'host deadline nöbetçisi SYSTEM + Highest yetkiyle kuruluyor' ($guardFn.Success -and ($guardFn.Value -match "UserId 'SYSTEM'" -and $guardFn.Value -match 'RunLevel Highest'))
+    Ok 'host deadline nöbetçisi sayac başlarken devreye giriyor' ($cdFn.Success -and ($cdFn.Value -match 'Start-DeadlineRebootGuard'))
+    Ok 'host deadline nöbetçisi iptal yollarında kaldırılıyor' (($cdFn.Success) -and (([regex]::Matches($cdFn.Value, 'Stop-DeadlineRebootGuard')).Count -ge 3))
+    $dlFn = [regex]::Match($hostText, '(?s)function Invoke-DeadlineReboot.*?\r?\n}\r?\n')
+    if ($dlFn.Success) {
+        $dlCode = Strip-CodeComments $dlFn.Value
+        Ok 'deadline nöbetçisi internet dönerse restart yapmıyor' ($dlCode -match 'saglikli')
+        Ok 'deadline nöbetçisi de DNS''e girmiyor' (($dlCode -match 'Get-TcpMs') -and ($dlCode -notmatch 'Invoke-Probe|Invoke-WebRequest'))
+        Ok 'deadline nöbetçisi zorla restart zincirini çağırıyor' ($dlCode -match 'Confirm-Reboot')
+        Ok 'deadline nöbetçisi kendini tek seferlik olarak temizliyor' ($dlCode -match 'Stop-DeadlineRebootGuard')
+    } else { Ok 'deadline nöbetçisi gövdesi ayrıştırılamadı' $false }
+    <#
+        REGRESYON 3: yumusak restart (shutdown /r /t 5) "basarili" donse bile makine
+        kapanmayabilir. Zorla (/f) kademe + yetki farkindaki yontem atlanmasi gerekli.
+    #>
+    $crFn = [regex]::Match($hostText, '(?s)function Confirm-Reboot.*?\r?\n}\r?\n')
+    Ok 'host Confirm-Reboot bulundu' ($crFn.Success)
+    if ($crFn.Success) {
+        $crCode = Strip-CodeComments $crFn.Value
+        Ok 'Confirm-Reboot zorla (/f) kademesi iceriyor' ($crCode -match '/r /f /t 0')
+        Ok 'Confirm-Reboot yetki yoksa WMI/RASD''yi atladiyor' ($crCode -match 'Test-AdminForReboot')
+        Ok 'Confirm-Reboot son care kademesi var (bootstatuspolicy)' ($crCode -match 'bootstatuspolicy')
+        Ok 'Confirm-Reboot zorla kullanildigini loglar' ($crCode -match '\[ZORLA\]|ZORLA')
+        Ok 'Confirm-Reboot tum yontemler basarisizsa ERR yaziyor' ($crCode -match 'HICBIR YONTEMLE')
+        <#
+            REGRESYON 6 (canli test 09:51'de kanitlandi): shutdown.exe'ye argumanlar DIZI
+            olarak veriliyordu. Start-Process bunlari TIRNAKSIZ birlestirir:
+              "/c RemoteHostWatchdog: onarilamayan baglanti sorunu"
+              -> shutdown.exe 8 arguman goruyor, /c yalnizca "RemoteHostWatchdog:" aliyor,
+                 kalan kelimeler GECERSIZ parametre oluyor -> CIKIS KODU 1.
+            Sonuc: yumusak restart HICBIR ZAMAN calismadi; zorla (/f) yolu da ayni hatayi
+            tasiyordu ve cikis kodu hic kontrol edilmedigi icin "iletildi" yaziyordu.
+            Duzeltme: arguman TEK tirnakli string + /c metni ic tirnakli.
+        #>
+        Ok 'Confirm-Reboot shutdown''a DIZI arguman vermiyor' ($crCode -notmatch "ArgumentList\s*@\(")
+        Ok 'Confirm-Reboot /c metni ic tirnakla sariliyor' ($crCode -match '/c\s+"RemoteHostWatchdog')
+        $shutdownCalls = [regex]::Matches($crCode, "Invoke-Shutdown -ArgLine\s+'([^']+)'")
+        Ok 'Confirm-Reboot shutdown cagrilarini tek string ile yapiyor' ($shutdownCalls.Count -ge 3)
+        $kotuTirnak = 0
+        foreach ($m in $shutdownCalls) { if ($m.Groups[1].Value -notmatch '/c\s+"') { $kotuTirnak++ } }
+        Ok 'Confirm-Reboot hicbir shutdown cagrisinda /c tirnaksiz degil' ($kotuTirnak -eq 0)
+        Ok 'Confirm-Reboot shutdown cikis kodunu KONTROL ediyor' ($crCode -match 'ExitCode -eq 0')
+        <#
+            REGRESYON 7: teslim edilmis sayilan ama makineyi acmayan restart. Deadline
+            nöbetçisi "iletildi" deyip cikip sessizce birakiliyordu; simdi acilis zamani
+            dogrulanir, degismediyse daha sert yontemlerle tirmanilir.
+        #>
+        Ok 'Confirm-Reboot tırmanma modu var (-ForceOnly)' ($crCode -match '\[switch\]\$ForceOnly')
+        $dlFn2 = [regex]::Match($hostText, '(?s)function Invoke-DeadlineReboot.*?\r?\n}\r?\n')
+        if ($dlFn2.Success) {
+            $dlCode2 = Strip-CodeComments $dlFn2.Value
+            Ok 'nöbetçi restart teslimini doğruluyor (açılış zamanı)' ($dlCode2 -match 'Get-BootStamp')
+            Ok 'nöbetçi doğrulama başarısızsa tırmanıyor' ($dlCode2 -match 'Confirm-Reboot -ForceOnly')
+            Ok 'nöbetçi başarısızsa ERR yazıyor' ($dlCode2 -match 'elle müdahale gerekli')
+        }
+        <#
+            REGRESYON 8: çift tetikleme yarışı. Sayaç süreci de Confirm-Reboot çağırıyordu;
+            nöbetçi ile aynı anda ikisi birden kapatmayı deniyordu (09:51'de "cikis kodu 1").
+            Nöbetçi kuruluysa karar onundur, sayaç hiçbir şey yapmamalı.
+        #>
+        Ok 'nöbetçi kuruluysa sayaç tekrar tetiklemiyor' ($cdFn.Success -and ($cdFn.Value -match 'Test-DeadlineRebootGuardArmed'))
+        Ok 'nöbetçi varlığı ayrı fonksiyonla sorgulanıyor' ($hostText -match 'function Test-DeadlineRebootGuardArmed')
+        <#
+            REGRESYON 9 (canli olay 01.10 19:04): restart GERÇEKTEN gerçekleşti
+            (makine yeniden açıldı) ama bütçeye "0/5" yazıldı, RebootsUtc boş kaldı.
+            Sebep: PendingRebootUtc damgasını sayaç döngüsü yazıyordu; aradaki döngüler
+            Sync-RebootAccounting'te "sahte istem" deyip damgayı siliyordu. Damgayı
+            asıl restart'i İLETEN süreç (nöbetçi) vurmalı.
+        #>
+        if ($dlFn.Success) {
+            $dlCode3 = Strip-CodeComments $dlFn.Value
+            Ok 'nöbetçi restart bütçesi damgasını kendisi vuruyor' ($dlCode3 -match 'PendingRebootUtc\s*=\s*\(Get-Date\)')
+            $iDamga = $dlCode3.IndexOf('PendingRebootUtc')
+            $iCagri = $dlCode3.IndexOf('Confirm-Reboot')
+            Ok 'nöbetçi damgayı Confirm-Reboot ÖNCESİ vuruyor' ($iDamga -ge 0 -and $iCagri -ge 0 -and $iDamga -lt $iCagri)
+            Ok 'nöbetçi eski sahte kayıtları temizliyor' ($dlCode3 -match 'RebootsUtc\s*=\s*@\(\@\(\$st\.RebootsUtc\)')
+        }
+        <#
+            REGRESYON 10 (canlı olay 01.10 19:04): ağ 19:03:54'te toparlanmıştı
+            ([DUZELTI], her kontrol TAMAM), nöbetçi 27 sn sonra TEK başarısız yoklamada
+            makineyi yeniden açtı. Ağ flapping yaparken tek anlık ölçüm yanıltıcı.
+            Yeniden başlatma işi kesen karar olduğu için arka arkaya birkaç
+            başarısız yoklama gerekir.
+        #>
+        if ($dlFn.Success) {
+            $dlCode4 = Strip-CodeComments $dlFn.Value
+            Ok 'nöbetçi tek yoklamayla karar vermiyor (çoklu deneme)' ($dlCode4 -match '\$deneme\s+-le\s+3')
+            Ok 'nöbetçi denemeleri sayıyor' ($dlCode4 -match '\$basarisiz')
+            Ok 'nöbetçi denemeler arası bekliyor' ($dlCode4 -match 'Start-Sleep -Seconds 3')
+            $iLoop = $dlCode4.IndexOf('$deneme -le 3')
+            $iReboot = $dlCode4.IndexOf('zorla yeniden başlatma')
+            Ok 'nöbetçi çoklu yoklama yapmadan restart kararı vermiyor' ($iLoop -ge 0 -and $iReboot -ge 0 -and $iLoop -lt $iReboot)
+        }
+        <#
+            REGRESYON 11: nöbetçinin var oluş sebebi "sayaç süreci ölmüş olabilir" halidir.
+            Bu halde panel iptal onayını (reboot-ack.json) bekler; ack'ı yazacak tek aktör
+            nöbetçidir. Nöbetçi ack yazmazsa panel "İptal onaylanmadı, geri sayım sürüyor"
+            der ve kullanıcıya yanlış bilgi gider (oysa makine kapanmayacak).
+        #>
+        $ccFn = [regex]::Match($hostText, '(?s)function Confirm-DeadlineCancel.*?\r?\n}\r?\n')
+        Ok 'host nöbetçi iptal işleyicisi var (Confirm-DeadlineCancel)' ($ccFn.Success)
+        if ($ccFn.Success) {
+            $ccCode = Strip-CodeComments $ccFn.Value
+            Ok 'nöbetçi iptal onayını (reboot-ack.json) yazıyor' ($ccCode -match 'RebootAckFile')
+            Ok 'nöbetçi iptal/bekleyen dosyalarını temizliyor' (($ccCode -match 'RebootCancelFile') -and ($ccCode -match 'RebootPendingFile'))
+            $iAck = $ccCode.IndexOf('RebootAckFile')
+            $iStop = $ccCode.IndexOf('Stop-DeadlineRebootGuard')
+            Ok 'nöbetçi ack''ı görevi kaldırmadan önce yazıyor' ($iAck -ge 0 -and $iStop -gt $iAck)
+        } else { Ok 'Confirm-DeadlineCancel ayrıştırılamadı' $false }
+        <#
+            REGRESYON 12: nöbetçi başladıktan SONRA panelden iptal edilmiş olabilir;
+            sayaç süreci cancel dosyasını kaldırırken nöbetçi çoktan başlamışsa iptal
+            kaybolabilir. Kapatmadan hemen önce TEKRAR bakılmalı.
+        #>
+        Ok 'nöbetçi kapatmadan önce iptali tekrar kontrol ediyor' (($dlFn.Success) -and (([regex]::Matches($dlCode, 'Confirm-DeadlineCancel')).Count -ge 2))
+        <#
+            REGRESYON 13: toparlanma iptali YALNIZCA kesinti kaynaklı restart'ta geçerli
+            olmalı. Kullanıcı/panel "zorla yeniden başlat" dediyse internet sağlıklı olsa
+            bile iptal edilmemeli; aksi halde çevrimiçi makinede bu düğme hiç çalışmazdı.
+        #>
+        Ok 'host toparlanma iptali bayrağı var (CancelOnRecovery)' ($hostText -match '\[switch\]\$CancelOnRecovery')
+        Ok 'host kesinti restart''i toparlanma iptalini açar' ($hostText -match "Start-CountdownReboot -Reason 'onarilamayan baglanti sorunu' -Problems \`$badNames -CancelOnRecovery")
+        Ok 'host geri sayım döngüsü toparlanmayı bayrağa bağlar' ($cdFn.Success -and ($cdCode -match 'CancelOnRecovery'))
+        Ok 'host nöbetçi görevi CancelOnRecovery''i argümanla taşır' ($guardFn.Success -and ($guardFn.Value -match '-CancelOnRecovery'))
+        Ok 'host nöbetçi gövdesi toparlanmayı bayrağa bağlar' (($dlFn.Success) -and ($dlCode -match 'if \(\$CancelOnRecovery\)'))
+        $frLine = [regex]::Match($hostText, "(?m)^.*Start-CountdownReboot -Reason 'siz istediniz.*$").Value
+        Ok 'host panel zorla restart toparlanma iptali kullanmaz' ($frLine -and ($frLine -notmatch 'CancelOnRecovery'))
+    }
+    <#
+        REGRESYON 4: FastProbe RunLevel=Limited iken baslattigi tam dongu admin=False
+        idi; onarim kademeleri ("admin gerekir") ve zorla restart yontemleri
+        calismiyordu. FastProbe Highest olmali.
+    #>
+    $fpBlock = [regex]::Match($hostText, "(?s)\`$probeTask = 'RemoteHostFastProbe'.*?Write-Log 'INFO' \('hizli yoklama gorevi kuruldu")
+    Ok 'host FastProbe gorevi RunLevel Highest' ($fpBlock.Success -and ($fpBlock.Value -match 'RunLevel\s+Highest'))
+    <#
+        REGRESYON 5: ana SYSTEM gorevi silinince (kurulum "tamam" dedi ama kayitli
+        degildi) yalnizca acik oturuma baglaniliyordu. Gorev hem Install'da hem
+        dongu icinde kendini onarmali.
+    #>
+    Ok 'host ana SYSTEM görevi kurulumda kendini onarıyor' ($hostText -match 'ANA SYSTEM görevi EKSİKTİ, yeniden kuruldu')
+    Ok 'host ana SYSTEM görevi döngü içinde kendini onarıyor' ($hostText -match 'ANA SYSTEM görevi EKSİKTİ, döngü içinde yeniden kuruldu')
+    $unFn = [regex]::Match($hostText, '(?s)function Uninstall-Watchdog.*?\r?\n}\r?\n')
+    Ok 'host Uninstall deadline nöbetçisini de kaldırıyor' ($unFn.Success -and ($unFn.Value -match '\$DeadlineTaskName'))
     <#  -Check "hicbir sey degistirmez" sozu: SYSTEM nabzi da -Check'te yazilmamali, yoksa
         elle calistirilan bir rapor olmayan SYSTEM gorevini "saglikli" gosterir. #>
     Ok 'host -Check modu SYSTEM nabzini yazmaz' ($hostText -match '(?s)Invoke-CycleLocked \{\s*\$null = Invoke-Watchdog.{0,900}\(\(-not \$Check\) -and \(Test-Admin\)\)\s*\{[^}]*system-heartbeat')

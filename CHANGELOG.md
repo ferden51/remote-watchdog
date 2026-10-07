@@ -4,6 +4,64 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.2] - 2026-10-01
+
+Bu sürüm, 30.09 22:48 – 01.10 05:25 arasında yaşanan **6,5 saatlik kesintide restart'ın
+hiç gerçekleşmemesine** yol açan dört hatayı giderir. O gece günlükte `geri sayimi basladi`
+**325 kez**, `geri sayim bitti` **0 kez** sayıldı; `shutdown.exe` hiç çağrılmadı ve makineyi
+ancak Windows Update (`MoUsoCoreWorker.exe`) kapatabildi.
+
+### Düzeltilen
+- **Geri sayım döngüsü DNS'te kilitleniyordu (asıl sebep):** döngüdeki toparlanma kontrolü
+  `Invoke-Probe` (→ `Invoke-WebRequest`) çağırıyordu ve bu çağrı **hostname çözümlemesi** yapıyor.
+  `Invoke-WebRequest -TimeoutSec` **DNS beklemesini kapsamaz**; yönlendirici asılı kaldığında tek
+  çağrı bu makinede ölçüldüğü üzere **11–30 sn** bloklanıyor, 30 sn'lik sayaç ~50 sn'ye uzuyor ve
+  döngü hiç bitmiyordu. Aynı hata `Test-RecoveryBeforeReboot`'ta zaten düzeltilmişti, geri sayıma
+  uygulanmamıştı. Artık döngü **yalnızca `Get-TcpMs`** kullanıyor (sert zaman aşımlı, doğrudan IP).
+- **`shutdown.exe` argüman tırnak hatası (yumuşak restart hiç çalışmamıştı):** `Start-Process`
+  `-ArgumentList` dizisini **tırnaksız** birleştiriyordu:
+  `/c RemoteHostWatchdog: onarilamayan baglanti sorunu` → `shutdown.exe` dokuz argüman görüyor,
+  `/c` yalnızca `RemoteHostWatchdog:` metnini alıyor, kalan kelimeler **geçersiz parametre** oluyor
+  ve komut **çıkış kodu 1** ile başarısız oluyordu. Artık argüman **tek tırnaklı string** ve `/c`
+  metni iç tırnaklı. **Her iki `shutdown` çağrısında da çıkış kodu kontrol ediliyor** — önceki
+  zorla (`/f`) yolunda hiç kontrol edilmediği için başarısız olsa bile "iletildi" yazıyordu.
+- **Restart, sayaç sürecine bağımlıydı:** sayaç yapan süreç ölürse/oturum kapanırsa restart da
+  kayboluyordu. Artık karar ve eylem **deadline tabanlı, SYSTEM + Highest yetkili, tek seferlik**
+  `RemoteHostDeadlineReboot` görevine devrediliyor (`Start-DeadlineRebootGuard` /
+  `Invoke-DeadlineReboot`). Sayaç yalnızca kullanıcıyı bilgilendiren bir görünüm; iptal ve
+  "internet döndü" yollarında görev kaldırılıyor. Sayaç ve nöbetçi **aynı anda tetiklenmiyor**
+  (`Test-DeadlineRebootGuardArmed`) — bu çift çağrı canlı testte `cikis kodu 1` olarak görüldü.
+- **Zorla restart kademeleri eklendi:** `shutdown /r /f /t 0` (uygulamaları kapatır), yönetici
+  yoksa atlanıp loglanan WMI/RASD, ve son çare `bcdedit bootstatuspolicy` + `/f`. Restart
+  "iletildi" deyip **etkisiz kalabiliyordu**; nöbetçi artık açılış zamanını 24 sn doğruluyor,
+  değişmediyse `Confirm-Reboot -ForceOnly` ile tırmanıyor, o da olmazsa
+  "elle müdahale gerekli" yazıyor.
+- **FastProbe yetkisi `Limited` idi:** `Start-FullCycle` ile başlatılan döngüler `admin=False`
+  koşuyordu; onarım kademeleri "admin gerekir" diye atlanıyor, zorla restart yöntemleri
+  kullanılamıyordu. `RunLevel: Highest`.
+- **Ana SYSTEM görevi kaybolmuştu:** `install-debug.txt` "KAYIT-TAMAM" demesine rağmen
+  `RemoteHostWatchdog` görevi kayıtlı değildi; watchdog yalnızca açık oturuma bağımlıydı.
+  Artık hem kurulumda hem **her döngüde** varlığı doğrulanıp yoksa yeniden kuruluyor.
+- **Nöbetçi iptal onayı (`reboot-ack.json`) yazmıyordu:** nöbetçinin var oluş sebebi
+  "sayaç süreci ölmüş olabilir" halidir; bu halde ack'ı yazacak başka aktör yoktur. Panel
+  ack'ı görmediği için iptal gerçekleşmiş olsa bile **"İptal onaylanmadı, geri sayım
+  sürüyor"** diyordu. Artık `Confirm-DeadlineCancel` ack'ı yazar, iptal/bekleyen dosyalarını
+  temizler ve görevi kaldırır.
+- **İptal yarışı:** nöbetçi başladıktan SONRA panelden iptal edilirse, sayaç süreci iptal
+  dosyasını kaldırırken nöbetçi çoktan iptal kontrolünü geçmiş olabiliyordu. Nöbetçi artık
+  `Confirm-Reboot`'tan hemen önce iptal bayrağını **tekrar** kontrol ediyor.
+- **Toparlanma iptali yanlış kapsamdaydı:** "geri sayım sırasında internet dönerse iptal et"
+  mantığı **tüm** restart yollarına uygulanıyordu; paneldeki "Şimdi zorla kapat ve yeniden
+  başlat" çevrimiçi makinede bu yüzden hiç çalışmıyordu. Artık yalnızca kesinti kaynaklı
+  restart `-CancelOnRecovery` taşıyor; kullanıcı/panel restart'ı internet sağlıklı olsa bile
+  uygulanıyor.
+
+### Bilinen (ayrı konu)
+- `Test-SystemWatchdogActive` yanlış pozitif verebiliyor: `RemoteHostWatchdogUser` görevi
+  `RunLevel: Highest` olduğu için yazdığı `system-heartbeat.json`, SYSTEM görevi sağlammış gibi
+  görünüyor. Yukarıdaki kendini onarma `Get-ScheduledTask`'ı doğrudan sorguladığı için bu
+  bulanıklıktan etkilenmiyor, ama fonksiyonun kendisi hâlâ taşıyor.
+
 ## [1.3.1] - 2026-09-30
 
 ### Düzeltilen

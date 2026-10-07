@@ -38,6 +38,8 @@ param(
     [switch]$FastProbe,
     [switch]$NetListen,
     [switch]$NetTestEvent,
+    [switch]$DeadlineReboot,
+    [switch]$CancelOnRecovery,
     [switch]$Version,
     [int]$Rung = 0
 )
@@ -62,6 +64,8 @@ $ConfigFile = Join-Path $BaseDir 'config.json'
 $RebootPendingFile = Join-Path $BaseDir 'reboot-pending.json'
 $RebootCancelFile = Join-Path $BaseDir 'reboot-cancel.flag'
 $RebootAckFile = Join-Path $BaseDir 'reboot-ack.json'
+# Restart'i sayac surecinden bagimsiz yapan tek seferlik gorev (bkz. Start-DeadlineRebootGuard).
+$DeadlineTaskName = 'RemoteHostDeadlineReboot'
 $TaskName = 'RemoteHostWatchdog'
 $script:Results = New-Object System.Collections.ArrayList
 $script:PublicIp = $null
@@ -1374,32 +1378,130 @@ function Sync-RebootAccounting {
     }
 }
 
+function Test-AdminForReboot {
+    <#
+        Zorla restart zincirinde hangi kademelerin kullanilabilecegini belirler.
+        Neden ayri fonksiyon: yonetici olmayan bir FastProbe dongusu (RunLevel=Limited)
+        WMI Reboot / Restart-Computer cagiramaz; hatayi loglamak yerine o yontemleri
+        denememesi daha acik ve gurultusuz.
+    #>
+    return (Test-Admin)
+}
+
 function Confirm-Reboot {
     <#
-        Restart'i GERCEKTE yaptirir ve bunu loglar.
-        Neden: shutdown.exe tek basina bazen sessizce basarisiz olur (yetki, servis, baska
-        bir kapatma islemi). Onceki surumde cikis kodu atiliyordu ("2>&1 | Out-Null"),
-        boylece "restart oldu" denilen ama hic olmayan durumlar olusuyordu.
-        Sirasiyla denenir: shutdown.exe -> WMI Reboot -> Restart-Computer.
+        -ForceOnly: shutdown.exe yollarini ATLA, dogrudan WMI/RASD/bcdedit kademelerine
+        gec. Deadline nöbetçisi "iletildi ama makine açılmadı" dogrulamasini basarisiz
+        buldugunda tırmanma icin kullanilir; ayni yollari tekrar denemek zaman kaybidir.
+    #>
+    param([switch]$ForceOnly)
+    <#
+        Restart'i GERCEKTE yaptirir, ve YUMUSAK yol kapanirsa ZORLA bir kademeye gecer.
+
+        Neden zincir: shutdown.exe tek basina sessizce basarisiz olabilir (yetki, baska
+        bir kapatma islemi, bekleyen servis). Gecede oldugu gibi: shutdown.exe hic
+        cagrilmadi bile. Ayrica bir yontem "basarili" donse de makine KAPANMAYABILIR
+        (uygulama kapatmayi engelliyor). Bu yuzden sirasiyla:
+          1) shutdown.exe /r /t 5       -> yumusak, belgeler zaten kaydedildi
+          2) shutdown.exe /r /f /t 0     -> ZORLA, uygulamalari kapatir
+          3) WMI Reboot                  -> yumusak, yonetici gerekir
+          4) Restart-Computer -Force      -> zorla, yonetici gerekir
+          5) bcdedit bootstatuspolicy + shutdown /f
+                                       -> Acemi kurtarma kilidi takiliysa son care
+        Her kademede nedeni ve sonucu loglanir; hicbiri calismazsa ERR yazilir.
     #>
     $secilen = ''
-    try {
-        # /t 5: log ve durum dosyasinin yazilmasi icin kucuk bir pay (gorunmez), /f yok:
-        # belgeler zaten kaydedildi, uygulamalari zorla kapatmayiz.
-        $p = Start-Process -FilePath 'shutdown.exe' -ArgumentList @('/r', '/t', '5', '/c', 'RemoteHostWatchdog: onarilamayan baglanti sorunu') -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
-        if ($p.ExitCode -eq 0) { $secilen = 'shutdown.exe' }
-        else { Write-Log 'WARN' ('shutdown.exe basarisiz (cikis kodu ' + $p.ExitCode + '); yedek yontem deneniyor') }
-    } catch { Write-Log 'WARN' ('shutdown.exe calistirilamadi: ' + $_.Exception.Message + '; yedek yontem deneniyor') }
-    if (-not $secilen) {
-        try { Invoke-CimMethod -ClassName Win32_OperatingSystem -MethodName Reboot -ErrorAction Stop | Out-Null; $secilen = 'WMI Reboot' }
-        catch { Write-Log 'WARN' ('WMI Reboot basarisiz: ' + $_.Exception.Message) }
+    $secilenZorla = $false
+
+    <#
+        ARGUMAN TIRNAK HATASI (KRITIK, canli testte kanitlandi):
+        shutdown.exe'ye argumanlar DIZI olarak verilirken Start-Process bunları
+        TIRNAKSIZ birlestirir. "/c RemoteHostWatchdog: onarilamayan baglanti sorunu"
+        -> "/r /t 5 /c RemoteHostWatchdog: onarilamayan baglanti sorunu"
+        shutdown.exe 8 ayri arguman gorur; /c yalnizca "RemoteHostWatchdog:" metnini alir,
+        kalan "onarilamayan baglanti sorunu" GECERSIZ parametre olur ve komut CIKIS KODU 1
+        ile basarisiz olur. 09:51:08 testinde goruldu: "shutdown.exe basarisiz (cikis kodu 1)".
+        Yani YUMUSAK restart hicbir zaman calismamis; ayni hata zorla (/f) yolunda da vardi.
+        COZUM: argumani TEK tirnakli string olarak ver, /c metnini ic tirnakla sar.
+        Dogrulama: $p.ExitCode her iki komutta da KONTROL EDILIR; 0 degilse "basarili"
+        denmez (onceki /f yolunda cikis kodu hic kontrol edilmiyordu).
+    #>
+    function Invoke-Shutdown {
+        param([string]$ArgLine, [string]$Etiket)
+        try {
+            $p = Start-Process -FilePath 'shutdown.exe' -ArgumentList $ArgLine -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
+            if ($p.ExitCode -eq 0) { return $true }
+            Write-Log 'WARN' ($Etiket + ' basarisiz (cikis kodu ' + $p.ExitCode + '): "' + $ArgLine + '"')
+            return $false
+        } catch {
+            Write-Log 'WARN' ($Etiket + ' calistirilamadi: ' + $_.Exception.Message)
+            return $false
+        }
     }
-    if (-not $secilen) {
-        try { Restart-Computer -Force -ErrorAction Stop; $secilen = 'Restart-Computer' }
-        catch { Write-Log 'WARN' ('Restart-Computer basarisiz: ' + $_.Exception.Message) }
+
+    # --- 1) Yumusak restart (yalnizca tam zincir calistiginda) ---
+    # /t 5: log ve durum dosyasinin yazilmasi icin kucuk bir pay (gorunmez), /f yok:
+    # belgeler kaydedildi, once uygulamalari zorla kapatmayi denemiyoruz.
+    if ($ForceOnly) {
+        Write-Log 'WARN' 'zorla tırmanma: yumusak yol atlandı, doğrudan zorla yöntemler'
+    } elseif (Invoke-Shutdown -ArgLine '/r /t 5 /c "RemoteHostWatchdog: onarilamayan baglanti sorunu"' -Etiket 'shutdown.exe (/r /t 5)') {
+        $secilen = 'shutdown.exe /r /t 5'
+    } else { Write-Log 'WARN' 'yumusak restart basarisiz; zorla yeniden baslatma deneniyor' }
+
+    # --- 2) Zorla restart (/f) ---
+    # Neden ayri kademe: /t 5 yumusak takvimde "basarili" gorunur ama bir uygulama
+    # kapatmayi engellerse makine HIC kapanmaz. /f /t 0 bunu atlar.
+    # -ForceOnly modunda bu da atlanir: dogrudan WMI/RASD'ye gecilir (tirmanma).
+    if (-not $secilen -and $ForceOnly) {
+        Write-Log 'WARN' 'shutdown.exe yollari tırmanmada atlandı; WMI / Restart-Computer deneniyor'
     }
-    if ($secilen) { Write-Log 'ALERT' ('yeniden başlatma Windows''a iletildi (' + $secilen + '); 5 sn içinde kapanacak') }
-    else { Write-Log 'ERR' 'yeniden başlatma HICBIR YONTEMLE baslatilamadi; elle mudahale gerekli' }
+    if (-not $secilen -and -not $ForceOnly) {
+        if (Invoke-Shutdown -ArgLine '/r /f /t 0 /c "RemoteHostWatchdog: zorla yeniden baslatma"' -Etiket 'shutdown.exe (/r /f /t 0)') {
+            $secilen = 'shutdown.exe /r /f /t 0 (zorla)'
+            $secilenZorla = $true
+            Write-Log 'ALERT' 'yumusak restart yolu kapandi; ZORLA yeniden baslatma (/f) uygulandi'
+        }
+    }
+
+    # --- 3) WMI Reboot ---
+    if (-not $secilen) {
+        if (Test-AdminForReboot) {
+            try { Invoke-CimMethod -ClassName Win32_OperatingSystem -MethodName Reboot -ErrorAction Stop | Out-Null; $secilen = 'WMI Reboot' }
+            catch { Write-Log 'WARN' ('WMI Reboot basarisiz: ' + $_.Exception.Message) }
+        } else { Write-Log 'WARN' 'WMI Reboot atlandi: yonetici yetkisi yok (RunLevel=Limited); zorla yontemlere geciliyor' }
+    }
+
+    # --- 4) Restart-Computer -Force ---
+    if (-not $secilen) {
+        if (Test-AdminForReboot) {
+            try { Restart-Computer -Force -ErrorAction Stop; $secilen = 'Restart-Computer -Force' }
+            catch { Write-Log 'WARN' ('Restart-Computer basarisiz: ' + $_.Exception.Message) }
+        } else { Write-Log 'WARN' 'Restart-Computer atlandi: yonetici yetkisi yok (RunLevel=Limited)' }
+    }
+
+    # --- 5) Son care: Windows Onarim kilidini kaldirip tekrar dene ---
+    # Acemi kurtarma moduna dusmus bir makine yumusak/zorla kapatmayi reddeder;
+    # bootstatuspolicy ile bu kilit kaldirilir.
+    if (-not $secilen) {
+        if (Test-AdminForReboot) {
+            try {
+                bcdedit /set '{default}' bootstatuspolicy ignoreallfailures 2>&1 | Out-Null
+                bcdedit /set '{current}' bootstatuspolicy ignoreallfailures 2>&1 | Out-Null
+                Write-Log 'WARN' 'Windows Onarim kilidi (bootstatuspolicy) kaldirildi; tekrar kapatma deneniyor'
+                if (Invoke-Shutdown -ArgLine '/r /f /t 0 /c "RemoteHostWatchdog: son care"' -Etiket 'son care shutdown (/f)') {
+                    $secilen = 'bcdedit bootstatuspolicy + shutdown /f (son care)'
+                    $secilenZorla = $true
+                }
+            } catch { Write-Log 'WARN' ('son care kapatma basarisiz: ' + $_.Exception.Message) }
+        }
+    }
+
+    if ($secilen) {
+        $ek = if ($secilenZorla) { ' [ZORLA]' } else { '' }
+        Write-Log 'ALERT' ('yeniden başlatma Windows''a iletildi: ' + $secilen + $ek + '; 5 sn içinde kapanacak')
+    } else {
+        Write-Log 'ERR' 'yeniden başlatma HICBIR YONTEMLE baslatilamadi (5 kademe denendi); elle mudahale gerekli'
+    }
     return [bool]$secilen
 }
 
@@ -1571,7 +1673,122 @@ function Invoke-RebootIfNeeded {
     #>
     $null = Invoke-StateUpdate { param($st) $st.PendingRebootUtc = (Get-Date).ToString('o') }
     Write-Log 'ALERT' ('yeniden başlatma istendi: ' + [int]$cfg.RebootDelaySeconds + ' sn sonra (onaylanan restart ' + $kept.Count + '/' + [int]$cfg.MaxRestartsPerDay + '; bu restart gerçekten olunca sayılacak)')
-    $null = Start-CountdownReboot -Reason 'onarilamayan baglanti sorunu' -Problems $badNames
+    $null = Start-CountdownReboot -Reason 'onarilamayan baglanti sorunu' -Problems $badNames -CancelOnRecovery
+}
+
+function Stop-DeadlineRebootGuard {
+    <#
+        Neden var: geri sayimi yapan surec OLURSE restart de olmamaliydi. Gecede tam
+        olarak boyle oldu (325 kez sayac basladi, 0 kez bitti, shutdown.exe hic
+        cagrilmadi). Sayac dongusu artik DNS'e girmiyor, ama bir dongu sureci
+        her zaman olabilir (gorev zaman asimina takilir, oturum kapanir, surec
+        cokutulur). Bu yuzden restart, sayac surecinden TAMAMEN BAGIMSIZ bir
+        SYSTEM gorevine devredilir: o gorev deadline'da kendisi kapatir.
+
+        Iptal/duzelme durumunda bu gorev kaldirilir; kalan durumda kendini siler.
+    #>
+    try {
+        if (Get-ScheduledTask -TaskName $DeadlineTaskName -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $DeadlineTaskName -Confirm:$false -ErrorAction SilentlyContinue
+            Write-Log 'INFO' ('deadline restart nöbetçisi kaldirildi: ' + $DeadlineTaskName)
+        }
+    } catch { }
+}
+
+function Confirm-DeadlineCancel {
+    <#
+        Deadline nöbetçisi için iptal işlemini TEK yerde yapar:
+          - reboot-ack.json yazar (panel ancak bu dosyayı görünce "gerçekten durdu" der),
+          - iptal/bekleyen/anons dosyalarını temizler,
+          - nöbetçi görevini kaldırır.
+        Neden nöbetçi de ack yazmalı: nöbetçinin var oluş sebebi "sayaç süreci ölmüş
+        olabilir" halidir. Sayaç süreci öldüyse ack'ı yazacak başka aktör YOKTUR; panel
+        10 sn bekleyip "İptal onaylanmadı, geri sayım sürüyor" der ve kullanıcıya
+        yanlış bilgi gider (oysa makine kapanmayacak). Döner: $true = iptal edildi.
+    #>
+    if (-not (Test-Path -LiteralPath $RebootCancelFile)) { return $false }
+    Write-Log 'ALERT' 'deadline nöbetçisi: kullanici iptal bayrağı bulundu, restart yapılmıyor'
+    # Sebebi bekleyen dosyadan al (varsa); yoksa genel metin.
+    $sebep = 'onarilamayan baglanti sorunu'
+    try {
+        if (Test-Path -LiteralPath $RebootPendingFile) {
+            $pj = Get-Content -LiteralPath $RebootPendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if (($pj.PSObject.Properties.Name -contains 'reason') -and $pj.reason) { $sebep = [string]$pj.reason }
+        }
+    } catch { }
+    try {
+        $ack = [ordered]@{ cancelled = $true; at = (Get-Date).ToString('o'); reason = $sebep } | ConvertTo-Json
+        [System.IO.File]::WriteAllText($RebootAckFile, $ack, (New-Object System.Text.UTF8Encoding $true))
+    } catch { }
+    foreach ($f in @($RebootCancelFile, $RebootPendingFile, (Join-Path $BaseDir 'pending-voice.json'))) {
+        try { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } catch { }
+    }
+    try {
+        $null = Invoke-StateUpdate {
+            param($st)
+            $st.ConsecutiveFailures = 0
+            $st.PendingRebootUtc = ''
+            $st.OutageStartUtc = ''
+            $st.RebootCancelledUtc = (Get-Date).ToString('o')
+        }
+    } catch { }
+    Stop-DeadlineRebootGuard
+    return $true
+}
+
+function Test-DeadlineRebootGuardArmed {
+    <#
+        Deadline nöbetçisi gerçekten kuruldu mu? Neden sorgu: yönetici değilsek
+        kurulum başarısız olur ve kararın hâlâ bu süreçte kalması gerekir. Yanlış
+        "evet" dönmek restart'ın hiç tetiklenmemesine yol açar.
+    #>
+    try {
+        if (-not (Test-Admin)) { return $false }
+        return [bool](Get-ScheduledTask -TaskName $DeadlineTaskName -ErrorAction SilentlyContinue)
+    } catch { return $false }
+}
+
+function Start-DeadlineRebootGuard {
+    <#
+        Restart'i sayac surecinden bagimsiz bir SYSTEM gorevine devreder.
+        Neden: sayac sureci olurse kaybolabilir; gorev kaybolmaz. Gorev, deadline
+        gelince once sagligi TEKRAR kontrol eder (internet donmus olabilir -> iptal),
+        sonra zorla restart zincirini cagirir. Boylece "internet dondu, iptal et"
+        davranisi korunurken, sayac sureci olmasa bile makine KAPANIR.
+
+        Gorev SYSTEM + RunLevel=Highest oldugu icin kullanici oturumu kapali
+        olsa da calisir ve zorla yontemlerin hepsini kullanabilir.
+    #>
+    param(
+        [int]$DelaySeconds = 30,
+        [string]$Reason = 'onarilamayan baglanti sorunu',
+        [switch]$CancelOnRecovery
+    )
+    if (-not (Test-Admin)) {
+        # Yonetici degilsek gorev kuramayiz; bu durumda asagidaki normal yol
+        # (zamanlayici dongusu) calisir. Sessizce gec, ama logla ki gorulebilsin.
+        Write-Log 'WARN' 'deadline restart nöbetçisi KURULAMADI (yonetici yetkisi yok); geri sayim dongusu kullanilacak (daha kirilgan)'
+        return $false
+    }
+    try {
+        # -CancelOnRecovery GOREVE ARGUMAN olarak gecilir: sayac sureci olup pending
+        # dosyasi silinse bile nobetci dogru karari verir (toparlanma iptali YALNIZCA
+        # kesinti kaynakli restart'ta gecerli; kullanici/panel zorla restart'inda degil).
+        $guardArgs = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -DeadlineReboot'
+        if ($CancelOnRecovery) { $guardArgs += ' -CancelOnRecovery' }
+        $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $guardArgs
+        $prn = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        # StartWhenAvailable: deadline gecmis olsa bile (makine acilmis, sonra
+        # tetiklenmis) hemen calisir. ExecutionTimeLimit 0 = kisit yok.
+        $stg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
+        $trg = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds($DelaySeconds)
+        Register-ScheduledTask -TaskName $DeadlineTaskName -Action $act -Principal $prn -Settings $stg -Trigger $trg -Force | Out-Null
+        Write-Log 'INFO' ('deadline restart nöbetçisi kuruldu: ' + $DeadlineTaskName + ' (SYSTEM, ' + $DelaySeconds + ' sn sonra; sayac sureci olsa bile restart gerceklesir)')
+        return $true
+    } catch {
+        Write-Log 'WARN' ('deadline restart nöbetçisi kurulamadi: ' + $_.Exception.Message + '; geri sayim dongusuna devam')
+        return $false
+    }
 }
 
 function Start-CountdownReboot {
@@ -1582,8 +1799,10 @@ function Start-CountdownReboot {
         Iki ayri iptal yolu var:
           1) Panelden "Iptal et" -> reboot-cancel.flag. 0,5 sn'de bir kontrol edilir;
              reboot-ack.json yazilir (panelin "gercekten durdu" demesinin tek yolu).
-          2) Geri sayim sirasinda internet kendiliginden SAGLIKI cikarsa iptal edilir
-             (kullanici adaptoru/kablonu geri acmis olabilir, gereksiz restart olmasin).
+          2) CancelOnRecovery ISE geri sayim sirasinda internet kendiliginden SAGLIKLI
+             cikarsa iptal edilir (kullanici adaptoru/kablonu geri acmis olabilir,
+             gereksiz restart olmasin). Kullanici/panel zorla restart'inda bu yol
+             KAPALIDIR; internet saglikli olsa bile istenen restart uygulanir.
 
         Panel hic acilmadiysa da ayni dosyalar yazilir; kullanici yoksa cihaz yine kapanir
         (uzaktan kurtarma davranisi korunur).
@@ -1591,7 +1810,8 @@ function Start-CountdownReboot {
     param(
         [string]$Reason = 'onarilamayan baglanti sorunu',
         [string]$Problems = '',
-        [int]$DelaySeconds = 0
+        [int]$DelaySeconds = 0,
+        [switch]$CancelOnRecovery
     )
     $cfg = Get-Config
     $delay = $DelaySeconds
@@ -1608,6 +1828,7 @@ function Start-CountdownReboot {
         delaySec  = $delay
         reason    = $Reason
         problems  = $Problems
+        cancelOnRecovery = [bool]$CancelOnRecovery
     }
     try {
         [System.IO.File]::WriteAllText($RebootPendingFile, ($pending | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding $true))
@@ -1620,12 +1841,21 @@ function Start-CountdownReboot {
 
     Write-Log 'ALERT' ('yeniden baslatma geri sayimi basladi: ' + $delay + ' sn (iptal edilebilir; sebep: ' + $Reason + ')')
 
+    <#
+        NÖBETÇI: restart bu surecten bagimsiz bir SYSTEM gorevine devredilir. Gerekce:
+        gecede sayac dongusu hic bitmedi (DNS'te takildi) ve 325 denemeden sifiri
+        gerceklesmedi. Artik sayac sureci olsa bile gorev deadline'da kapatir. Iptal
+        veya internetin donmesi halinde nöbetçi kaldirilir (asagida).
+    #>
+    $null = Start-DeadlineRebootGuard -DelaySeconds $delay -Reason $Reason -CancelOnRecovery:$CancelOnRecovery
+
     $end = (Get-Date).AddSeconds($delay)
     $tick = 0
     while ((Get-Date) -lt $end) {
         # 1) Panelden iptal
         if (Test-Path -LiteralPath $RebootCancelFile) {
             Write-Log 'ALERT' 'yeniden baslatma kullanici tarafindan iptal edildi'
+            Stop-DeadlineRebootGuard
             shutdown.exe /a 2>&1 | Out-Null
             try {
                 $ack = [ordered]@{ cancelled = $true; at = (Get-Date).ToString('o'); reason = $Reason } | ConvertTo-Json
@@ -1654,21 +1884,30 @@ function Start-CountdownReboot {
         }
         # 2) Geri sayim sirasinda internet toparlandi mi?
         $tick += 1
-        if (($tick % 12) -eq 0) {
+        # Toparlanma iptali YALNIZCA kesinti kaynakli restart'ta yapilir. Kullanici
+        # panelden "zorla yeniden baslat" dediyse (CancelOnRecovery yok) internet
+        # saglikli olsa bile iptal EDILMEZ; aksi halde cevrimici makinede bu dugme
+        # hicbir zaman restart etmezdi.
+        if ($CancelOnRecovery -and (($tick % 12) -eq 0)) {
             try {
                 <#
-                    HIZLI YOKLAMA: once sert zaman asimli TCP (1,2 sn). DNS'te asilmaz, HTTP
-                    basligi beklemez. 1.1.1.1 engelli bir agda olumsuz donerse HTTP yoklamasi
-                    da yapilir; IKISI DE "baglanti var" demedikce iptal edilmez (yanlis
-                    iptal, sadece bir restart'i engelledigi icin en kotu hali sinirli).
+                    HIZLI YOKLAMA: YALNIZCA sert zaman asimli TCP (Get-TcpMs, dogrudan IP).
+                    Neden hostname/Invoke-Probe YOK: bu dongunun cani kritik. Invoke-Probe ->
+                    Invoke-WebRequest once DNS cozer; -TimeoutSec DNS BEKLEMESINI KAPSAMAZ.
+                    Yonlendirici/DNS asili kaldiginda tek cagri 11-30 sn bloklar (bu makinede
+                    olculdu), 30 sn'lik sayac 50 sn'ye uzar, mutex birakilinir ve FastProbe
+                    "calismiyor" deyip yeni dongu acar. Gece olayinda sonuc: geri sayim 325 kez
+                    basladi, 0 kez bitti, shutdown.exe HIC cagrilmadi; makineyi ancak Windows
+                    Update kapatti. Ayni hata Test-RecoveryBeforeReboot'ta zaten duzeltilmisti,
+                    burada uygulanmamisti. Simdi: yalnizca Get-TcpMs, asla DNS'e girmez.
                 #>
                 $ok = $false
-                if ((Get-TcpMs -HostName '1.1.1.1' -Port 443 -TimeoutMs 1200) -ge 0) { $ok = $true }
-                if (-not $ok) {
-                    try { $r = Invoke-Probe -Url 'https://www.google.com/generate_204' -TimeoutSec 3; if ($r.Ok) { $ok = $true } } catch { }
+                foreach ($probeIp in @('1.1.1.1', '8.8.8.8', '9.9.9.9')) {
+                    if ((Get-TcpMs -HostName $probeIp -Port 443 -TimeoutMs 1200) -ge 0) { $ok = $true; break }
                 }
                 if ($ok) {
                     Write-Log 'INFO' 'restart iptal edildi: geri sayim sirasinda internet SAGLIKLI cikti'
+                    Stop-DeadlineRebootGuard
                     shutdown.exe /a 2>&1 | Out-Null
                     foreach ($f in @($RebootCancelFile, $RebootPendingFile)) { try { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } catch { } }
                     $null = Invoke-StateUpdate {
@@ -1699,6 +1938,7 @@ function Start-CountdownReboot {
     Start-Sleep -Seconds 2
     if (Test-Path -LiteralPath $RebootCancelFile) {
         Write-Log 'ALERT' 'yeniden baslatma son anda iptal edildi'
+        Stop-DeadlineRebootGuard
         shutdown.exe /a 2>&1 | Out-Null
         try {
             $ack = [ordered]@{ cancelled = $true; at = (Get-Date).ToString('o'); reason = $Reason } | ConvertTo-Json
@@ -1717,17 +1957,31 @@ function Start-CountdownReboot {
         return $false
     }
 
-    Write-Log 'ALERT' 'geri sayim bitti, yeniden baslatma tetiklendi'
+    Write-Log 'ALERT' 'geri sayim bitti'
     try { Remove-Item -LiteralPath $RebootPendingFile -Force -ErrorAction SilentlyContinue } catch { }
+    <#
+        CIFT TETIKLEME YARISI ONLENDI. Canli testte (09:51) sayaç süreci ile deadline
+        nöbetçisi aynı anda Confirm-Reboot'a girdi: nöbetçinin shutdown.exe cagrisi
+        "cikis kodu 1" aldi (cift zamanlama), gunluk iki kere ayni karari yazdi ve
+        hangisinin gercekten calistigi belirsizlesti.
+        KURAL: nöbetçi KURULDUYSA karar ve eylem ONUNDUR; burada HICbir sey yapilmaz.
+        Sayaç yalnizca kullaniciyi bilgilendiren bir geri sayim gorunumudur.
+        Nöbetçi kurulAMADIGISA (yonetici yok) eski yol devreye girer.
+    #>
+    if (Test-DeadlineRebootGuardArmed) {
+        Write-Log 'INFO' 'geri sayim bitti; restart KARARI deadline nöbetçisinde (burada tekrar tetiklenmiyor)'
+        return $true
+    }
     <#
         DOGRULANABILIR RESTART. Dogrudan "shutdown.exe /r /t 0" CAGRILMAZ: cikis kodu
         2>&1 | Out-Null ile atiliyordu, tek log yoktu ve geri sayim bitse bile restart
         gerceklesmeyince (digeri oturum, komut reddi) sistem sessizce acik kaliyordu;
         gunluk butce ise "restart gerceklesmis" sayiyordu. Confirm-Reboot sirasiyla
-        shutdown.exe -> WMI Reboot -> Restart-Computer dener ve hangisinin restart
-        ilettigini yazar. Butce kaydi ancak gercekten yeniden acilinda (Sync-RebootAccounting)
-        yazilir; PendingRebootUtc o ana kadar durur.
+        shutdown.exe -> zorla /f -> WMI -> Restart-Computer -> bcdedit dener ve hangisinin
+        restart ilettigini yazar. Butce kaydi ancak gercekten yeniden acilinda
+        (Sync-RebootAccounting) yazilir; PendingRebootUtc o ana kadar durur.
     #>
+    Write-Log 'WARN' 'deadline nöbetçisi yok; restart bu süreçten tetikleniyor (daha kırılgan yol)'
     if (-not (Confirm-Reboot)) {
         Write-Log 'ERR' 'restart iletilemedi: butce yazilmadi, PendingRebootUtc duruyor (bir sonraki dongude yeniden denenecek)'
         return $false
@@ -1837,6 +2091,23 @@ function Invoke-Watchdog {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $global:cfg = Get-Config
     Write-Log 'INFO' ('dongu basladi | admin=' + (Test-Admin) + ' | rapor=' + $Check.IsPresent + ' | uptime=' + (Get-UptimeMinutes) + 'dk')
+    <#
+        ANA SYSTEM GÖREVİ KENDİNİ ONARIR. Gerekçe: bu görev silinirse (kurulum
+        sırasında, güncellemede veya elle) watchdog yalnızca açık oturuma bağımlı
+        kalır; gece o oturum yokken hiçbir kontrol yapılmaz. Kontrol ucuzdur
+        (Get-ScheduledTask) ve yalnızca gerçekten yöneticiyse çalışır.
+    #>
+    try {
+        if ((Test-Admin) -and -not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+            $iv = [int]$global:cfg.IntervalMinutes; if ($iv -le 0) { $iv = 5 }
+            $a2 = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '"')
+            $t2 = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -AtLogOn), (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes $iv)))
+            $p2 = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+            $s2 = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1)
+            Register-ScheduledTask -TaskName $TaskName -Action $a2 -Trigger $t2 -Principal $p2 -Settings $s2 -Force | Out-Null
+            Write-Log 'WARN' ('ANA SYSTEM görevi EKSİKTİ, döngü içinde yeniden kuruldu: ' + $TaskName)
+        }
+    } catch { }
     $internetOk = Test-Internet
     if ($internetOk) {
         # Genel IP yalnizca internet VARKEN sorulur: dusuk agda bu cagri 8 sn zaman asimini
@@ -1902,6 +2173,19 @@ function Install-Watchdog {
     $stg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName $TaskName -Action $act -Trigger @($trgStartup, $trgLogon, $trgRep) -Principal $prn -Settings $stg -Force | Out-Null
     Write-Log 'INFO' ('zamanlanmış görev kuruldu: ' + $TaskName + ' (acilista + oturum acilista + her ' + $IntervalMinutes + ' dk)')
+    <#
+        KENDINI ONARMA: bu gorev olmadan, kullanici oturumu kapaliyken HICBIR sey
+        calismaz (sadece FastProbe/UserFallback, ikisi de Interactive). Gecede
+        kurulum "KAYIT-TAMAM" demisine ragmen bu SYSTEM gorevi kayitli degildi;
+        watchdog yalnizca oturum acikken devam edebildi. Her Install-Watchdog
+        cagrisinda ve her tam dongude varligi teyit edilir; yoksa yeniden kurulur.
+    #>
+    try {
+        if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+            Register-ScheduledTask -TaskName $TaskName -Action $act -Trigger @($trgStartup, $trgLogon, $trgRep) -Principal $prn -Settings $stg -Force | Out-Null
+            Write-Log 'WARN' ('ANA SYSTEM görevi EKSİKTİ, yeniden kuruldu: ' + $TaskName + ' (oturum kapaliyken calismasi icin)')
+        }
+    } catch { Write-Log 'WARN' ('ana SYSTEM görevi dogrulanamadi: ' + $_.Exception.Message) }
     # Panelden "Agi / interneti onar" icin ayri, tetikleyicisiz (on-demand) gorev.
     # Ana gorev MultipleInstances=IgnoreNew oldugu icin calisirken baslatilamiyor; bu gorev her zaman aninda baslar.
     try {
@@ -1962,10 +2246,22 @@ function Install-Watchdog {
             $fAct = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -FastProbe')
         }
         $fTrg = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
-        $fPrn = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+        <#
+            RunLevel EN ONEMLI DEGISIKLIK: Limited -> Highest.
+            Neden: FastProbe sorun gordugunde Start-FullCycle ile tam donguyu BASLATIR.
+            Limitli yetkiyle baslatilan dongu admin=False idi; log'da 325 restart
+            denemesinin cogu admin=False ile kostu. Admin olmayan dongu WMI Reboot /
+            Restart-Computer / adaptor kapat-ac / winsock sifirlama yapamaz (log'da
+            "kademe N uygulanmadi (admin gerekir)"). Yani asil kurtarma yetenekleri
+            tam da restart'e ihtiyac duydugu anda elinin altinda degildi.
+            Highest, gorevi tetikleyen FastProbe surecini de yukseltir; tetikleyen
+            kullanici yonetici degilse gorev yine de kurulamaz ve eski seyilde
+            calisir (bu durumda aşağıdaki uyari loglanir).
+        #>
+        $fPrn = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
         $fStg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 3)
         Register-ScheduledTask -TaskName $probeTask -Action $fAct -Trigger @($fTrg) -Principal $fPrn -Settings $fStg -Force | Out-Null
-        Write-Log 'INFO' ('hizli yoklama gorevi kuruldu: ' + $probeTask + ' (kullanici ' + $env:USERNAME + ', her 1 dk; sorun gorurse tam donguyu tetikler)')
+        Write-Log 'INFO' ('hizli yoklama gorevi kuruldu: ' + $probeTask + ' (kullanici ' + $env:USERNAME + ', her 1 dk, YUKSELTILMIS yetki; sorun gorurse tam donguyu tetikler)')
     } catch { Write-Log 'WARN' ('hizli yoklama gorevi kurulamadi: ' + $_.Exception.Message) }
     <#
         SUREKLI ag olay dinleyicisi: 60 sn'lik gorev kapanip acildigi icin kablo cekilmesi
@@ -2001,6 +2297,9 @@ function Uninstall-Watchdog {
     if (Get-ScheduledTask -TaskName 'RemoteHostWatchdogUser' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostWatchdogUser' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostWatchdogUser' }
     if (Get-ScheduledTask -TaskName 'RemoteHostFastProbe' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostFastProbe' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostFastProbe' }
     if (Get-ScheduledTask -TaskName 'RemoteHostNetListen' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'RemoteHostNetListen' -Confirm:$false; Write-Host 'Zamanlanmis gorev kaldirildi: RemoteHostNetListen' }
+    # Tek seferlik deadline nöbetçisi de kalmasin: kaldirilmazsa yeni bir restart
+    # kararindan sonra eski deadline'da bekleyip yanlis zamanda kapatabilir.
+    if (Get-ScheduledTask -TaskName $DeadlineTaskName -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName $DeadlineTaskName -Confirm:$false; Write-Host ('Zamanlanmis gorev kaldirildi: ' + $DeadlineTaskName) }
     Write-Host ('Config/loglar korundu: ' + $BaseDir)
 }
 
@@ -2327,6 +2626,139 @@ function Invoke-FastProbe {
     exit 0
 }
 
+function Invoke-DeadlineReboot {
+    <#
+        DEADLINE NÖBETÇISI (SYSTEM gorevi, -DeadlineReboot). Sayac surecinden
+        BAGIMSIZ olarak, deadline gelince makineyi kapatir.
+
+        Neden ayri bir görev: gecede sayac yapan surec hic bitmedi (Invoke-Probe ->
+        DNS kilitlenmesi) ve 325 restart denemesinin sifiri gerceklesmedi. Artik
+        sayac sadece kullaniciyi bilgilendirir; KARAR ve EYLEM bu goreve aittir.
+        Sayac sureci cokutulsa/kaybolsa/oturum kapansa bile restart olur.
+
+        Sirasiyla:
+          1) Iptal bayragi var mi? -> cikis, hicbir sey yapma (ack yazilir, panel onaylar).
+          2) CancelOnRecovery ISE internet toparlandi mi? -> cikis, restart YAPMA
+             (kullanici kabloyu geri takmis olabilir). Kullanici/panel zorla
+             restart'inda bu adim ATLANIR: cevrimici makinede restart yine olur.
+          3) Son and iptal tekrar kontrolu (nobetci basladiktan sonra panelden
+             iptal edilmis olabilir).
+          4) Hicbiri degilse -> zorla restart zinciri (Confirm-Reboot).
+        Gorev bir kez calistiktan sonra kendini siler (tek seferliktir).
+    #>
+    param([switch]$CancelOnRecovery)
+    $global:cfg = Get-Config
+    Write-Log 'ALERT' 'deadline nöbetçisi tetiklendi (restart karari bu görevde, sayac sürecinden bağımsız)'
+
+    # 1) Kullanici iptali (panelden veya son andan). Ortak isleyici reboot-ack.json
+    #    yazar; sayac sureci olmus olsa bile panel "gercekten durdu" onayini alir.
+    if (Confirm-DeadlineCancel) { exit 0 }
+
+    # 2) Internet toparlandi mi? Kullanici kabloyu/adaptoru geri acmis olabilir.
+    #    YALNIZCA Get-TcpMs (asla DNS'e girme - sayac dongusunu olduren sey tam olarak bu).
+    if ($CancelOnRecovery) {
+        <#
+            TEK YOKLAMA YETMEZ. Canli olay (01.10 19:04): ag 19:03:54'te toparlanmisti
+            ([DUZELTI], her kontrol TAMAM), nöbetçi 27 sn sonra TEK yoklamada basarisiz
+            gorunup makineyi yeniden acti. Ag flapping yaparken (DHCP lease sorunu) tek
+            anlık olcum yaniltici. Yeniden baslatma isi kesen bir karar oldugu icin
+            ARD ARDA 3 basarisiz yoklama istenir; aralarinda 3 sn beklenir.
+        #>
+        $basarisiz = 0
+        $saglikli = $false
+        for ($deneme = 1; $deneme -le 3; $deneme++) {
+            $ok = $false
+            foreach ($probeIp in @('1.1.1.1', '8.8.8.8', '9.9.9.9')) {
+                if ((Get-TcpMs -HostName $probeIp -Port 443 -TimeoutMs 1500) -ge 0) { $ok = $true; break }
+            }
+            if ($ok) { $saglikli = $true; break }
+            $basarisiz++
+            Write-Log 'WARN' ('deadline nöbetçisi: internet yok (deneme ' + $deneme + '/3)')
+            if ($deneme -lt 3) { Start-Sleep -Seconds 3 }
+        }
+        if ($saglikli) {
+            Write-Log 'INFO' ('deadline nöbetçisi: internet SAGLIKLI cıktı, restart iptal edildi (adaptör/kablo geri açılmış olabilir; deneme ' + (4 - $basarisiz) + ')')
+            Stop-DeadlineRebootGuard
+            try { Remove-Item -LiteralPath $RebootPendingFile -Force -ErrorAction SilentlyContinue } catch { }
+            try {
+                $null = Invoke-StateUpdate {
+                    param($st)
+                    $st.ConsecutiveFailures = 0
+                    $st.NetResetPendingReboot = 0
+                    $st.PendingRebootUtc = ''
+                    $st.OutageStartUtc = ''
+                    $st.LastOkUtc = (Get-Date).ToString('o')
+                }
+            } catch { }
+            $null = Write-RebootAnnounce -Text 'Bağlantı geri geldi, yeniden başlatma iptal edildi.' -CountdownSeconds 0 -Force -VoiceKey 'rebootcancel'
+            exit 0
+        }
+    } else {
+        Write-Log 'INFO' 'deadline nöbetçisi: kullanici/panel restart''i (toparlanma iptali kapali), dogrudan kapatmaya geciliyor'
+    }
+
+    # 2b) SON AND iptal kontrolu: nobetci basladiktan SONRA panelden iptal edilmis
+    #     olabilir. Sayac sureci cancel dosyasini kaldirirken bu gorev coktan
+    #     baslamissa iptal kaybolmasin diye kapatmadan hemen once TEKRAR bakilir.
+    if (Confirm-DeadlineCancel) { exit 0 }
+
+    # 3) Hicbiri degilse: gercekten kapat.
+    Write-Log 'ALERT' 'deadline nöbetçisi: internet hâlâ kopuk ve iptal yok -> zorla yeniden başlatma'
+    try { Remove-Item -LiteralPath $RebootPendingFile -Force -ErrorAction SilentlyContinue } catch { }
+
+    <#
+        BUTCE DAMGASI BURADA VURULUR. Canli olay (01.10 19:04): restart gercekten
+        gerceklesmis ama bütçeye "0/5" yazilmis, RebootsUtc bos kalmisti.
+        Sebep: "restart istendi" damgasini (PendingRebootUtc) SAYAÇ döngüsü yaziyordu;
+        aradaki döngüler Sync-RebootAccounting'te "sahte istem" deyip damgayi
+        siliyordu. Damgayi asil restart'i ILETEN süreç (burasi) vurmalı.
+        Ayrıca o eski sahte kayıtlar temizlenir: iki gerçek restart aynı anda
+        sayılmasın.
+    #>
+    $null = Invoke-StateUpdate {
+        param($st)
+        $st.PendingRebootUtc = (Get-Date).ToString('o')
+        $st.RebootsUtc = @(@($st.RebootsUtc) | Where-Object { $_ })
+    }
+    $ok = Confirm-Reboot
+
+    <#
+        TESLIM SONRASI DOGRULAMA. Gerekce: shutdown.exe cikis kodu 0 donse bile makine
+        KAPANMAYABILIR (oturum kilidi, bekleyen kapatma islemi, guncelleme kilidi).
+        09:51 testinde komut "iletildi" denildi ama makine 1 dk sonra hâlâ ayaktaydi.
+        Burada acilis zamani gercekten degistiyse is bitti; degismediyse daha sert
+        yontemlerle (WMI / Restart-Computer -Force) tekrar denenir.
+    #>
+    if ($ok) {
+        $once = Get-BootStamp
+        for ($i = 0; $i -lt 12; $i++) {          # 12 x 2 sn = 24 sn bekle
+            Start-Sleep -Seconds 2
+            $sonra = Get-BootStamp
+            if ($sonra -and $once -and $sonra -ne $once) {
+                Write-Log 'ALERT' 'doğrulandı: makine yeniden açıldı, deadline nöbetçisi işini bitirdi'
+                Stop-DeadlineRebootGuard
+                exit 0
+            }
+        }
+        Write-Log 'WARN' ('restart İLETİLDİ ama 24 sn içinde makine açılmadı (açılış zamanı değişmedi) -> daha sert yöntem deneniyor')
+        $ok = Confirm-Reboot -ForceOnly
+        if ($ok) {
+            Write-Log 'ALERT' 'zorla tırmanma yolu restart iletildi (WMI / Restart-Computer)'
+            Start-Sleep -Seconds 10
+            $sonra2 = Get-BootStamp
+            if ($sonra2 -and $once -and $sonra2 -eq $once) {
+                Write-Log 'ERR' 'restart hâlâ gerçekleşmedi; elle müdahale gerekli (makineyi elle yeniden başlatın)'
+                Stop-DeadlineRebootGuard
+                exit 1
+            }
+        }
+    }
+    # Gorev tek seferliktir: calistiktan sonra kendini temizle.
+    # (Cikis kodu 0 = restart iletildi veya dogrulandi, 1 = hicbir yontem calismadi)
+    Stop-DeadlineRebootGuard
+    if ($ok) { exit 0 } else { exit 1 }
+}
+
 function Start-NetEventListener {
     <#
         SUREKLI ag olay dinleyicisi. 60 sn'lik gorev kapanip acildigi icin kablo cekilmesi
@@ -2433,6 +2865,10 @@ function Show-Status {
     Write-Host ('hizli yoklama: ' + $(if ($ft) { $ft.State } else { 'YOK' }) + ' (her 1 dk, yedek)')
     $lt = Get-ScheduledTask -TaskName 'RemoteHostNetListen' -ErrorAction SilentlyContinue
     Write-Host ('ag olay dinleyici: ' + $(if ($lt) { $lt.State } else { 'YOK' }) + ' (surekli, anlik kablo/adaptor/IP)')
+    $dt = Get-ScheduledTask -TaskName $DeadlineTaskName -ErrorAction SilentlyContinue
+    Write-Host ('deadline nöbetçisi: ' + $(if ($dt) { $dt.State } else { 'yok (aktif restart beklemiyor)' }) + ' (sayac sürecinden bağımsız zorla restart)')
+    $fp = Get-ScheduledTask -TaskName 'RemoteHostFastProbe' -ErrorAction SilentlyContinue
+    if ($fp) { Write-Host ('hizli yoklama yetkisi: ' + $(if ($fp.Principal.RunLevel -eq 'Highest') { 'Highest (önerilen)' } else { 'Limited (onarım kademeleri ve zorla restart çalışmaz!)' })) }
     Write-Host ('=== son loglar (' + $LogFile + ') ===')
     if (Test-Path -LiteralPath $LogFile) { Get-Content -LiteralPath $LogFile -Tail 40 | ForEach-Object { Write-Host $_ } } else { Write-Host 'log yok' }
 }
@@ -2466,6 +2902,7 @@ if ($UserFallback) {
 }
 if ($FastProbe) { Invoke-FastProbe; exit 0 }
 if ($NetListen) { exit (Start-NetEventListener) }
+if ($DeadlineReboot) { exit (Invoke-DeadlineReboot -CancelOnRecovery:$CancelOnRecovery) }
 function Invoke-NetEventNow {
     <#
         Dinleyicinin olaydan sonra yaptigi isi elle tetikler (test/deniz aslani icin).
