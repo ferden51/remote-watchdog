@@ -219,6 +219,10 @@ $script:RebootCancelBtn = $null
 $script:RebootSoonBtn = $null
 $script:RebootDeadline = $null
 $script:RebootSeenAt = $null
+# Iptal istegi (butona basildi) ve basildigi an: UI thread'i BLOKLAMADAN, sonucu
+# 1 sn'lik RebootTimer tick'i isler (ack / bekleyen dosyanin silinmesi / zaman asimi).
+$script:RebootCancelRequested = $false
+$script:RebootCancelAt = $null
 $script:RepairLiveBox = $null
 $script:RepairStatusBox = $null
 $script:RepairElapsedBox = $null
@@ -1027,6 +1031,8 @@ function Close-RebootModal {
     $script:RebootCancelBtn = $null
     $script:RebootSoonBtn = $null
     $script:RebootDeadline = $null
+    $script:RebootCancelRequested = $false
+    $script:RebootCancelAt = $null
     if ($w) { try { $w.Close() } catch { } }
 }
 
@@ -1156,33 +1162,20 @@ function Show-RebootModal {
                     $script:RebootCancelBtn.Content = 'İptal ediliyor…'
                 }
                 if ($script:RebootSoonBtn) { $script:RebootSoonBtn.IsEnabled = $false }
+                $script:RebootCancelRequested = $true
+                $script:RebootCancelAt = Get-Date
                 try { Set-Content -LiteralPath $RebootCancelFile -Value (Get-Date).ToString('o') -Encoding UTF8 -ErrorAction Stop } catch { Write-Trace ('iptal dosyasi yazilamadi: ' + $_.Exception.Message) }
                 # Panel normal kullanici da olabilir; shutdown /a yetkisi yoksa sorun degil:
                 # SYSTEM'deki watchdog 0,5 sn'de bir iptal dosyasina bakip geri sayimi
                 # KENDISI durdurur. Asil dogrulama reboot-ack.json dosyasidir.
                 try { & shutdown.exe /a 2>&1 | Out-Null } catch { }
-                # Dogrulama: watchdog iptali onaylayana kadar bekle, ONCE "durduruldu" deme.
-                $ok = $false
-                for ($i = 0; $i -lt 20; $i++) {
-                    if (Test-Path -LiteralPath $RebootAckFile) { $ok = $true; break }
-                    Start-Sleep -Milliseconds 500
-                }
-                if ($ok) {
-                    Write-Trace 'restart iptali watchdog tarafindan onaylandi'
-                    Speak-Text 'Yeniden başlatma iptal edildi. Bilgisayar açık kalıyor.' -Sfx 'recover' -Force
-                    Show-Balloon -Title 'Yeniden başlatma iptal edildi' -Text 'Bilgisayar yeniden başlatılmadı. Bağlantı sorunu sürerse bir sonraki denemede tekrar sorulacak.' -Icon 'Info' -Always
-                    Close-RebootModal
-                    Update-Actions
-                } else {
-                    Write-Trace 'restart iptali onaylanmadi; geri sayim suruyor olabilir'
-                    if ($script:RebootCancelBtn) {
-                        $script:RebootCancelBtn.IsEnabled = $true
-                        $script:RebootCancelBtn.Content = 'İptal et — şimdi yeniden başlatma'
-                    }
-                    if ($script:RebootSoonBtn) { $script:RebootSoonBtn.IsEnabled = $true }
-                    if ($script:RebootHintBox) { $script:RebootHintBox.Text = 'İptal onaylanmadı. Geri sayım sürüyor — sistem yine de kapanabilir.' }
-                    Speak-Text 'İptal onaylanmadı. Bilgisayar yine de yeniden başlatılabilir.' -Sfx 'warn' -Force
-                }
+                <#
+                    UI THREAD BLOKLANMAZ. Onceki surum burada 20 x 500 ms (10 sn) Start-Sleep
+                    ile ack bekliyordu; bu, arayuzu DONDURUYORDU ("iptal deyince tepki
+                    vermiyor" hissi). Artik sonucu 1 sn'lik RebootTimer tick'i isler:
+                      - host reboot-pending.json'u silince (iptal onaylandi) modal ANINDA kapanir,
+                      - 8 sn icinde onay gelmezse butonlar geri acilir.
+                #>
             } catch {
                 # Bu handler'da istisna atilirsa panel HATA KUTUSU gosterip coktu oluyor;
                 # restart akisi sessizce bozulmasin diye yutuyoruz.
@@ -1212,6 +1205,55 @@ function Show-RebootModal {
     $script:RebootTimer.Add_Tick({
             $box = $script:RebootCountBox
             if (-not $box) { return }
+
+            <#
+                (A) IPTAL / DUZELME TESPITI. Host geri sayimi iptal ederse reboot-pending.json'u
+                siler. Panel iptali, internetin donmesi ve deadline nobetcisinin iptali hepsi
+                bu dosyayi siler. ONCEDEN modal yalnizca sure dolunca kapaniyordu; erken iptal
+                GORUNMUYORDU -> kullanici "internet geldi ama hala sayiyor" / "iptal ettim ama
+                hicbir sey olmadi" diyordu. Artik bekleyen dosya kaybolunca modal ANINDA kapanir.
+            #>
+            if (-not (Test-Path -LiteralPath $RebootPendingFile)) {
+                if ($script:RebootCancelRequested) {
+                    Write-Trace 'restart iptali host tarafindan onaylandi (bekleyen dosya kaldirildi)'
+                    try { Speak-Text 'Yeniden başlatma iptal edildi. Bilgisayar açık kalıyor.' -Sfx 'recover' -Force } catch { }
+                    try { Show-Balloon -Title 'Yeniden başlatma iptal edildi' -Text 'Bilgisayar yeniden başlatılmadı. Bağlantı sorunu sürerse bir sonraki denemede tekrar sorulacak.' -Icon 'Info' -Always } catch { }
+                } else {
+                    Write-Trace 'restart bildirimi kaldirildi (host iptal/duzelme) -> modal kapatiliyor'
+                    # Host "Baglanti geri geldi, yeniden baslatma iptal edildi" anonsunu
+                    # pending-voice.json ile birakir; 20 sn'lik sayaci beklemeden HEMEN konus.
+                    try { Speak-PendingVoice } catch { }
+                }
+                try { Update-Actions } catch { }
+                Close-RebootModal
+                return
+            }
+
+            # (B) Onay dosyasi: bekleyen hala dururken iptal onaylandiysa (kucuk yaris) kapat.
+            if ($script:RebootCancelRequested -and (Test-Path -LiteralPath $RebootAckFile)) {
+                Write-Trace 'restart iptali watchdog tarafindan onaylandi (ack)'
+                try { Speak-Text 'Yeniden başlatma iptal edildi. Bilgisayar açık kalıyor.' -Sfx 'recover' -Force } catch { }
+                try { Show-Balloon -Title 'Yeniden başlatma iptal edildi' -Text 'Bilgisayar yeniden başlatılmadı.' -Icon 'Info' -Always } catch { }
+                try { Update-Actions } catch { }
+                Close-RebootModal
+                return
+            }
+
+            # (C) Iptal isteyip makul sure icinde onay gelmediyse butonlari geri ac.
+            if ($script:RebootCancelRequested -and $script:RebootCancelAt) {
+                if (((Get-Date) - $script:RebootCancelAt).TotalSeconds -ge 8) {
+                    $script:RebootCancelRequested = $false
+                    Write-Trace 'restart iptali onaylanmadi; geri sayim suruyor olabilir'
+                    if ($script:RebootCancelBtn) {
+                        $script:RebootCancelBtn.IsEnabled = $true
+                        $script:RebootCancelBtn.Content = 'İptal et — şimdi yeniden başlatma'
+                    }
+                    if ($script:RebootSoonBtn) { $script:RebootSoonBtn.IsEnabled = $true }
+                    if ($script:RebootHintBox) { $script:RebootHintBox.Text = 'İptal onaylanmadı. Geri sayım sürüyor — sistem yine de kapanabilir.' }
+                    try { Speak-Text 'İptal onaylanmadı. Bilgisayar yine de yeniden başlatılabilir.' -Sfx 'warn' -Force } catch { }
+                }
+            }
+
             $left = [int][math]::Ceiling(($script:RebootDeadline - (Get-Date)).TotalSeconds)
             if ($left -lt 0) { $left = 0 }
             $mm = [int][math]::Floor($left / 60)

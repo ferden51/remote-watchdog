@@ -265,6 +265,19 @@ if ($Section -eq 0 -or $Section -eq 1) {
         restart gerceklesmese bile butce "gerceklesmis" sayiliyordu. #>
     Ok 'host geri sayim sonrasi dogrulanabilir restart yolunu kullanir' ($hostText -match '(?s)geri sayim bitti.{0,900}Confirm-Reboot')
     <#
+        REGRESYON (panel restart modali): internet geri gelince veya iptal edilince modal
+        ANINDA kapanmali. Onceki surumde modal yalnizca sure dolunca kapaniyordu; erken
+        iptal GORUNMUYORDU ("internet geldi ama hala sayiyor") ve iptal butonu UI
+        thread'ini 20 x 500 ms Start-Sleep ile DONDURUYORDU ("tepki vermiyor").
+    #>
+    Ok 'panel restart modali bekleyen dosya silinince kapaniyor' ($panelText -match '(?s)RebootTimer\.Add_Tick.*Test-Path -LiteralPath \$RebootPendingFile')
+    Ok 'panel iptalde UI threadini bloklamiyor (10 sn Start-Sleep dongusu kalkti)' ($panelText -notmatch '(?s)RebootCancelBtn.*?for \(\$i = 0; \$i -lt 20')
+    Ok 'panel iptal sonucunu tick ile isliyor (RebootCancelRequested/At)' (($panelText -match '\$script:RebootCancelRequested') -and ($panelText -match '\$script:RebootCancelAt'))
+    Ok 'panel erken iptalde aninda onay anonsu/balonu veriyor' ($panelText -match 'restart iptali host tarafindan onaylandi')
+    Ok 'panel iptal zaman asiminda butonlari geri aciyor' (($panelText -match 'TotalSeconds -ge 8') -and ($panelText -match 'RebootCancelRequested = \$false'))
+    <#  Host: iptal bayragi probe blogu sirasinda da kontrol edilmeli ki ack ~1 sn'de yazilsin. #>
+    Ok 'host toparlanma probe dongusunde iptali erken yakaliyor' ($hostText -match '(?s)foreach \(\$probeIp in @\(''1\.1\.1\.1''.{0,220}Test-Path -LiteralPath \$RebootCancelFile')
+    <#
         REGRESYON 1 (gece olayi): geri sayim dongusu Invoke-Probe/Invoke-WebRequest
         kullaniyordu; -TimeoutSec DNS beklemesini KAPSAMAZ, yonlendirici asili
         kalinca tek cagri 11-30 sn blokladi. Sonuc: 325 kez "geri sayimi basladi",

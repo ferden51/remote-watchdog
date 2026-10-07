@@ -1889,6 +1889,14 @@ function Start-CountdownReboot {
         # saglikli olsa bile iptal EDILMEZ; aksi halde cevrimici makinede bu dugme
         # hicbir zaman restart etmezdi.
         if ($CancelOnRecovery -and (($tick % 12) -eq 0)) {
+            <#
+                IPTAL HIZLI ALGILANSIN. Bu blok en fazla ~3,6 sn surer (3 x 1,2 sn
+                zaman asimi). Onceki surumde iptal bayragi yalnizca while basinda
+                kontrol ediliyordu; kullanici tam bu blok sirasinda "Iptal" derse
+                watchdog ~3,6 sn gec onay (ack) yaziyordu -> panel "tepki vermiyor"
+                gibi gorunuyordu. Artik bloktan ONCE ve her denemeden once bakilir.
+            #>
+            if (Test-Path -LiteralPath $RebootCancelFile) { continue }
             try {
                 <#
                     HIZLI YOKLAMA: YALNIZCA sert zaman asimli TCP (Get-TcpMs, dogrudan IP).
@@ -1903,8 +1911,10 @@ function Start-CountdownReboot {
                 #>
                 $ok = $false
                 foreach ($probeIp in @('1.1.1.1', '8.8.8.8', '9.9.9.9')) {
+                    if (Test-Path -LiteralPath $RebootCancelFile) { break }
                     if ((Get-TcpMs -HostName $probeIp -Port 443 -TimeoutMs 1200) -ge 0) { $ok = $true; break }
                 }
+                if (Test-Path -LiteralPath $RebootCancelFile) { continue }
                 if ($ok) {
                     Write-Log 'INFO' 'restart iptal edildi: geri sayim sirasinda internet SAGLIKLI cikti'
                     Stop-DeadlineRebootGuard
