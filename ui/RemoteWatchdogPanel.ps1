@@ -1020,6 +1020,45 @@ function Wait-Dispatcher {
     $t.Stop()
 }
 
+function Clear-StaleRebootFiles {
+    <#
+        BAYAT restart dosyalarini temizler. Canli olay (07.10 11:52): sayac sureci olup
+        reboot-pending.json SILINMEDI; panel 12:00'de acilinca bu olu dosyayi gordu, geri
+        sayimli restart modali acti ve "baglanti sorunu var, yeniden baslatilacak" dedi.
+        Deadline 13 saat once gecmisti ve HICBIR restart planlanmamisti.
+
+        Dosyalar yalnizca sayac dongusunun kendi bitisinde silindigi icin, surec olunca
+        kalici olarak yalan "restart planlanmis" sinyali uretiyorlardi. Burada deadline
+        gecmisse HEPSI (iptal bayragi dahil) silinir; boylece panel hemen toparlanir.
+        60 sn tolerans: saat yuvarlamasi nedeniyle yanlis temizlik yapmayalim.
+    #>
+    if (-not (Test-Path -LiteralPath $RebootPendingFile)) {
+        # Pending yoksa iptal bayragi + ack da artiktir (onaylayacak sayac kalmadi).
+        if ((Test-Path -LiteralPath $RebootCancelFile) -and -not (Test-Path -LiteralPath $RebootAckFile)) {
+            try { Remove-Item -LiteralPath $RebootCancelFile -Force -ErrorAction SilentlyContinue } catch { }
+            Write-Trace 'bayat reboot iptal bayragi temizlendi (ack yok)'
+        }
+        return
+    }
+    $deadline = $null
+    try {
+        $pj = Get-Content -LiteralPath $RebootPendingFile -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($pj.PSObject.Properties.Name -contains 'deadline') { $deadline = $pj.deadline }
+    } catch { }
+    if (-not $deadline) { return }
+    $gecmis = $false
+    try {
+        $dl = [datetime]::Parse([string]$deadline, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime()
+        $gecmis = ((Get-Date) - $dl).TotalSeconds -ge 60
+    } catch { return }
+    if (-not $gecmis) { return }
+    Write-Trace ('BAYAT reboot dosyalari temizlendi (deadline ' + $deadline + ' gecmis); restart modal acilmayacak')
+    foreach ($sf in @($RebootPendingFile, $RebootCancelFile, $RebootAckFile)) {
+        try { Remove-Item -LiteralPath $sf -Force -ErrorAction SilentlyContinue } catch { }
+    }
+    $script:RebootSeenAt = $null
+}
+
 function Close-RebootModal {
     <#  Restart modalini kapatir; geri sayac durur. #>
     if ($script:RebootTimer) { try { $script:RebootTimer.Stop() } catch { } }
@@ -1056,6 +1095,25 @@ function Show-RebootModal {
 
     $deadline = $null
     try { $deadline = [datetime]::Parse([string]$data.deadline, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime() } catch { $deadline = (Get-Date).AddSeconds(60) }
+    <#
+        BAYAT DOSYAYLA MODAL ACILMAZ. Canli olay (07.10 11:52): sayac sureci olup
+        reboot-pending.json silinmedi; panel 12:00'de acilinca bu olu dosyayi gordu ve
+        "baglanti sorunu var, yeniden baslatilacak" diye modal acti - deadline 13 saat
+        once gecmisti, hicbir restart planlanmamisti. Kullanici "Iptal" dediginde de
+        onaylayacak sayac yoktu, 8 sn sonra "iptal onaylanmadi" diyordu.
+
+        Deadline gecmis bir dosya RESTART PLANI DEGIL, ARTIKTIR. Silinir ve modal acilmaz.
+        60 sn tolerans: saat yuvarlamasi nedeniyle yanlis temizlik yapmayalim.
+    #>
+    if (((Get-Date) - $deadline).TotalSeconds -ge 60) {
+        Write-Trace ('BAYAT reboot-pending.json (deadline ' + $deadline + ' gecmis) silindi; modal acilmiyor')
+        foreach ($sf in @($RebootPendingFile, $RebootCancelFile, $RebootAckFile)) {
+            try { Remove-Item -LiteralPath $sf -Force -ErrorAction SilentlyContinue } catch { }
+        }
+        $script:RebootSeenAt = $null
+        try { Update-Actions } catch { }
+        return
+    }
     $script:RebootDeadline = $deadline
 
     $w = New-Object System.Windows.Window
@@ -3635,6 +3693,9 @@ try { Speak-PendingVoice } catch { Write-Trace ('bekleyen anons hatasi: ' + $_.E
                 # Restart/onarim anonslari host tarafindan pending-voice.json ile birakilir.
                 # ONCEDEN bu dosya yalnizca panel ACILISINDA okunuyordu; panel zaten acikken
                 # yazilirsa anons HIC duyulmuyordu. Artik her dongude kontrol edilir.
+                # AYNI SEKILDE bayat restart dosyalari temizlenir: sayac sureci olup
+                # reboot-pending.json silinmisse panel her acilista yanlis modal acardi.
+                Clear-StaleRebootFiles
                 Speak-PendingVoice
                 Refresh-Icon
             } catch { Write-Trace ('zamanlayici hatasi: ' + $_.Exception.Message) }

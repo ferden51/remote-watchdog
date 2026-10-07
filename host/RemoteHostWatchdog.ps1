@@ -2097,10 +2097,67 @@ function Write-JsonStatus {
     return $json
 }
 
+function Clear-StaleRebootPending {
+    <#
+        BAYAT reboot-pending.json TEMIZLIGI. Canli olay (07.10 11:52): bir geri sayim
+        basladi, sayac SURECI olup dosya SILINMEDI. Panel 12:00'de acilinca bu olu dosyayi
+        gordu, geri sayimli restart modali acti ve "baglanti sorunu var, bilgisayar
+        yeniden baslatilacak" dedi - oysa deadline 13 saat once gecmisti ve hicbir restart
+        planlanmamisti. Kullanici "Iptal" dediginde de onaylayacak sayac yoktu.
+
+        Neden oldu: pending dosyasi yalnizca sayac dongusunun KENDI bitisinde
+        (Remove-Item) siliniyor. Surec olurse/killed olursa/oturum kapanirsa dosya kalir
+        ve sonsuza kadar yalan bir "restart planlanmis" sinyali uretir.
+
+        KURAL: deadline gecmistir, o halde bu bir RESTART PLANI DEGIL, artiktir. Silinir
+        (ack varsa o da), nöbetçi kaldirilir ve state sifirlanir. Yeni sayac zaten
+        gerektiginde yeniden yazilir.
+    #>
+    if (-not (Test-Path -LiteralPath $RebootPendingFile)) {
+        # Iptal bayragi tek basina da bir artiktir: deadline gecmis bir sayactan kaldiysa
+        # kimse onaylamayacak. Ancak YENI bir sayac baslamis olabilir; o zaman dokunma.
+        if (Test-Path -LiteralPath $RebootCancelFile) {
+            if (-not (Test-Path -LiteralPath $RebootAckFile)) {
+                try { Remove-Item -LiteralPath $RebootCancelFile -Force -ErrorAction SilentlyContinue } catch { }
+                Write-Log 'INFO' 'bayat reboot iptal bayragi temizlendi (ack yok, sayac yok)'
+            }
+        }
+        return
+    }
+    $deadline = $null
+    try {
+        $pj = Get-Content -LiteralPath $RebootPendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($pj.PSObject.Properties.Name -contains 'deadline') { $deadline = $pj.deadline }
+    } catch { }
+    if (-not $deadline) {
+        Write-Log 'WARN' 'reboot-pending.json okunamadi; guvenli tarafta temizleniyor'
+    } else {
+        try {
+            $dl = [datetime]::Parse([string]$deadline, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime()
+            # 60 sn tolerans: saat yuvarlama/yavas dosya yazimi nedeniyle yanlis temizlik yapmayalim.
+            if (((Get-Date) - $dl).TotalSeconds -lt 60) { return }
+        } catch { return }
+    }
+    Write-Log 'WARN' ('BAYAT reboot-pending.json temizlendi (deadline ' + $deadline + ' gecmis; sayac sureci olmus). Panel uyandirilmayacak.')
+    try { Remove-Item -LiteralPath $RebootPendingFile -Force -ErrorAction SilentlyContinue } catch { }
+    try { Remove-Item -LiteralPath $RebootCancelFile -Force -ErrorAction SilentlyContinue } catch { }
+    try { Remove-Item -LiteralPath $RebootAckFile -Force -ErrorAction SilentlyContinue } catch { }
+    Stop-DeadlineRebootGuard
+    try {
+        $null = Invoke-StateUpdate {
+            param($st)
+            $st.PendingRebootUtc = ''
+            $st.OutageStartUtc = ''
+        }
+    } catch { }
+}
+
 function Invoke-Watchdog {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $global:cfg = Get-Config
     Write-Log 'INFO' ('dongu basladi | admin=' + (Test-Admin) + ' | rapor=' + $Check.IsPresent + ' | uptime=' + (Get-UptimeMinutes) + 'dk')
+    # ONCE bayat restart bildirimini temizle: panel bu dosyayi gorup yanlis modal acmasin.
+    if (-not $Check) { try { Clear-StaleRebootPending } catch { Write-Log 'WARN' ('bayat pending temizligi hatasi: ' + $_.Exception.Message) } }
     <#
         ANA SYSTEM GÖREVİ KENDİNİ ONARIR. Gerekçe: bu görev silinirse (kurulum
         sırasında, güncellemede veya elle) watchdog yalnızca açık oturuma bağımlı

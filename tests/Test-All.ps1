@@ -278,6 +278,23 @@ if ($Section -eq 0 -or $Section -eq 1) {
     <#  Host: iptal bayragi probe blogu sirasinda da kontrol edilmeli ki ack ~1 sn'de yazilsin. #>
     Ok 'host toparlanma probe dongusunde iptali erken yakaliyor' ($hostText -match '(?s)foreach \(\$probeIp in @\(''1\.1\.1\.1''.{0,220}Test-Path -LiteralPath \$RebootCancelFile')
     <#
+        REGRESYON (bayat restart dosyasi - canli olay 07.10 11:52): sayac sureci olup
+        reboot-pending.json SILINMEDI. Panel 12:00'de acilinca bu olu dosyayi gordu,
+        geri sayimli modal acti ve "baglanti sorunu var, yeniden baslatilacak" dedi;
+        deadline 13 saat once gecmisti ve hicbir restart planlanmamisti. "Iptal" deyince
+        onaylayacak sayac yoktu -> 8 sn sonra "iptal onaylanmadi".
+        Dosyalar yalnizca sayacin KENDI bitisinde silindigi icin surec olunca kalici
+        yalan sinyal uretiyorlardi. Artik deadline gecmisse host ve panel TEMIZLIYOR.
+    #>
+    Ok 'host bayat reboot-pending temizligi var' ($hostText -match 'function Clear-StaleRebootPending')
+    Ok 'host temizlik dongu basinda cagriliyor' ($hostText -match '(?s)dongu basladi.{0,600}Clear-StaleRebootPending')
+    Ok 'host bayat temizligi deadline kontrol ediyor (toleransli)' ($hostText -match '(?s)function Clear-StaleRebootPending.*TotalSeconds -lt 60')
+    Ok 'host bayat temizligi iptal bayragini da siliyor' ($hostText -match '(?s)function Clear-StaleRebootPending.*Remove-Item -LiteralPath \$RebootCancelFile')
+    Ok 'panel bayat restart dosyalari temizligi var' ($panelText -match 'function Clear-StaleRebootFiles')
+    Ok 'panel her dongude bayat dosyalari kontrol ediyor' ($panelText -match '(?s)Clear-StaleRebootFiles\s*\r?\n\s*Speak-PendingVoice')
+    Ok 'panel bayat dosyayla geri sayimli modal ACMIYOR' ($panelText -match '(?s)function Show-RebootModal.*BAYAT reboot-pending.*return')
+    Ok 'panel -Check modunda bayat temizligi yapmiyor' ($hostText -match 'if \(-not \$Check\) \{ try \{ Clear-StaleRebootPending')
+    <#
         REGRESYON 1 (gece olayi): geri sayim dongusu Invoke-Probe/Invoke-WebRequest
         kullaniyordu; -TimeoutSec DNS beklemesini KAPSAMAZ, yonlendirici asili
         kalinca tek cagri 11-30 sn blokladi. Sonuc: 325 kez "geri sayimi basladi",
