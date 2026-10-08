@@ -4,6 +4,146 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.4] - 2026-10-08
+
+Bu sürüm, **görev yönetiminin (zamanlanmış görev) iş mantığı incelemesinde** bulunan hataları
+kapatır. Ölü kod, panelde tuzağa düşüren bir buton ve bir watchdog'un en tehlikeli hata
+sınıfı olan **sahte "her şey yolunda"** göstergesi vardı.
+
+### ?? Kritik - düzeltilen
+
+- **Panelde "Zamanlanmış görevi durdur" butonu kalıcı devre dışı bırakıyordu, geri alma yolu
+  yoktu.** `stoptask` yalnızca `Disable-ScheduledTask` çağırıyordu; kod tabanında
+  `Enable-ScheduledTask` **hiç** çağrılmıyordu. Kullanıcı bir kez basınca görev kalıcı olarak
+  kapanıyordu ve "Görevi hemen çalıştır" butonu da devre dışı görevde zorunlu olarak hata
+  veriyordu (hata `SilentlyContinue` ile yutuluyordu). "Watchdog kur" butonu ise `Installed`
+  true iken pasif olduğu için **panelden hiçbir çıkış kalmıyordu**; kurtarma için
+  `Install-Host.ps1` çalıştırmak gerekiyordu. Buton artık **iki yönlü**: görev açıksa
+  devre dışı bırakır, devre dışıysa **yeniden açar** ("Gorevi yeniden ac").
+- **Düğmelerin "çalışıyor / durdur" durumu hiç hesaplanmıyordu.** `Update-ActionBarColors`
+  içinde `$running` **hiçbir yerde atanmıyordu**, ama hem stop hem run butonu onu kullanıyordu.
+  Sonuç: "dur dur" butonu kalıcı pasif, "hemen çalıştır" butonu kalıcı açık. Artık
+  `$running = $st.Running`.
+- **Devre dışı bırakılmış görev, yönetici olmayan panelde yeşil "çalışıyor" görünüyordu.**
+  `taskInstalled` yalnızca döngü **çalışırken** yazılıyor; görev kapatılınca döngü duruyor ve
+  JSON'daki `true` **kalıcı donuyordu**. Yönetici olmayan panelde `Get-ScheduledTask` boş
+  döndüğü için karar JSON'a göre veriliyordu: watchdog tamamen kapalıyken panel "Görev:
+  çalışıyor" diyordu. Artık "Bekleyen işler" listesinde **ayrı bir kırmızı kart** çıkıyor
+  ("Zamanlanmıs gorev DEVRE DISI birakildi") ve "Kur" butonu da yeniden kurulabilir hâle
+  geldi.
+- **`last-run.json` atomik yazılmıyordu → sahte yeşil "Bekleyen iş yok".** `Write-Status`
+  doğrudan `WriteAllText` ile yazıyordu; panel tam yazma anında okuduğunda JSON parse hatası
+  alıp `null` dönüyordu. `Get-Actions` bu `null` üzerine devam ediyor, tüm kartları (checks,
+  docs-block, netResetPendingReboot, consecutiveFailures) sessizce yutuyor ve kullanıcıya
+  **"Bekleyen is yok / Her şey yolunda"** gösteriyordu - bir watchdog için en tehlikeli hata
+  sınıfı: **olmayan alarm**. Artık yazım geçici dosya + `File.Replace` ile tek hamlede
+  yapılıyor (hedef dosyanın ACL'i korunur) ve `Get-Actions` ikinci okumada tekrar null
+  kontrolü yapıyor.
+
+### ?? Yüksek - düzeltilen
+
+- **"Watchdog dönmüyor" kartı hiçbir zaman çıkmıyordu (ölü kod).** `Get-Actions` içinde `$st`
+  önce `Get-StatusInfo` sonucuydu (`.Age` alanı var), hemen ardından `Get-WatchdogTaskState`
+  ile **eziliyordu**; görev durumu nesnesinde `Age` alanı hiç yoktu. `Get-StatusTaskState`
+  artık `Age` / `AgeMinutes` / `Disabled` döndürüyor. Eşik de düzeltildi: `IntervalMinutes`
+  okunamazsa `0`'a düşüyor ve kart her zaman görünüyordu; taban 10 dk.
+- **Kullanıcı yedeği, ayarlanan kontrol aralığını hiç dikkate almıyordu.**
+  `Test-SystemWatchdogActive` eşiği `$IntervalMinutes` **script parametresinden**
+  (sabit 5) okuyordu; `-UserFallback` görevi yalnızca `-UserFallback` argümanıyla çağrıldığı
+  için parametre her zaman 5 geliyordu. Aralık 30 dk'a çekildiğinde eşik 12 dk'da kalırken
+  SYSTEM görevi 30 dk'da bir koşuyordu → kullanıcı yedeği **sürekli "SYSTEM ölü" sanıp**
+  devreye giriyor, `admin=False` tam döngüler açılıyordu (onarım kademeleri ve zorla restart
+  çalışmıyor, restart bütçesi sahte sayımlarla doluyordu). Artık komut satırında açıkça
+  verilen değer, yoksa **ayar dosyasındaki gerçek aralık** okunuyor (aynı desen
+  `Get-FullCycleBackoffMinutes` içinde zaten vardı) ve eşik 45 dk ile sınırlanıyor.
+- **Ayar, her yeniden kurulumda sessizce 5 dakikaya dönüyordu.** `Install-Watchdog` aralığı
+  yalnızca görev tetikleyicisine yazıyordu, `config.json``a değil; panelden "Watchdog kur"
+  denildiğinde `-IntervalMinutes` **argümanı gönderilmiyordu** ve görev parametre varsayılanı
+  5'e dönüyordu. Artık aralık **config'e de yazılıyor** ve panel aralığı kurulum komutuna
+  geçiriyor; `Test-SystemWatchdogActive` eşiği, geri sayım ve panelin sayacı hepsi aynı
+  değere bakıyor.
+- **Onarım akışı yarıda kesiliyor, panel "başlamadı" diyordu.** `RemoteHostRepairWatch` görevinin
+  `ExecutionTimeLimit`'i 5 dakikaydı; `Invoke-NetworkRepairFlow` ise `LastRepair`'i ve "ağ onarımı
+  bitti" özet satırını **kademeler bittikten sonra** yazıyor. 5 dk'ta öldürülen akış yarıda
+  kaldığı için özet hiç yazılmıyor, panel 7 dk bekleyip **"başlamadı"** diyordu (halbuki
+  başlamış ve belki kısmî onarım uygulanmıştı), `LastRepair` olmadığı için
+  `Write-RepairStatusPatch` ve Telegram bildirimi de çalışmıyordu. Görev artık **sınırsız**;
+  panelin canlı penceresi 22 dk bekliyor ve **başladıysa "bitmedi"**, başlamadıysa
+  "başlamadı" ayrımını yapıyor.
+- **Onarım akışının kilidi yoktu → iki paralel kademe uygulaması.**
+  `Global\RemoteWatchdogCycle` yalnızca tam döngüyü koruyor; `Invoke-NetworkRepairFlow`
+  korumasızdı. `repair-request.json`'u üç ayrı tüketici okuyor (`Test-NetworkLayer`,
+  `Invoke-Watchdog`, `-RepairWatch`) ve panel isteği yazdıktan sonra `RemoteHostRepair`'i de
+  başlatıyor. Artık akış `Global\RemoteWatchdogRepair` kilidiyle sarılıyor; kilit meşgulse
+  kademe uygulanmıyor ve sonuç "başka bir onarım sürüyor" olarak dürüstçe bildiriliyor.
+- **Yarım yazılmış onarım isteği sessizce yok oluyordu.** `Read-RepairRequest` parse hatasını
+  yutuyor ve dosyayı **yine de** siliyordu; panel "Ağı onar" dediğinde istek yazılırken
+  yarım dosya okunursa hiçbir şey olmuyordu. Artık dosya yalnızca başarıyla okunduğunda
+  siliniyor, aksi hâlde 60 sn'lik izleyici sonraki turda tekrar deniyor.
+
+### ?? Orta - düzeltilen
+
+- **Kurulumdaki self-heal ölü koddu.** `Install-Watchdog` içindeki varlık kontrolü, hemen bir
+  üst satırdaki `Register-ScheduledTask`'tan sonra çalıştığı için teorik olarak **hiç**
+  tetiklenemiyordu (yanıltıcı güvence). Artık **devre dışı bırakılmış** görevi de onarıyor:
+  paneldeki "Durdur" ya da kurum politikası görevi kapatırsa, kurulum "KAYIT-TAMAM" dese bile
+  watchdog sessizce çalışmıyordu.
+- **Token, güvenli kanaldan gelip komut satırına sızıyordu.** `Install-Watchdog` önce token
+  dosyasını okuyup **silip**, sonra yönetici değilsek `-TelegramToken`'i `$forward` içine
+  açıkça koyuyordu. Yetki kontrolü artık **en başta**; yükseltilen sürece token **dosyasının
+  yolu** geçiriliyor (`Start-Process -Verb RunAs` aynı kullanıcıyı yükselttiği için DPAPI
+  dosyası yine çözülüyor). `-TelegramToken` yalnızca çağıran zaten komut satırında kullandığında
+  devreye giriyor ve uyarı yazıyor.
+- **Panel görev durumu 60 sn cache'leniyordu ve her işlemden sonra düşürülmüyordu.**
+  Kurulum, kaldırma, devre dışı bırakma ve ayar kaydından sonra butonlar **eski** durumu
+  gösteriyordu; kullanıcı işlem yaptığı halde butonun değişmediğini görüp tekrar tekrar
+  basıyordu. `Update-TaskCache` eklendi ve tüm durum değiştiren işlemlerden sonra çağrılıyor.
+- **Görev butonlarının hataları yutuluyordu.** `Disable-ScheduledTask` / `Start-ScheduledTask`
+  çağrıları `-ErrorAction SilentlyContinue` ile sessizce geçiyordu: yetki yoksa veya görev
+  yoksa düğmeye basmak hiçbir şey yapmıyordu. Artık `-ErrorAction Stop` + kullanıcıya
+  görünür hata mesajı. Ayrıca yönetici olmayan panelde SYSTEM görevi görünmediği için
+  bu iki buton **pasif** kalıyor ve nedeni tooltip'te yazılı.
+- **`Get-StatusTaskState` "kurulu değil" dalında `Visible = $true` dönüyordu** (alan anlam
+  çelişkisi; görev yokken görünür olamaz). Artık `false`.
+- `Get-Actions` içindeki "kurulu" kartının rengi artık görevin **gerçek** durumundan geliyor;
+  önce sabit `ok` idi, devre dışı bırakılmış görev de yeşil "kurulu" kartını gösteriyordu.
+
+### 🔍 Öz-review sonrası ek düzeltmeler
+
+Bu sürümdeki düzeltmeler yayınlanmadan önce eleştirel gözden geçirildi ve birkaç kusur daha
+kapatıldı (biri, aralık düzeltmesinin **etkisiz kalmasına** yol açan bir PowerShell tuzağıydı):
+
+- **`$PSBoundParameters` tuzağı.** İç fonksiyonlarda `$PSBoundParameters` **boş** döner
+  (yalnızca fonksiyonun kendi parametrelerini tutar; çağıranın değil). "Aralık açıkça verildi mi?"
+  sorusu `Install-Watchdog`/`Test-SystemWatchdogActive` içinde bu yüzden **her zaman "hayır"**
+  oluyordu. `Install-Watchdog`'da bu, açıkça verilen `-IntervalMinutes 30` değerini **yok
+  sayıp** config'e düşürüyordu. Çözüm: karar **script kapsamında** (dispatcher) verilir;
+  `Install-Watchdog` artık `param([int]$IntervalMinutes = 0)` alır (0 = "belirtilmedi" sentinel'i)
+  ve aralığı last-run.json → config → 5 sırasıyla çözer. `Test-SystemWatchdogActive` de artık
+  görevin **gerçekten** kullandığı aralığı (last-run.json) okur; eski kurulumlarda config
+  eksik olsa bile doğru eşiği bulur.
+- **Yükseltme yolu aralığı sıfırlıyordu.** Hem `RemoteHostWatchdog.ps1`'in kendi
+  `Start-Process -Verb RunAs` yönlendirmesi hem de `Install-Host.ps1`'in kendi kendini
+  yükseltmesi, varsayılan 5 dk'yı **zorla** çocuk sürece geçiriyordu (çünkü `$PSBoundParameters`
+  yükseltilmiş kopyada dolu görünür). Artık aralık yalnızca **kullanıcı açıkça verdiyse**
+  taşınıyor; aksi hâlde config korunuyor.
+- **Otomatik onarım kademesi kilit dışıydı.** `Test-NetworkLayer` içindeki otomatik
+  `Invoke-NetworkRepair` çağrısı, akış kilidini atlıyordu; 60 sn'lik izleyici ile döngü aynı
+  anda adaptör/winsock değiştirebiliyordu. Yeni `Invoke-RepairRungLocked`, kademeyi aynı
+  `Global\RemoteWatchdogRepair` kilidiyle sarar.
+- **Panelde "Görevi hemen çalıştır" devre dışı görevde etkin görünüyordu** (tooltip "DEVRE DIŞI"
+  derken düğme aktif ve tıklama boşa gidiyordu). Artık devre dışıyken pasif ve nedeni yazılı.
+- **`Get-RepairReport`, onarım kilitli olduğu için atlandığında** "KISMİ/BAŞARISIZ" diyordu;
+  artık `busy` alanını tanıyıp **"ATLANDI (başka onarım sürüyordu)"** gösteriyor.
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **368 kontrol** (0 hata): görevi yeniden açabilme, `$running`
+  hesabı, atomik JSON yazımı, onarım kilidi, sınırsız RepairWatch, etkinlik eşiğinin görevin
+  gerçek aralığını okuması, kurulum aralığının config'e yazılması ve **script kapsamında +
+  sentinel parametreyle** çözülmesi (regresyon), token'ın dosya yoluyla geçirilmesi.
+- `tests/Test-UI.ps1` **54 kontrol** (0 hata): görev durumu matrisi bozulmadı.
+
 ## [1.3.3] - 2026-10-07
 
 Bu sürüm, **güvenlik planındaki üç kritik maddeyi kapatır** (aşağıdaki `[Unreleased]`

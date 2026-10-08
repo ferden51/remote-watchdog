@@ -209,6 +209,7 @@ if ($Section -eq 0 -or $Section -eq 1) {
     function Test-ArgsBind { param([string]$Path, [Alias('Args')][string[]]$ScriptArgs = @()); return ($ScriptArgs -join ',') }
     Eq "panel Invoke-Script imzasi: -Args ile baglaniyor (B1 regresyon)" '-Install' (Test-ArgsBind -Path 'x.ps1' -Args @('-Install'))
     $panelText = Get-Content -LiteralPath $Panel -Raw
+    $contractText = Get-Content -LiteralPath (Join-Path $LibDir 'Contract.ps1') -Raw -Encoding UTF8
     $hasAlias = $panelText -match "\[Alias\('Args'\)\]"
     Ok 'panel Invoke-Script parametresinde [Alias("Args")] var (B1)' $hasAlias
     Ok 'panel -Args ile cagri sayisi > 0 ve imza Alias ile eslesiyor' ((([regex]::Matches($panelText, '\-Args ')).Count -gt 0) -and $hasAlias)
@@ -582,9 +583,53 @@ if ($Section -eq 0 -or $Section -eq 1) {
         REGRESYON 5: ana SYSTEM gorevi silinince (kurulum "tamam" dedi ama kayitli
         degildi) yalnizca acik oturuma baglaniliyordu. Gorev hem Install'da hem
         dongu icinde kendini onarmali.
+        Install tarafi: varlik kontrolu Register-ScheduledTask'tan hemen sonra
+        kostigi icin TEORIK OLARAK TETIKLENEMIYORDU (oluk kod). Artik DEVRE DISI
+        birakilmis gorevi de onarir; yoksa panelde "Durdur" basilip kurulum
+        calistirilsa bile kurulum "KAYIT-TAMAM" deyip watchdog calismiyordu.
     #>
-    Ok 'host ana SYSTEM görevi kurulumda kendini onarıyor' ($hostText -match 'ANA SYSTEM görevi EKSİKTİ, yeniden kuruldu')
+    Ok 'host ana SYSTEM görevi kurulumda devre dışı bırakılmışsa onarıyor' ($hostText -match 'ANA SYSTEM görevi DEVRE DISI bulundu, yeniden etkinlestirildi')
     Ok 'host ana SYSTEM görevi döngü içinde kendini onarıyor' ($hostText -match 'ANA SYSTEM görevi EKSİKTİ, döngü içinde yeniden kuruldu')
+    <#  Panelde "Durdur" dugmesi Disable-ScheduledTask ile kalici kapatiyordu ve
+        Enable-ScheduledTask HIC cagrilmadiyordu: kullanici bir kez basip gorevi
+        kapattiginda panelden acilacak yol kalmiyordu ("Kur" butonu pasif,
+        "calistir" butonu devre disi gorevde hatali). Iki yonlu olmali. #>
+    Ok 'panel görevi yeniden açabiliyor (Enable-ScheduledTask)' ($panelText -match 'Enable-ScheduledTask -TaskName ''RemoteHostWatchdog''')
+    <#  Update-ActionBarColors icindeki $running HIC tanimlanmamisti: stop butonu
+        kalici pasif, run butonu kalici acik kaliyordu. #>
+    $abcFn = [regex]::Match($panelText, '(?s)function Update-ActionBarColors.*?\r?\n}\r?\n')
+    Ok 'panel action bar $running degerini hesapliyor' ($abcFn.Success -and ($abcFn.Value -match '\$running\s*=\s*\$st\.Running'))
+    <#  last-run.json atomik yazilmiyordu; panel yazma aninda okuyunca null alip
+        SAHTE YESIL "Bekleyen is yok" kartini gosteriyordu. #>
+    Ok 'Contract last-run.json atomik yazıyor' ($contractText -match 'File\]::Replace')
+    <#  Onarim akisi kilitlenmiyordu: uc tuketici repair-request.json okuyor ve panel
+        ayrica RemoteHostRepair'i baslatiyor -> iki paralel kademe uygulamasi. #>
+    Ok 'host aynı anda tek ağ onarımına izin veriyor' ($hostText -match 'Global\\RemoteWatchdogRepair')
+    <#  RepairWatch'in 5 dk'lik ExecutionTimeLimit'i akisi yarida kesiyor, ozet
+        satirini yazmiyor ve panel "baslamadi" diyordu. #>
+    $rwBlock = [regex]::Match($hostText, "(?s)\`$wAct = New-ScheduledTaskAction.*?Register-ScheduledTask -TaskName 'RemoteHostRepairWatch'")
+    Ok 'host RemoteHostRepairWatch zaman sınırısız (akış yarıda kesilmesin)' ($rwBlock.Success -and ($rwBlock.Value -match 'ExecutionTimeLimit \(\[TimeSpan\]::Zero\)'))
+    <#  Test-SystemWatchdogActive esigi $IntervalMinutes PARAMETRESINI okuyordu
+        (sabit 5); ayarlanan aralik 30 dk iken yedek surekli devreye giriyordu. #>
+    Ok 'host SYSTEM görevi etkinlik eşiği ayar aralığını okuyor' ($hostText -match '(?s)function Test-SystemWatchdogActive.*?\(Get-Config\)\.IntervalMinutes')
+    <#  Install-Watchdog araligi yalnizca tetikleyiciye yaziyordu; panelden
+        yeniden kurulum -IntervalMinutes GONDERMEDIGI icin ayar sessizce 5'e donuyordu. #>
+    $iwFn = [regex]::Match($hostText, '(?s)function Install-Watchdog.*?\r?\n}\r?\n')
+    Ok 'host kurulum araligi config dosyasina da yaziyor' ($iwFn.Success -and ($iwFn.Value -match '\$global:cfg\.IntervalMinutes\s*=\s*\$ivInstall'))
+    <#  TUZAK: ic fonksiyonda $PSBoundParameters BOS doner; "acikca verildi mi"
+        orada cevaplanamaz. Karar script kapsaminda (dispatcher) verilip 0 sentinel'i
+        ile gecirilmeli, ve Install-Watchdog yerel parametreyi kullanmali. Aksi halde
+        "komut satirinda verilen deger > config > 5" mantigi etkisiz kalir ve acikca
+        verilen -IntervalMinutes bile yok sayilirdi. #>
+    $installDispatch = [regex]::Match($hostText, '(?m)^if \(\$Install\) \{(?s).*?\r?\n\}\r?\n')
+    Ok 'host -Install aralik kararini script kapsaminda cozuyor' ($installDispatch.Success -and ($installDispatch.Value -match "Install-Watchdog -IntervalMinutes \`$\(if \(\`$PSBoundParameters\.ContainsKey\('IntervalMinutes'\)\)"))
+    Ok 'host Install-Watchdog yerel IntervalMinutes sentinel parametresi aliyor' ($iwFn.Success -and ($iwFn.Value -match 'param\(\[int\]\$IntervalMinutes = 0\)') -and ($iwFn.Value -match '\$ivInstall = \[int\]\$IntervalMinutes'))
+    Ok 'host SYSTEM gorevi esik kaynagi last-run.json araligini kullaniyor' ($hostText -match '(?s)function Test-SystemWatchdogActive.*?intervalMinutes')
+    <#  Token once guvenli dosyadan okunup siliniyor, sonra yoneticiye devretmede
+        komut satirina acikca konuyordu. Artik yetki kontrolu en basta: token DOSYASI
+        verildiyse yolu geciriliyor, -TelegramToken ancak (zaten komut satirinda
+        kullanilmis olan) geriye uyumlu yolda kaliyor. #>
+    Ok 'host tokeni yukseltilen surece dosya yoluyla gonderiyor' ($iwFn.Success -and ($iwFn.Value -match "if \(\`$TelegramTokenFile\) \{ \`$forward \+= @\('-TelegramTokenFile'"))
     $unFn = [regex]::Match($hostText, '(?s)function Uninstall-Watchdog.*?\r?\n}\r?\n')
     Ok 'host Uninstall deadline nöbetçisini de kaldırıyor' ($unFn.Success -and ($unFn.Value -match '\$DeadlineTaskName'))
     <#  -Check "hicbir sey degistirmez" sozu: SYSTEM nabzi da -Check'te yazilmamali, yoksa

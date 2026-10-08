@@ -21,7 +21,26 @@ function Write-Status {
         $json = $Object | ConvertTo-Json -Depth 6
         $dir = Split-Path -Parent $Path
         if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-        [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($true)))
+        <#
+            ATOMIK YAZIM. Neden: dogrudan WriteAllText yarim kalmis dosya birakir ve
+            panel tam o anda okudugunda JSON parse hatasi alip NULL doner. Boylece
+            "Bekleyen is yok / Her sey yolunda" gibi SAHTE YESIL bir kart gosterilir -
+            bir watchdog icin en tehlikeli hata sinifi: olmayan alarm.
+            Cozum: once ayni klasorde gecici dosyaya yaz, sonra tek hamleyle yerine
+            koy. Okuyan surec ya tam eski ya tam yeni icerigi gorur.
+            Dosyali Replace/Move, hedefin ACL/ozelliklerini korur (ProgramData icindeki
+            icacls izinleri bozulmaz).
+        #>
+        $tmp = $Path + '.tmp.' + [guid]::NewGuid().ToString('N')
+        [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($true)))
+        try {
+            if (Test-Path -LiteralPath $Path) { [System.IO.File]::Replace($tmp, $Path, $null) }
+            else { [System.IO.File]::Move($tmp, $Path) }
+        } catch {
+            # Replace/Move basarisiz (dosya kilitli vb.) -> eski duz yazma yoluna dus
+            try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }
+            [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($true)))
+        }
         return $json
     } catch {
         Write-Verbose ("last-run.json yazilamadi: " + $_.Exception.Message)
@@ -105,7 +124,11 @@ function Get-StatusTaskState {
     param($Status, $VisibleTask)
     $fresh = Test-StatusFresh -Status $Status
     $ageMin = 999
-    if ($Status -and ([string]$Status.generated) -ne '') { $ageMin = Get-RwDateMinutesAgo $Status.generated }
+    $age = $null
+    if ($Status -and ([string]$Status.generated) -ne '') {
+        $ageMin = Get-RwDateMinutesAgo $Status.generated
+        if ($ageMin -ge 0) { $age = (New-TimeSpan -Minutes $ageMin) }
+    }
     # Beklenen dongu araligi (dk) -> "calisiyor" esigi.
     # intervalMinutes yalnizca gorev GORUNURKEN yazilir; yonetici olmayan panelde 0 gelir.
     # 0'da "3 dk" demek yanlis olur (sistem 5 dk'da bir calisir) -> guvenli varsayilan 10 dk.
@@ -122,6 +145,7 @@ function Get-StatusTaskState {
         $running = ($working -and -not $disabled)
         return [pscustomobject]@{
             Installed = $true; Visible = $true; Running = $running; Fresh = $fresh
+            Disabled = $disabled; Age = $age; AgeMinutes = $ageMin
             Text = $(if ($disabled) { 'Zamanlanmış görev: DEVRE DIŞI (kapalı)' } elseif ($running) { 'Zamanlanmış görev: ÇALIŞIYOR (son kontrol ' + [int][math]::Floor($ageMin) + ' dk önce)' } else { 'Zamanlanmış görev: kurulu ama son kontrol ' + [int][math]::Floor($ageMin) + ' dk önce - takılmış olabilir' })
             Color = $(if ($running) { 'Ok' } elseif ($disabled) { 'Bad' } else { 'Warn' })
             Short = $(if ($running) { 'Görev: çalışıyor' } else { 'Görev: takılmış?' })
@@ -131,13 +155,18 @@ function Get-StatusTaskState {
         $runNow = $working
         return [pscustomobject]@{
             Installed = $true; Visible = $false; Running = $runNow; Fresh = $fresh
+            Disabled = $false; Age = $age; AgeMinutes = $ageMin
             Text = $(if ($runNow) { 'Zamanlanmış görev: ÇALIŞIYOR (SYSTEM hesabında, son kontrol ' + [int][math]::Floor($ageMin) + ' dk önce)' } else { 'Zamanlanmış görev: kurulu, SYSTEM hesabında - takılmış olabilir (son kontrol ' + [int][math]::Floor($ageMin) + ' dk önce)' })
             Color = $(if ($runNow) { 'Ok' } else { 'Warn' })
             Short = $(if ($runNow) { 'Görev: çalışıyor' } else { 'Görev: takılmış?' })
         }
     }
+    <#  Görev YOK: Visible de false'tur. Daha once burada true donuyordu; alan anlam
+        celiskisi tasiyordu ve ileride yalnizca .Visible'a bakan bir tuketici (gorunur
+        olmadiği icin aslinda gorunmeyen) tumu hatali karar verirdi. #>
     return [pscustomobject]@{
-        Installed = $false; Visible = $true; Running = $false; Fresh = $fresh
+        Installed = $false; Visible = $false; Running = $false; Fresh = $fresh
+        Disabled = $false; Age = $age; AgeMinutes = $ageMin
         Text = 'Watchdog: kurulu değil - Install-Host.ps1 ile kurun'
         Color = 'Bad'
         Short = 'Görev: kurulu değil'

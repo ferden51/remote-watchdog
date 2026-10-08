@@ -223,6 +223,12 @@ function Get-Config {
         Holidays = @()
         HolidaysFile = ''
         NotifyRepeatHours = 4
+        <#  Zamanlanmis gorevin calisma araligi. Daha once Get-Config'de YER ALMIYORDU;
+            Install-Watchdog yalnizca tetikleyiciye yaziyordu, bu yuzden burasi bos/null
+            kaliyordu ve ayar degeri config.json'da duruyorsa ancak o zaman goruluyordu.
+            Artik varsayilan burada ve Install-Watchdog karari buraya da yaziyor; boylece
+            Test-SystemWatchdogActive esigi ve Get-FullCycleBackoffMinutes null'a dusmuyor. #>
+        IntervalMinutes = 5
         SesliBildirim = $true
         SesliBildirimEdge = $true
         EkranMesaji = $true
@@ -540,60 +546,97 @@ function Invoke-NetworkRepairFlow {
         Kullanicinin (ya da panelin) istedigi elle onarim.
         Kademeleri sirayla uygular, her kademeden sonra tekrar olcer ve saglikli olunca durur.
         Sonucu $script:LastRepair olarak JSON'a yazar; panel bunu okuyup kullaniciya gosterir.
+
+        AYNI ANDA TEK ONARIM: Global\RemoteWatchdogRepair kilidi.
+        Neden sart: Global\RemoteWatchdogCycle yalnizca TAM DONGUYU koruyor, bu akisi
+        degil. Uc ayri tuketici repair-request.json okuyor (Test-NetworkLayer,
+        Invoke-Watchdog, -RepairWatch) ve panel istegi yazdiktan sonra
+        RemoteHostRepair'i de baslatiyor. Kilit olmadan iki onarim akisi paralel
+        kademe uyguluyordu (ikisi de winsock/adaptor degistiriyor, ikisi de
+        LastRepair yaziyor -> panel sonucu hangisine ait oldugunu bilemiyor).
+        Kilit mesgulse kademe UYGULANMAZ, sonuc "baska bir onarim suruyor" olur.
     #>
     param([int]$MaxRung = 0, [string]$Reason = 'kullanici istedi')
-    $cfg = $global:cfg
-    if ($MaxRung -le 0) { $MaxRung = [int]$cfg.NetMaxRepairRung }
-    $sw = [Diagnostics.Stopwatch]::StartNew()
-    $applied = @()
-    $rungs = @()
-    $cancelled = $false
-    $healthy = Test-NetworkHealthy
-    Write-Log 'WARN' ('elle ag onarimi basladi: ' + $Reason + ' (saatlim: ' + $healthy + ')')
-    if ($healthy) {
-        Write-Log 'INFO' 'ag saglikli, hicbir kademe uygulanmadi'
-    } else {
-        $cancelled = $false
-        for ($r = 1; $r -le $MaxRung; $r++) {
-            <# Kullanici paneli kapattiysa burada dururuz; kademeler yari birakilmasin. #>
-            if (Test-RepairCancelled) {
-                $cancelled = $true
-                Write-Log 'WARN' ('ag onarimi iptal edildi (kullanici istedi), kademe ' + $r + ' uygulanmadi')
-                break
-            }
-            Write-Log 'INFO' ('kademe ' + $r + '/' + $MaxRung + ' basliyor: ' + (Get-RepairRungName $r))
-            $steps = @(Invoke-NetworkRepair -Rung $r)
-            $rungs += $r
-            $applied += $steps
-            Write-Log 'INFO' ('kademe ' + $r + ' uygulandi: ' + $(if ($steps.Count) { $steps -join '; ' } else { 'islem yok' }))
-            Start-Sleep -Seconds 3
-            $healthy = Test-NetworkHealthy
-            if ($healthy) { Write-Log 'INFO' ('kademe ' + $r + ' sonrasi ag saglikli, onarim durduruldu'); break }
-            Write-Log 'WARN' ('kademe ' + $r + ' sonrasi hâlâ sorun var, devam ediliyor')
+    $repMutex = $null
+    $repOwns = $true
+    try {
+        $repMutex = New-Object System.Threading.Mutex($false, 'Global\RemoteWatchdogRepair')
+        $repOwns = $repMutex.WaitOne(0)
+    } catch { $repOwns = $true }
+    if (-not $repOwns) {
+        if ($repMutex) { try { $repMutex.Dispose() } catch { } }
+        Write-Log 'WARN' ('ag onarimi atlandi: baska bir onarim suruyor (' + $Reason + ')')
+        $script:LastRepair = [ordered]@{
+            at = (Get-Date).ToString('o')
+            reason = $Reason
+            healthyAtStart = $false
+            ok = $false
+            cancelled = $false
+            busy = $true
+            rungs = @()
+            actions = @()
+            stillBad = @('baska bir onarim suruyor')
+            elapsedSec = 0
         }
+        return $script:LastRepair
     }
-    $sw.Stop()
-    $h = Get-NetworkHealth
-    $still = @()
-    if (-not $h.Ip) { $still += 'IP erisimi yok' }
-    if (-not $h.Dns) { $still += 'DNS cozumlemiyor' }
-    if (-not $h.Https) { $still += 'HTTPS erisimi yok' }
-    if (-not $h.Signal) { $still += 'Google sinyal yolu kapali' }
-    $script:LastRepair = [ordered]@{
-        at = (Get-Date).ToString('o')
-        reason = $Reason
-        healthyAtStart = $healthy
-        ok = ($still.Count -eq 0)
-        cancelled = $cancelled
-        rungs = $rungs
-        actions = $applied
-        stillBad = $still
-        elapsedSec = [int]$sw.Elapsed.TotalSeconds
+    try {
+        $cfg = $global:cfg
+        if ($MaxRung -le 0) { $MaxRung = [int]$cfg.NetMaxRepairRung }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $applied = @()
+        $rungs = @()
+        $cancelled = $false
+        $healthy = Test-NetworkHealthy
+        Write-Log 'WARN' ('elle ag onarimi basladi: ' + $Reason + ' (saatlim: ' + $healthy + ')')
+        if ($healthy) {
+            Write-Log 'INFO' 'ag saglikli, hicbir kademe uygulanmadi'
+        } else {
+            $cancelled = $false
+            for ($r = 1; $r -le $MaxRung; $r++) {
+                <# Kullanici paneli kapattiysa burada dururuz; kademeler yari birakilmasin. #>
+                if (Test-RepairCancelled) {
+                    $cancelled = $true
+                    Write-Log 'WARN' ('ag onarimi iptal edildi (kullanici istedi), kademe ' + $r + ' uygulanmadi')
+                    break
+                }
+                Write-Log 'INFO' ('kademe ' + $r + '/' + $MaxRung + ' basliyor: ' + (Get-RepairRungName $r))
+                $steps = @(Invoke-NetworkRepair -Rung $r)
+                $rungs += $r
+                $applied += $steps
+                Write-Log 'INFO' ('kademe ' + $r + ' uygulandi: ' + $(if ($steps.Count) { $steps -join '; ' } else { 'islem yok' }))
+                Start-Sleep -Seconds 3
+                $healthy = Test-NetworkHealthy
+                if ($healthy) { Write-Log 'INFO' ('kademe ' + $r + ' sonrasi ag saglikli, onarim durduruldu'); break }
+                Write-Log 'WARN' ('kademe ' + $r + ' sonrasi hâlâ sorun var, devam ediliyor')
+            }
+        }
+        $sw.Stop()
+        $h = Get-NetworkHealth
+        $still = @()
+        if (-not $h.Ip) { $still += 'IP erisimi yok' }
+        if (-not $h.Dns) { $still += 'DNS cozumlemiyor' }
+        if (-not $h.Https) { $still += 'HTTPS erisimi yok' }
+        if (-not $h.Signal) { $still += 'Google sinyal yolu kapali' }
+        $script:LastRepair = [ordered]@{
+            at = (Get-Date).ToString('o')
+            reason = $Reason
+            healthyAtStart = $healthy
+            ok = ($still.Count -eq 0)
+            cancelled = $cancelled
+            busy = $false
+            rungs = $rungs
+            actions = $applied
+            stillBad = $still
+            elapsedSec = [int]$sw.Elapsed.TotalSeconds
+        }
+        Write-Log $(if ($cancelled) { 'WARN' } elseif ($script:LastRepair.ok) { 'INFO' } else { 'WARN' }) $(if ($cancelled) { ('ag onarimi iptal edildi (kullanici kapatti), uygulanan kademe=' + ($rungs -join ',') + ', sure=' + $script:LastRepair.elapsedSec + ' sn') } else { ('ag onarimi bitti: basarili=' + $script:LastRepair.ok + ', kademe=' + ($rungs -join ',') + ', sure=' + $script:LastRepair.elapsedSec + ' sn' + $(if ($still.Count) { ', kalan sorun: ' + ($still -join ', ') } else { '' })) })
+        # Iptal kaydi kalmasin: sonraki otomatik onarimlar da iptal sayilmasin
+        Clear-RepairCancelIfIdle
+        return $script:LastRepair
+    } finally {
+        if ($repMutex) { try { if ($repOwns) { $repMutex.ReleaseMutex() } } catch { }; try { $repMutex.Dispose() } catch { } }
     }
-    Write-Log $(if ($cancelled) { 'WARN' } elseif ($script:LastRepair.ok) { 'INFO' } else { 'WARN' }) $(if ($cancelled) { ('ag onarimi iptal edildi (kullanici kapatti), uygulanan kademe=' + ($rungs -join ',') + ', sure=' + $script:LastRepair.elapsedSec + ' sn') } else { ('ag onarimi bitti: basarili=' + $script:LastRepair.ok + ', kademe=' + ($rungs -join ',') + ', sure=' + $script:LastRepair.elapsedSec + ' sn' + $(if ($still.Count) { ', kalan sorun: ' + ($still -join ', ') } else { '' })) })
-    # Iptal kaydi kalmasin: sonraki otomatik onarimlar da iptal sayilmasin
-    Clear-RepairCancelIfIdle
-    return $script:LastRepair
 }
 
 function Read-RepairRequest {
@@ -601,7 +644,18 @@ function Read-RepairRequest {
     $reqPath = Join-Path $BaseDir 'repair-request.json'
     if (-not (Test-Path -LiteralPath $reqPath)) { return $null }
     $req = $null
-    try { $req = Get-Content -LiteralPath $reqPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+    $parseOk = $true
+    try { $req = Get-Content -LiteralPath $reqPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $parseOk = $false }
+    <#
+        Dosya YALNIZCA basarili okundugunda silinir. Once catch bos gecmisti ve dosya
+        yine de siliniyordu: panel isteği yazarken yarim dosya okunursa istek sessizce
+        YOK OLURDU, kullanici "Ağı onar" dediğinde hicbir sey olmazdi. Simdi dosya
+        yerinde kalir ve 60 sn'lik izleyici bir sonraki turda tekrar dener.
+    #>
+    if (-not $parseOk -or $null -eq $req) {
+        Write-Log 'WARN' 'repair-request.json okunamadi (yarim yazilmis olabilir); dosya birakildi, sonraki turda tekrar denenecek'
+        return $null
+    }
     try { Remove-Item -LiteralPath $reqPath -Force -ErrorAction SilentlyContinue } catch { }
     # Yeni istek geldi: onceki iptal kaydini temizle (yoksa bu istek de iptal sayilir)
     Clear-RepairCancel
@@ -641,6 +695,30 @@ function Clear-RepairCancelIfIdle {
     }
 }
 
+function Invoke-RepairRungLocked {
+    <#
+        OTOMATIK tek-kademe onarimini ayni Global\RemoteWatchdogRepair kilidiyle sarar.
+        Neden: Invoke-NetworkRepairFlow kilidi aliyor, ama Test-NetworkLayer icindeki
+        OTOMATIK kademe dogrudan Invoke-NetworkRepair'i cagiriyordu. Dongu (cycle) ile
+        60 sn'lik izleyicinin onarim akisi AYNI ANDA kosabildigi icin, iki surec paralel
+        adaptor/winsock degistirebiliyordu. Kilit mesgulse kademe ATLANIR (bir sonraki
+        dongude tekrar denenir).
+    #>
+    param([int]$Rung)
+    $m = $null
+    $owns = $true
+    try {
+        $m = New-Object System.Threading.Mutex($false, 'Global\RemoteWatchdogRepair')
+        $owns = $m.WaitOne(0)
+    } catch { $owns = $true }
+    if (-not $owns) {
+        if ($m) { try { $m.Dispose() } catch { } }
+        return @('baska bir onarim suruyor, kademe atlandi')
+    }
+    try { return @(Invoke-NetworkRepair -Rung $Rung) }
+    finally { if ($m) { try { if ($owns) { $m.ReleaseMutex() } } catch { }; try { $m.Dispose() } catch { } } }
+}
+
 function Test-NetworkLayer {
     $cfg = $global:cfg
     $script:LastRepair = $null
@@ -666,7 +744,8 @@ function Test-NetworkLayer {
         $repair += ('bozuk: eksik=' + (@(if (-not $h.Ip) { 'IP' }) + @(if (-not $h.Dns) { 'DNS' }) + @(if (-not $h.Https) { 'HTTPS' }) -join ','))
         $resetPending = 0
         if ($cfg.FixNetwork -and (Test-Admin) -and -not $Check) {
-            $repair += (Invoke-NetworkRepair -Rung $rung) -join '; '
+            $rungSteps = @(Invoke-RepairRungLocked -Rung $rung)
+            $repair += ($rungSteps -join '; ')
             if ($rung -ge [int]$cfg.NetMaxRepairRung) { $resetPending = 1; $repair += 'onerilen: makineyi yeniden baslat' }
         } else {
             $repair += 'kademe ' + $rung + ' uygulanmadi (admin gerekir)'
@@ -2334,9 +2413,38 @@ function Invoke-Watchdog {
 function Install-Watchdog {
     <#
         Guvenli token kanali: -TelegramTokenFile verildiyse dosyadan okunur ve dosya
-        ANINDA silinir. -TelegramToken (eski yol) geriye donuk uyum icin duruyor
-        ama komut satirinda gorunur; kurulum betigi artik dosya yolunu kullanir.
+        ANINDA silinir.
+
+        YETKI KONTROLU EN BASTA. Daha once once token dosyasi okunup SILINIYOR, sonra
+        yonetici degilsek $forward icine -TelegramToken acikca konuluyordu: yani token
+        once guvenli kanaldan gelip sonra komut satirina siziyordu. Artik yetki
+        kontrolu once yapilir ve yukseltilen surece TOKEN DOSYASININ YOLU gecirilir
+        (Start-Process -Verb RunAs ayni kullaniciyi yukseltir, DPAPI ayni hesaba
+        bagli oldugu icin dosya yine cozulebilir). -TelegramToken'in geriye uyumlu
+        yolu yalnizca cagiran zaten komut satirinda kullandiginda one cikar.
     #>
+    # IntervalMinutes: 0 = "belirtilmedi" (sentinel). Script parametresi DEGIL, yerel
+    # parametre: cunku ic fonksiyonda $PSBoundParameters BOS doner ve "acikca verildi mi"
+    # sorusu orada cevaplanamazdi. Karar script kapsaminda (dispatcher) verilip buraya
+    # gecirilir. 0 ise config.json daki deger (yoksa 5) kullanilir.
+    param([int]$IntervalMinutes = 0)
+    if (-not (Test-Admin)) {
+        $forward = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ScriptPath + '"'), '-Install')
+        # Aralik YALNIZCA acikca verildiyse gecirilir; verilmediyse cocuk surec
+        # config.json'daki degeri okur (yoksa 5). Aksi halde burada parametre
+        # varsayilani ZORLA gecirilir ve yukseltme yolunda ayar sifirlanirdi.
+        if ($IntervalMinutes -gt 0) { $forward += @('-IntervalMinutes', [string]$IntervalMinutes) }
+        if ($HeartbeatUrl) { $forward += @('-HeartbeatUrl', ('"' + $HeartbeatUrl + '"')) }
+        if ($TelegramTokenFile) { $forward += @('-TelegramTokenFile', ('"' + $TelegramTokenFile + '"')) }
+        elseif ($TelegramToken) { $forward += @('-TelegramToken', ('"' + $TelegramToken + '"')); Write-Host 'UYARI: token komut satirinda gorunuyor; guvenli icin kurulumu -TelegramTokenFile ile calistirin.' }
+        if ($TelegramChatId) { $forward += @('-TelegramChatId', ('"' + $TelegramChatId + '"')) }
+        if ($TunnelName) { $forward += @('-TunnelName', ('"' + $TunnelName + '"')) }
+        if ($EnableTunnelRepair) { $forward += '-EnableTunnelRepair' }
+        if ($KeepSleep) { $forward += '-KeepSleep' }
+        Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $forward
+        Write-Host 'Yonetici yetkisiyle yeniden baslatildi.'
+        return
+    }
     if ($TelegramTokenFile -and (Test-Path -LiteralPath $TelegramTokenFile)) {
         try {
             $blob = Get-Content -LiteralPath $TelegramTokenFile -Raw -ErrorAction Stop
@@ -2344,15 +2452,30 @@ function Install-Watchdog {
         } catch { Write-Log 'WARN' ('token dosyasi okunamadi: ' + $_.Exception.Message) }
         try { Remove-Item -LiteralPath $TelegramTokenFile -Force -ErrorAction SilentlyContinue } catch { }
     }
-    $forward = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ScriptPath + '"'), '-Install', '-IntervalMinutes', $IntervalMinutes)
-    if ($HeartbeatUrl) { $forward += @('-HeartbeatUrl', ('"' + $HeartbeatUrl + '"')) }
-    if ($TelegramToken) { $forward += @('-TelegramToken', ('"' + $TelegramToken + '"')) }
-    if ($TelegramChatId) { $forward += @('-TelegramChatId', ('"' + $TelegramChatId + '"')) }
-    if ($TunnelName) { $forward += @('-TunnelName', ('"' + $TunnelName + '"')) }
-    if ($EnableTunnelRepair) { $forward += '-EnableTunnelRepair' }
-    if ($KeepSleep) { $forward += '-KeepSleep' }
-    if (-not (Test-Admin)) { Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $forward; Write-Host 'Yonetici yetkisiyle yeniden baslatildi.'; return }
     $global:cfg = Get-Config
+    <#
+        Aralik kaynagi ve config senkronizasyonu.
+        Daha once aralik YALNIZCA gorev tetikleyicisine yaziliyordu, config'e degil.
+        Iki sonuc doguyordu:
+          1) Panelden "Watchdog kur" denildiginde -IntervalMinutes ARGUMANI gonderilmiyordu,
+             gorev parametre varsayilani 5 dk'ya donuyor, kullanici ayari sessizce kayboluyordu.
+          2) Install-Host.ps1 de varsayilan 5 ile geliyor; ayar 30 ise her yeniden
+             kurulumda 5'e donuyordu (Uninstall config'i koruyor, Install degistiriyordu -
+             tutarsiz).
+        Artik: komut satirinda ACIKCA verilen deger > config'teki deger > 5.
+        Karar verilen deger hem goreve hem config'e yazilir; boylece
+        Test-SystemWatchdogActive esigi, Get-FullCycleBackoffMinutes ve panelin geri
+        sayimi hepsi ayni degere bakiyor.
+    #>
+    $ivInstall = [int]$IntervalMinutes
+    if ($ivInstall -le 0) { try { $ivInstall = [int]$global:cfg.IntervalMinutes } catch { } }
+    if ($ivInstall -lt 1) { $ivInstall = 5 }
+    if ($ivInstall -gt 240) { $ivInstall = 240 }
+    if ([int]$global:cfg.IntervalMinutes -ne $ivInstall) {
+        Write-Log 'INFO' ('kontrol araligi guncellendi: ' + [int]$global:cfg.IntervalMinutes + ' -> ' + $ivInstall + ' dk')
+        $global:cfg.IntervalMinutes = $ivInstall
+    }
+    $IntervalMinutes = $ivInstall
     if ($HeartbeatUrl) { $global:cfg.HeartbeatUrl = $HeartbeatUrl }
     if ($TelegramToken) { $global:cfg.TelegramToken = $TelegramToken }
     if ($TelegramChatId) { $global:cfg.TelegramChatId = $TelegramChatId }
@@ -2377,13 +2500,20 @@ function Install-Watchdog {
         KENDINI ONARMA: bu gorev olmadan, kullanici oturumu kapaliyken HICBIR sey
         calismaz (sadece FastProbe/UserFallback, ikisi de Interactive). Gecede
         kurulum "KAYIT-TAMAM" demisine ragmen bu SYSTEM gorevi kayitli degildi;
-        watchdog yalnizca oturum acikken devam edebildi. Her Install-Watchdog
-        cagrisinda ve her tam dongude varligi teyit edilir; yoksa yeniden kurulur.
+        watchdog yalnizca oturum acikken devam edebildi.
+
+        DOGRULAMA: yalnizca "var mi" diye bakmak YETMEZ. Bu blok hemen bir ust satirdaki
+        Register-ScheduledTask tan sonra kostigi icin once yalnizca varlik kontrolu
+        yapiliyordu ve teorik olarak HIC tetiklenemiyordu (oluk kod, yaniltici guvence).
+        Simdi DEVRE DISI BIRAKILMIS olma durumu da onarilir: paneldeki "Durdur" dugmesi
+        ya da kurum politikasi gorevi kapatabiliyor; o durumda kurulum "KAYIT-TAMAM"
+        dese bile watchdog sessizce calismiyordu.
     #>
     try {
-        if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+        $anaGorev = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($anaGorev -and [string]$anaGorev.State -eq 'Disabled') {
             Register-ScheduledTask -TaskName $TaskName -Action $act -Trigger @($trgStartup, $trgLogon, $trgRep) -Principal $prn -Settings $stg -Force | Out-Null
-            Write-Log 'WARN' ('ANA SYSTEM görevi EKSİKTİ, yeniden kuruldu: ' + $TaskName + ' (oturum kapaliyken calismasi icin)')
+            Write-Log 'WARN' ('ANA SYSTEM görevi DEVRE DISI bulundu, yeniden etkinlestirildi: ' + $TaskName)
         }
     } catch { Write-Log 'WARN' ('ana SYSTEM görevi dogrulanamadi: ' + $_.Exception.Message) }
     # Panelden "Agi / interneti onar" icin ayri, tetikleyicisiz (on-demand) gorev.
@@ -2399,7 +2529,15 @@ function Install-Watchdog {
     try {
         $wAct = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $ScriptPath + '" -RepairWatch')
         $wTrg = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Seconds 60)
-        $wStg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::FromMinutes(5)) -Hidden
+        # ExecutionTimeLimit 0 = KISIT YOK. ONCEDEN 5 dk'ti ve bu bir is mantigi hatasidi:
+        # Invoke-NetworkRepairFlow kademeleri uygulayip ancak bitince $script:LastRepair'i
+        # ve "ag onarimi bitti" ozet satirini yaziyor. 5 dk'ta oldurulen akis yarida
+        # kalirdi -> ozet yazilmaz -> panelin canli penceresi bitisi hic gormez, 7 dk
+        # bekleyip "Zaman asimi: 7 dk icinde BASLAMADI" der (halbuki baslamisti ve
+        # belki kismi onarim uygulanmisti), LastRepair yazilmadigi icin
+        # Write-RepairStatusPatch ve Send-Telegram de calismaz, yani kimse bilgilendirilmez.
+        # 60 sn'de bir acilan bu izleyici icin kisit uygulamak anlamsiz.
+        $wStg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -Hidden
         Register-ScheduledTask -TaskName 'RemoteHostRepairWatch' -Action $wAct -Trigger $wTrg -Principal $rPrn -Settings $wStg -Force | Out-Null
         Write-Log 'INFO' 'panel onarim izleyicisi kuruldu: RemoteHostRepairWatch (SYSTEM, her 60 sn; istek yoksa aninda cikar)'
     } catch { Write-Log 'WARN' ('panel onarim izleyicisi kurulamadi: ' + $_.Exception.Message) }
@@ -2515,7 +2653,38 @@ function Test-SystemWatchdogActive {
         kalmiyordu. Isaret dosyasi 2 dongu + 2 dk'de bir tazelenmezse yedek devreye girer.
     #>
     param([int]$StaleMinutes = 0)
-    if ($StaleMinutes -le 0) { $StaleMinutes = ([int]$IntervalMinutes * 2 + 2) }
+    <#
+        Esik kaynagi: once last-run.json'daki GERCEK gorev araligi (zamanlanmis gorevin
+        tetikleyicisinden okunur), yoksa config.json'daki aralik, yoksa 5 dk.
+        ONCEDEN yalnizca $IntervalMinutes (script parametresi, varsayilan 5) kullaniliyordu.
+        -UserFallback gorevi yalnizca "-UserFallback" argumaniyla cagrildigi icin parametre
+        HER ZAMAN 5 geliyor; ayarlanan aralik (orn. 30 dk) hic dikkate alinmiyordu.
+        Sonuc: aralik buyutuldugunde esik 12 dk kalirken SYSTEM gorevi 30 dk'da bir
+        kosuyor -> kullanici yedegi surekli "SYSTEM olu" sanip devreye giriyor ve
+        admin olmayan tam donguler aciliyordu (onarim kademeleri ve zorla restart
+        calismiyor, restart butcesi sahte sayimlarla doluyordu).
+        NOT: "$PSBoundParameters.ContainsKey('IntervalMinutes')" BURADA ise YARAMAZ -
+        ic fonksiyonda $PSBoundParameters BOS doner (yalnizca kendi parametresini tutar).
+        Bu yuzden once GOREVIN gercekten kullandigi araliga (last-run.json) bakilir;
+        bu, eski kurulumlarda config eksik olsa bile dogru sonucu verir.
+
+        TAVAN 45 dk: iv*2+2 degeri buyuk araliklarda (iv=30 -> 62 dk) asiri uzun
+        beklemeye yol acar; SYSTEM gorevi olse bile kullanici yedegi saatlerce
+        beklerdi. 5 dk'da eski davranis (12 dk) aynen korunur.
+    #>
+    if ($StaleMinutes -le 0) {
+        $iv = 0
+        try {
+            $lrPath = Join-Path $BaseDir 'last-run.json'
+            if (Test-Path -LiteralPath $lrPath) {
+                $lrj = Get-Content -LiteralPath $lrPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ($lrj.config -and ($lrj.config.PSObject.Properties.Name -contains 'intervalMinutes')) { $iv = [int]$lrj.config.intervalMinutes }
+            }
+        } catch { }
+        if ($iv -le 0) { try { $iv = [int](Get-Config).IntervalMinutes } catch { } }
+        if ($iv -le 0) { $iv = 5 }
+        $StaleMinutes = [math]::Min(($iv * 2 + 2), 45)
+    }
     $hb = Join-Path $BaseDir 'system-heartbeat.json'
     if (Test-Path -LiteralPath $hb) {
         try { return (((Get-Date) - (Get-Item -LiteralPath $hb).LastWriteTime).TotalMinutes -lt $StaleMinutes) } catch { return $false }
@@ -3101,7 +3270,14 @@ if ($ListHolidays) {
     $list | Sort-Object | ForEach-Object { Write-Host ('  ' + $_) }
     exit 0
 }
-if ($Install) { Install-Watchdog; exit 0 }
+if ($Install) {
+    # Aralik karari BURADA (script kapsami) verilir: ic fonksiyonda $PSBoundParameters
+    # bos doner, bu yuzden "acikca verildi mi" ancak burada bilinebilir. Acikca
+    # verilmediyse 0 (sentinel) gonderilir; Install-Watchdog config.json'daki degeri
+    # korur (yoksa 5).
+    Install-Watchdog -IntervalMinutes $(if ($PSBoundParameters.ContainsKey('IntervalMinutes')) { [int]$IntervalMinutes } else { 0 })
+    exit 0
+}
 if ($UserFallback) {
     if (Test-SystemWatchdogActive) { exit 0 }
     <#  Bilgi seviyesinde: kullanici kurulumunda (SYSTEM gorevi yok) bu normal durumdur.

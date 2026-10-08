@@ -118,7 +118,7 @@ if ($DryRun) {
     Step '1) Tehis raporu'
     Warn ('  calistirilacak: ' + $DiagScript + '  (okuma modunda)')
     Step '2) Host watchdog'
-    Warn ('  calistirilacak: ' + $AppDir + '\host\RemoteHostWatchdog.ps1 -Install -IntervalMinutes ' + $IntervalMinutes)
+    Warn ('  calistirilacak: ' + $AppDir + '\host\RemoteHostWatchdog.ps1 -Install' + $(if ($PSBoundParameters.ContainsKey('IntervalMinutes')) { ' -IntervalMinutes ' + $IntervalMinutes } else { ' (aralik: config.json degeri korunur)' }))
     if ($TelegramToken) { Warn '  -TelegramToken verilecek' } else { Warn '  Telegram token YOK: alarm ekranda gorunur, Telegram gelmez' }
     if ($KeepSleep) { Warn '  -KeepSleep: uyku ve Fast Startup ayarlarina dokunulmayacak' }
     Step '3) Belge koruyucu'
@@ -152,7 +152,12 @@ if (-not (Is-Admin)) {
             $TelegramToken = ''   # bellekteki duz metni de temizle
         } catch { Warn 'token dosyasi yazilamadi; token bu bicimde iletilemiyor' }
     }
-    $forward = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), '-IntervalMinutes', $IntervalMinutes)
+    $forward = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'))
+    # Aralik yalnizca kullanici ACIKCA verdiyse yukseltilmis kopyaya tasinir.
+    # Aksi halde bu betigin varsayilani 5, yukseltilen surecte "$PSBoundParameters"
+    # icinde gorunur ve host'a ZORLA gecirilir; panelde secilmis aralik (orn. 30 dk)
+    # her yeniden kurulumda 5'e donerdi.
+    if ($PSBoundParameters.ContainsKey('IntervalMinutes')) { $forward += @('-IntervalMinutes', [string]$IntervalMinutes) }
     if ($tokenFile) { $forward += @('-TelegramTokenFile', ('"' + $tokenFile + '"')) }
     if ($TelegramChatId) { $forward += @('-TelegramChatId', ('"' + $TelegramChatId + '"')) }
     if ($KeepSleep) { $forward += '-KeepSleep' }
@@ -214,7 +219,15 @@ if (-not $SkipDiag) {
 }
 
 Step '2) Host watchdog kurulumu'
-$args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $HostScript + '"'), '-Install', '-IntervalMinutes', $IntervalMinutes)
+$args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $HostScript + '"'), '-Install')
+# Aralik YALNIZCA acikca verildiginde gecirilir. Bu betigin varsayilani 5; her zaman
+# gecirilirse (daha once oldugu gibi) panelde secilmis kontrol araligi (orn. 30 dk)
+# her yeniden kurulumda sessizce 5'e donuyordu. Verilmediyse host config.json'daki
+# mevcut degeri korur (yoksa 5). Ayni mantik Uninstall ile tutarli: uninstall
+# config'i silmiyor, install de ustune yazmamali.
+$intervalArg = ''
+if ($PSBoundParameters.ContainsKey('IntervalMinutes')) { $intervalArg = [string]$IntervalMinutes }
+if ($intervalArg) { $args += @('-IntervalMinutes', $intervalArg) }
 # Token YINE komut satirinda gecirilmez: gecici DPAPI dosyasi ile verilir ve
 # host betigi okuduktan sonra silinir (kimse islem listesinde gormez).
 $hostTokenFile = ''
@@ -230,7 +243,7 @@ if ($TelegramChatId) { $args += @('-TelegramChatId', ('"' + $TelegramChatId + '"
 if ($KeepSleep) { $args += '-KeepSleep' }
 $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $args -Wait -PassThru -WindowStyle Hidden
 if ($hostTokenFile) { try { Remove-Item -LiteralPath $hostTokenFile -Force -ErrorAction SilentlyContinue } catch { } }
-if ($p.ExitCode -eq 0) { Ok 'zamanlanmış görev kuruldu (acilista + oturum acilista + her ' + $IntervalMinutes + ' dk)' } else { Warn ('kurulum donus kodu: ' + $p.ExitCode) }
+if ($p.ExitCode -eq 0) { Ok ('zamanlanmış görev kuruldu (acilista + oturum acilista' + $(if ($intervalArg) { '; her ' + $intervalArg + ' dk' } else { '; aralik config.json degerinde korundu' }) + ')') } else { Warn ('kurulum donus kodu: ' + $p.ExitCode) }
 
 $cfgPath = 'C:\ProgramData\RemoteWatchdog'
 if (Test-Path -LiteralPath $cfgPath) {

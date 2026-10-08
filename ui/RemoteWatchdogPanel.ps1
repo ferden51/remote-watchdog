@@ -492,18 +492,41 @@ function Get-Actions {
         [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = 'Uzak makine verisi yok'; Detail = 'Watchdog kurulu degil veya hic calismadi.'; Key = 'host'; Action = 'Kur' })
         return $a
     }
-    $hj = Get-Json $HostJson
+    # Ikinci okuma: ilk null kontrolunden sonra dosya yeniden yaziliyor veya bozulmus
+    # olabilir. Write-Status artik atomik yaziyor, ama guvenli tarafta kalalim:
+    # null'a dusulurse ASLA "Bekleyen is yok" (yesil) kartina inmek yok. Daha once
+    # buradaki atama null dondugu tum kartlari (checks, docs-block, netResetPendingReboot,
+    # consecutiveFailures) sessizce yutuyor ve kullaniciya SAHTE "Her sey yolunda"
+    # gosteriyordu - bir watchdog icin en tehlikeli hata sinifi.
+    $hj2 = Get-Json $HostJson
+    if (-not $hj2) {
+        [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = 'Uzak makine verisi okunamadi'; Detail = 'last-run.json su anda yaziliyor veya okunamadi. Bir sonraki kontrolde netlesir; bu bir arıza bildirimi degildir.'; Key = ''; Action = '' })
+        return $a
+    }
+    $hj = $hj2
     $st = Get-WatchdogTaskState
-    if ($st.Installed) {
+    if ($st.Installed -and $st.Disabled) {
+        # TEK ve NET kart. Once iki kart birden cikiyordu ("Zamanlanmis gorev kurulu"
+        # basligi + ayri "DEVRE DISI" karti); ilki yanilticiydi.
+        [void]$a.Add([pscustomobject]@{ Level = 'bad'; Title = 'Zamanlanmis gorev DEVRE DISI birakildi'; Detail = 'Gorev kurulu ama kapatilmis: kontrol, alarm ve otomatik onarim CALISMIYOR. Ayarlar sayfasindaki "Gorevi yeniden ac" dugmesiyle ya da "Watchdog kur" ile geri acin.'; Key = 'host'; Action = 'Yeniden kur' })
+    } elseif ($st.Installed) {
+        # Kartin rengi artik gorevin GERCEK durumundan geliyor. Once sabit 'ok' idi:
+        # takilmis gorev de "kurulu" yesil kartini gosteriyordu.
+        $lvl = ([string]$st.Color).ToLowerInvariant()
         if ($st.Visible) {
-            [void]$a.Add([pscustomobject]@{ Level = 'ok'; Title = 'Zamanlanmış görev kurulu'; Detail = $st.Text + '.'; Key = ''; Action = '' })
+            [void]$a.Add([pscustomobject]@{ Level = $lvl; Title = 'Zamanlanmış görev kurulu'; Detail = $st.Text + '.'; Key = ''; Action = '' })
         } else {
-            [void]$a.Add([pscustomobject]@{ Level = 'ok'; Title = 'Zamanlanmış görev çalışıyor'; Detail = $st.Text + '. Sistem kendi kendine yeniden başlatmıyor; veriler taze olduğu için görev düzenli çalışıyor.'; Key = ''; Action = '' })
+            [void]$a.Add([pscustomobject]@{ Level = $lvl; Title = 'Zamanlanmış görev çalışıyor'; Detail = $st.Text + '. Sistem kendi kendine yeniden başlatmıyor; veriler taze olduğu için görev düzenli çalışıyor.'; Key = ''; Action = '' })
         }
     } else {
         [void]$a.Add([pscustomobject]@{ Level = 'bad'; Title = 'Watchdog kurulu değil'; Detail = 'RemoteHostWatchdog görevi yok. Bu görev olmadan kontrol, onarım, alarm ve restart politikası çalışmaz. Kurulum: install\Install-Host.ps1 (yönetici) ya da aşağıdaki Kur işlemi.'; Key = 'host'; Action = 'Kur' })
     }
-    if ($st.Age -and $st.Age.TotalMinutes -gt ([double]$cfg.IntervalMinutes * 3)) {
+    # Esik en az 10 dk: IntervalMinutes okunamazsa 0'a dustugu icin kart her zaman
+    # gorunuyordu. $st.Age, Get-StatusTaskState cikisinda YENI eklendi; daha once
+    # $st bu satira geldiginde Get-WatchdogTaskState sonucuydu ve Age alani hic yoktu,
+    # yani bu kart hicbir zaman cikmiyordu (oluk kod).
+    $donmeEsik = [math]::Max(10, [double]$cfg.IntervalMinutes * 3)
+    if ($st.Age -and $st.Age.TotalMinutes -gt $donmeEsik) {
         [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ('Watchdog donmuyor (' + [math]::Round($st.Age.TotalMinutes) + ' dk once)'); Detail = 'Gorev durmus olabilir veya makine uyuyor.'; Key = 'run'; Action = 'Şimdi denetle' })
     }
     foreach ($c in @($hj.checks)) {
@@ -1033,7 +1056,7 @@ function Get-RepairReport {
     $when = ''
     try { $when = ([datetime]::Parse([string]$lr.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToString('dd.MM HH:mm') } catch { }
     $lines = New-Object System.Collections.ArrayList
-    $verdict = $(if ($lr.cancelled) { 'İPTAL EDİLDİ' } elseif ($lr.ok) { 'BAŞARILI' } else { 'KISMİ / BAŞARISIZ' })
+    $verdict = $(if ($lr.busy) { 'ATLANDI (başka onarım sürüyordu)' } elseif ($lr.cancelled) { 'İPTAL EDİLDİ' } elseif ($lr.ok) { 'BAŞARILI' } else { 'KISMİ / BAŞARISIZ' })
     [void]$lines.Add(('Son ağ onarımı: ' + $when + ' | ' + $verdict + ' | ' + [int]$lr.elapsedSec + ' sn'))
     [void]$lines.Add(('  uygulanan kademe: ' + $(if (@($lr.rungs).Count) { (@($lr.rungs) -join ' → ') } else { 'gerekmedi (ağ sağlıklıydı)' })))
     if (@($lr.actions).Count) { [void]$lines.Add('  yapılanlar: ' + ((@($lr.actions)) -join '; ')) }
@@ -1666,7 +1689,17 @@ function Update-RepairLive {
     }
     Set-RepairLiveText -Text ([string]$script:RepairLiveText) -Color 'Warn'
     if ($script:RepairSawDone) { Complete-NetworkRepairLive }
-    elseif ($el -gt 420) { Complete-NetworkRepairLive 'Zaman aşımı: 7 dk içinde başlamadı. Görev kapalıysa "Watchdog kur" ile yeniden kur.' }
+    elseif ($el -gt 1320) {
+        # 22 dk. Once 420 sn (7 dk) idi ve RemoteHostRepair'inin 20 dk'lik
+        # ExecutionTimeLimit'indan kisaydi: yavas bir onarimda sure dolunca pencere
+        # "BASLAMADI" diyordu, halbuki baslamis ve kademeler uygulanmis olabilirdi.
+        $basladi = ([string]$script:RepairLiveText).Length -gt 0
+        Complete-NetworkRepairLive $(if ($basladi) {
+                'Zaman asimi: 22 dk icinde BİTMEDİ. Onarım başlamış ve kademeler uygulanmış olabilir; sistem durumu için "Durum" sekmesine bakın.'
+            } else {
+                'Zaman asimi: 22 dk icinde baslamadi. Gorev kapaliysa "Watchdog kur" ile yeniden kur.'
+            })
+    }
 }
 
 function Invoke-NetworkRepair {
@@ -2214,6 +2247,13 @@ function Update-Actions {
     } catch { Write-Trace ('islem yenileme hatasi: ' + $_.Exception.Message) }
 }
 
+function Update-TaskCache {
+    # Gorev durumu 60 sn cache'leniyor. Durumu DEGISTIREN bir islemden sonra bu cache
+    # gecersiz kalmazsa dugmeler ve metin eski durumu gosterir (kullanici islem yapmis
+    # olmasina ragmen buton ayni durumda kalir, defalarca basar).
+    $script:TaskCache = $null
+    $script:TaskCacheUntil = (Get-Date).AddSeconds(-1)
+}
 function Get-WatchdogTaskState {
     <#  Gorev gorunur durumda dogrudan sorgulanir; gorunmezse sozlesme katmani (JSON) karar verir. #>
     if ((Get-Date) -lt $script:TaskCacheUntil) {
@@ -2229,8 +2269,13 @@ function Get-WatchdogTaskState {
 function Update-ActionBarColors {
     if (-not $script:ActionButtons) { return }
     $st = Get-WatchdogTaskState
-    $task = $script:TaskCache
     $installed = $st.Installed
+    # Daha once $running HIC tanimlanmadiydi: asagida stop/run butonlarinin ikisi de
+    # bunu kullaniyordu, yani "durdur" butonu kalici pasif, "calistir" butonu kalici
+    # acik kaliyordu. Get-StatusTaskState zaten .Running donuyor.
+    $running = $st.Running
+    $visible = $st.Visible
+    $disabled = $st.Disabled
     $statusText = $st.Text
     $statusColor = $st.Color
     if ($script:TaskStatusText) {
@@ -2245,7 +2290,9 @@ function Update-ActionBarColors {
     foreach ($bb in $script:ActionButtons) {
         $k = [string]$bb.Tag
         if ($k -eq 'install') {
-            if ($installed) {
+            # Devre disi birakilmis gorev de "kurulu" sayilir ama yeniden kurulum
+            # makul bir cikis yoludur; bu yuzden pasiflestirme kosulu daraltildi.
+            if ($installed -and -not $disabled) {
                 $bb.Background = Bx 'Ok'
                 $bb.Foreground = Bx '#0B1220'
                 $bb.BorderBrush = Bx 'Ok'
@@ -2258,7 +2305,7 @@ function Update-ActionBarColors {
                 $bb.BorderBrush = Bx 'Bad'
                 $bb.Opacity = 1
                 $bb.IsEnabled = $true
-                $bb.ToolTip = 'Watchdog kurulu değil. Bu düğmeye basarak Install-Host.ps1 çalıştırılır.'
+                $bb.ToolTip = $(if ($installed) { 'Görev DEVRE DIŞI bırakılmış. Yeniden kurmak onu tekrar açar.' } else { 'Watchdog kurulu değil. Bu düğmeye basarak Install-Host.ps1 çalıştırılır.' })
             }
         } elseif ($k -eq 'uninstall') {
             if ($installed) {
@@ -2277,28 +2324,53 @@ function Update-ActionBarColors {
                 $bb.ToolTip = 'Kaldırılacak görev yok.'
             }
         } elseif ($k -eq 'stoptask') {
-            if ($running) {
-                $bb.Background = Bx 'Warn'
-                $bb.Foreground = Bx '#1A1206'
-                $bb.BorderBrush = Bx 'Warn'
-                $bb.IsEnabled = $true
-            } else {
+            # IKI YONLU DUGME. Daha once yalnizca Disable-ScheduledTask vardi ve
+            # Enable-ScheduledTask hic cagrilmadi: kullanici bir kez basip gorevi
+            # kalici olarak kapattiginda panelden acilacak yol kalmiyordu ("Kur"
+            # butonu pasif, "calistir" butonu devre disi gorevde hatali).
+            # Artik gorunur ve DEVRE DISI DEGILSE durdurur, DEVRE DISI ISE acar.
+            # Gorunur olmayan (yoneticisiz) panelde pasif kalir: bu islem gorevi adiyla
+            # degistirir ve sessizce basarisiz olurdu.
+            if (-not $installed -or -not $visible) {
                 $bb.Background = Bx 'Card2'
                 $bb.Foreground = Bx 'Muted'
                 $bb.BorderBrush = Bx 'Line'
+                $bb.Opacity = 0.55
                 $bb.IsEnabled = $false
-            }
-        } elseif ($k -eq 'runtask') {
-            if (-not $running) {
+                $bb.Content = 'Zamanlanmis gorevi durdur'
+                $bb.ToolTip = $(if (-not $installed) { 'Durdurulacak görev yok.' } else { 'Görev bu panelden görünmüyor (SYSTEM görevi). Yönetici yetkisiyle açılmalı.' })
+            } elseif ($disabled) {
                 $bb.Background = Bx 'Ok'
                 $bb.Foreground = Bx '#0B1220'
                 $bb.BorderBrush = Bx 'Ok'
+                $bb.Opacity = 1
                 $bb.IsEnabled = $true
+                $bb.Content = 'Gorevi yeniden ac'
+                $bb.ToolTip = 'Görev DEVRE DIŞI bırakılmış. Bu düğmeye basarak tekrar etkinleştirir.'
+            } else {
+                $bb.Background = Bx 'Warn'
+                $bb.Foreground = Bx '#1A1206'
+                $bb.BorderBrush = Bx 'Warn'
+                $bb.Opacity = 1
+                $bb.IsEnabled = $true
+                $bb.Content = 'Zamanlanmis gorevi durdur'
+                $bb.ToolTip = 'Görevi devre dışı bırakır (izleme ve otomatik onarım durur). Aynı düğme tekrar açar.'
+            }
+        } elseif ($k -eq 'runtask') {
+            if ($installed -and $visible -and -not $disabled -and -not $running) {
+                $bb.Background = Bx 'Ok'
+                $bb.Foreground = Bx '#0B1220'
+                $bb.BorderBrush = Bx 'Ok'
+                $bb.Opacity = 1
+                $bb.IsEnabled = $true
+                $bb.ToolTip = 'Kontrol döngüsünü şimdi başlatır.'
             } else {
                 $bb.Background = Bx 'Card2'
                 $bb.Foreground = Bx 'Muted'
                 $bb.BorderBrush = Bx 'Line'
+                $bb.Opacity = 0.55
                 $bb.IsEnabled = $false
+                $bb.ToolTip = $(if (-not $installed) { 'Çalıştırılacak görev yok.' } elseif (-not $visible) { 'Görev bu panelden görünmüyor (SYSTEM görevi).' } elseif ($disabled) { 'Görev DEVRE DIŞI; önce "Gorevi yeniden ac" düğmesini kullanın.' } else { 'Görev zaten çalışıyor (veri taze).' })
             }
         } else {
             $bb.Background = Bx 'Card2'
@@ -2703,12 +2775,64 @@ function Invoke-SettingsAction {
     $script:ActionLog += $Key
     Write-Trace ('islem calistirildi: ' + $Key)
     switch ($Key) {
-        'install' { Play-Sfx 'online' | Out-Null; Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null }
-        'uninstall' {
-            if ([System.Windows.MessageBox]::Show('Watchdog zamanlanmis gorevi kaldirilsin mi?', 'RemoteWatchdog', 'YesNo', 'Question') -eq 'Yes') { Invoke-Script -Path $HostScript -Args @('-Uninstall') -Wait }
+        'install' {
+            Play-Sfx 'online' | Out-Null
+            # Aralik argumanini da gonder: -Install parametre varsayilani 5 dk idi ve
+            # panelde secilen kontrol araligi (orn. 30 dk) her yeniden kurulumda
+            # sessizce 5'e donuyordu.
+            $iv = [int](Get-HostConfig).IntervalMinutes
+            $ivArgs = @()
+            if ($iv -ge 1 -and $iv -le 240) { $ivArgs = @('-IntervalMinutes', [string]$iv) }
+            Invoke-Script -Path $HostScript -Args (@('-Install') + $ivArgs)
+            [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir). Kurulum bitince "Watchdog kur" dugmesi etkinlesir.', 'RemoteWatchdog') | Out-Null
         }
-        'stoptask' { Disable-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue | Out-Null; Write-Host 'gorev durduruldu' }
-        'runtask' { Start-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue; Start-Sleep 1; Update-Connections; Update-Overview }
+        'uninstall' {
+            if ([System.Windows.MessageBox]::Show('Watchdog zamanlanmis gorevleri kaldirilsin mi?', 'RemoteWatchdog', 'YesNo', 'Question') -eq 'Yes') { Invoke-Script -Path $HostScript -Args @('-Uninstall') -Wait }
+        }
+        'stoptask' {
+            # IKI YONLU: aciksa devre disi birak, devre disiysa ac.
+            # ONCEDEN yalnizca Disable vardi; Enable-ScheduledTask hic cagrilmadi ve
+            # "calistir" dugmesi devre disi gorevde zorunlu olarak basarisiz oldugu icin
+            # kullanici gorevi bir kez kapattiginda panelden acilacak yol kalmiyordu.
+            $cur = Get-WatchdogTaskState
+            if (-not $cur.Visible) {
+                [System.Windows.MessageBox]::Show('Bu gorev bu panelden gorunmuyor (SYSTEM gorevi). Islemi yapmak icin yonetici yetkisiyle calisan paneli kullanin.', 'RemoteWatchdog', 'OK', 'Warning') | Out-Null
+                break
+            }
+            try {
+                if ($cur.Disabled) {
+                    Enable-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction Stop | Out-Null
+                    Write-Trace 'gorev yeniden etkinlestirildi'
+                } else {
+                    $r = [System.Windows.MessageBox]::Show('Zamanlanmis gorev DEVRE DISI birakilacak. Kontrol, alarm ve otomatik onarim durur. Ayni dugmeye tekrar basinca geri acilir.', 'RemoteWatchdog', 'YesNo', 'Warning')
+                    if ($r -ne 'Yes') { break }
+                    Disable-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction Stop | Out-Null
+                    Write-Trace 'gorev devre disi birakildi'
+                }
+                Update-TaskCache
+            } catch { [System.Windows.MessageBox]::Show('Gorev durumu degistirilemedi: ' + $_.Exception.Message, 'RemoteWatchdog', 'OK', 'Error') | Out-Null }
+        }
+        'runtask' {
+            $cur = Get-WatchdogTaskState
+            if (-not $cur.Visible) {
+                [System.Windows.MessageBox]::Show('Bu gorev bu panelden gorunmuyor (SYSTEM gorevi). Islemi yapmak icin yonetici yetkisiyle calisan paneli kullanin.', 'RemoteWatchdog', 'OK', 'Warning') | Out-Null
+                break
+            }
+            if ($cur.Disabled) {
+                [System.Windows.MessageBox]::Show('Gorev DEVRE DISI birakilmis. Once "Gorevi yeniden ac" dugmesini kullanin.', 'RemoteWatchdog', 'OK', 'Warning') | Out-Null
+                break
+            }
+            # Hata ONCEDEN -ErrorAction SilentlyContinue ile yutuluyordu: devre disi gorevde
+            # veya yetki yokken dugmeye basmak hicbir sey yapmiyordu, kullanici da bilmiyordu.
+            try {
+                Start-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction Stop
+                Write-Trace 'gorev hemen baslatildi'
+                Update-TaskCache
+                Start-Sleep 1
+                Update-Connections
+                Update-Overview
+            } catch { [System.Windows.MessageBox]::Show('Gorev baslatilamadi: ' + $_.Exception.Message, 'RemoteWatchdog', 'OK', 'Error') | Out-Null }
+        }
         'diag' { $script:DiagProc = Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $HostDiag + '"')) -WindowStyle Hidden -PassThru }
         'testalert' {
             $cfg = Get-HostConfig
@@ -2737,6 +2861,9 @@ function Invoke-SettingsAction {
         }
         default { }
     }
+    # Her durum degistiren islemden sonra cache'i dusur: 60 sn bayat veriyle buton
+    # renkleri yanlis gosteriyordu.
+    if ($Key -eq 'install' -or $Key -eq 'uninstall' -or $Key -eq 'stoptask' -or $Key -eq 'runtask') { try { Update-TaskCache } catch { } }
     try { Update-ActionBarColors } catch { Write-Trace ('ayarlar eylemi sonrasi renk guncelleme hatasi: ' + $_.Exception.Message) }
 }
 
@@ -2805,6 +2932,9 @@ function Save-Settings {
             if ($triggered) { (El $script:Win 'TxtSaved').Text += ' — watchdog tetiklendi, yeni ayarlar hemen uygulaniyor' }
             else { (El $script:Win 'TxtSaved').Text += ' — gorev calismiyor, siradaki dongude gecerli' }
             Write-Trace ('ayarlar kaydedildi, watchdog tetikleme: ' + $triggered)
+            # Tetikleme durumu degistirdi; 60 sn'lik cache dusurulmazsa butonlar eski
+            # durumu gosterir ve kullanici ayarin uygulanmadigini sanir.
+            try { Update-TaskCache } catch { }
         }
         if (-not $Quiet) { [System.Windows.MessageBox]::Show('Ayarlar kaydedildi: ' + $hostVals.Count + ' host + ' + $clientVals.Count + ' istemci ayari', 'RemoteWatchdog') | Out-Null }
     } catch {
