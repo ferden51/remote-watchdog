@@ -260,6 +260,22 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host probe geri sayimi (Test-FullCycleDue) var' ($hostText -match 'function Test-FullCycleDue')
     <#  Restart butcesi yalnizca DOGRULANMIS (makine yeniden acilmis) restartlari saymali. #>
     Ok 'host restart butcesi dogrulamasi (Sync-RebootAccounting) var' ($hostText -match 'function Sync-RebootAccounting')
+    <#
+        GECE BULGUSU 1: yetkisiz (admin=False) tam dongu zorla restart karari verirse,
+        deadline nöbetçisini KURAMAZ ("KURULAMADI (yonetici yetkisi yok)") ve kirilgan
+        geri sayima duser. Ayni kesintiyi SYSTEM dongusu admin olarak zaten cozer.
+        Bu yuzden Invoke-RebootIfNeeded, admin degilken ve SYSTEM dongusu saglam gorunurken
+        restart degerlendirmesini ONA birakmali.
+    #>
+    Ok 'host yetkisiz dongu restart kararini SYSTEM dongusune birakiyor' ($hostText -match 'if \(-not \(Test-Admin\) -and \(Test-SystemWatchdogActive\)\) \{')
+    <#
+        GECE BULGUSU 2: LastHealthyUtc hic guncellenmedigi icin reboot sonrasi ILK saglikli
+        dongude "uzun sure saglikli kaldi" denip restart butcesi ANINDA sifirlaniyordu
+        (24s/N restart butcesi etkisiz). Saglikli seri, sagliksizliktan saglikliya geciste
+        YENIDEN baslamali.
+    #>
+    $rbnFn = [regex]::Match($hostText, '(?s)function Invoke-RebootIfNeeded.*?\r?\n\}\r?\n')
+    Ok 'host saglikli seri gecis aninda sifirlaniyor (butce reboot sonrasi hemen sifirlanmaz)' ($rbnFn.Success -and ($rbnFn.Value -match '\$oncekiSagliksiz') -and ($rbnFn.Value -match '\$oncekiSagliksiz -or -not \$st\.LastHealthyUtc'))
     Ok 'host restart icin yedek yontem (Confirm-Reboot) var' ($hostText -match 'function Confirm-Reboot')
     Ok 'host restart karari butceye yazmadan once damgalanir (PendingRebootUtc)' ($hostText -match 'PendingRebootUtc')
     <#  Geri sayim sonunda dogrudan shutdown.exe CAGRILMEZ: cikis kodu atiliyordu ve

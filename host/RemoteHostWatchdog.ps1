@@ -1736,21 +1736,54 @@ function Invoke-RebootIfNeeded {
     if ($AllOk) {
         $null = Invoke-StateUpdate {
             param($st)
+            <#
+                SAGLIKLI SERI BURADA BASLAR. Hata (reboot sonrasi) tam olarak soyleydi:
+                LastHealthyUtc BIR KEZ yazilip bir daha GUNCELLENMIYORDU; bu yuzden
+                degeri haftalar oncesine sabitleniyor ve makineye reboot sonrasi ILK
+                saglikli dongude "uzun sure saglikli kaldi" dedirtip restart butcesini
+                ANINDA sifirliyordu. Sonuc: "24 saatte en fazla N restart" butcesi
+                fiilen etkisizdi.
+                Cozum: bu dongu SAGLIKSIZ durumdan SAGLIKLI duruma gecis mi? (kesinti
+                sayaci > 0, kesinti baslangici var, bekleyen reboot var ya da winsock
+                reset bekliyor). Oyleyse LastHealthyUtc = simdi (seri sifirdan baslar);
+                yalnizca seri HealthyMinutesToReset dk'ya ulasirsa butce sifirlanir.
+            #>
+            $oncekiSagliksiz = (([int]$st.ConsecutiveFailures) -gt 0) -or (([string]$st.OutageStartUtc) -ne '') -or ([bool]$st.PendingRebootUtc) -or (([int]$st.NetResetPendingReboot) -eq 1)
             $st.ConsecutiveFailures = 0
             $st.NetResetPendingReboot = 0
             $st.OutageStartUtc = ''
             $st.BreakerKey = ''
-            if ($st.LastHealthyUtc) {
+            if ($oncekiSagliksiz -or -not $st.LastHealthyUtc) {
+                $st.LastHealthyUtc = (Get-Date).ToString('o')
+            } else {
                 try {
                     $lh = [datetime]::Parse([string]$st.LastHealthyUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
                     if (((Get-Date) - $lh).TotalMinutes -ge [double]$cfg.HealthyMinutesToReset) {
                         if (@($st.RebootsUtc).Count -gt 0) { Write-Log 'INFO' ('uzun sure saglikli kaldi, restart butcesi sifirlandi (' + [int]$cfg.HealthyMinutesToReset + ' dk)') }
                         $st.RebootsUtc = @()
                     }
-                } catch { }
-            } else { $st.LastHealthyUtc = (Get-Date).ToString('o') }
+                } catch { $st.LastHealthyUtc = (Get-Date).ToString('o') }
+            }
             $st.LastOkUtc = (Get-Date).ToString('o')
         }
+        return
+    }
+    <#
+        YETKISIZ DONGU ZORLA RESTART KARARI VERMESIN.
+        Guvenilir restart yolu deadline nöbetçisidir ve o SYSTEM + admin gerektirir.
+        Normal kullanici baglaminda calisan bir dongu (NetListen/FastProbe'in tetikledigi
+        -UserFallback veya Start-FullCycle) nöbetçiyi KURAMAZ -> kirilgan geri sayim
+        dongusune duser. Oysa SYSTEM dongusu zaten duzenli calisiyor ve AYNI kesintiyi
+        gorup admin olarak nöbetçiyle restart eder. Bu yuzden: admin degilsek ve SYSTEM
+        dongusu saglam gorunuyorsa karari ONA birakiriz; burada ne sayac artiririz ne de
+        restart baslatiriz. Boylece gece gorulen "ikinci dongu de restart karari verdi /
+        nöbetçi KURULAMADI" durumu olusmaz.
+        NOT: SYSTEM gorevi yoksa (saf kullanici kurulumu) nabiz bayat olur ->
+        Test-SystemWatchdogActive false doner ve kirilgan geri sayim devreye girer; bu
+        tek secenek oldugu icin korunur.
+    #>
+    if (-not (Test-Admin) -and (Test-SystemWatchdogActive)) {
+        Write-Log 'INFO' 'restart degerlendirmesi SYSTEM dongusune birakildi (bu dongu yonetici degil; nöbetçi kurulamaz, sistem saglam gorunuyor)'
         return
     }
     $bad = @($script:Results | Where-Object { -not $_.Ok -and -not $_.Skipped })

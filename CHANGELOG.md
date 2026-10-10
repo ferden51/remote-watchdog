@@ -4,6 +4,39 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.5] - 2026-10-10
+
+Gece günlüğü incelemesinde bulunan iki iş-mantığı kusuru kapatıldı. İkisi de aynı olay
+örüntüsünden çıktı: iki gece üst üste ~05:30'da internet tamamen kopunca watchdog zorla
+restart etti. Doğru davranıştı, ama iki yan sorun vardı.
+
+### 🐞 Düzeltilen
+
+- **Yetkisiz döngü zorla restart kararı verip deadline nöbetçisini kuramıyordu.**
+  `RemoteHostNetListen` (Limited) / `FastProbe` tetiklediği döngü normal kullanıcı
+  bağlamında koşuyordu; `admin=False` olduğu için nöbetçi kurulamıyor
+  (`deadline restart nöbetçisi KURULAMADI (yonetici yetkisi yok)`) ve restart kırılgan
+  geri-sayım döngüsüne kalıyordu. İki gecede de şans eseri denk gelen admin döngü
+  nöbetçiyi kurdu; ama sıralama garantili değildi. Artık `Invoke-RebootIfNeeded`,
+  **admin değilken ve SYSTEM döngüsü sağlam görünürken** restart değerlendirmesini
+  SYSTEM döngüsüne bırakır (o zaten aynı kesintiyi görüp nöbetçiyle restart eder).
+  Saf kullanıcı kurulumunda (SYSTEM görevi yok) nabız bayat olur ve kırılgan geri
+  sayım yine devreye girer; davranış değişmez.
+- **Restart bütçesi reboot'tan hemen sonra sıfırlanıyordu.** `LastHealthyUtc` bir kez
+  yazılıp bir daha güncellenmiyordu; değeri haftalar öncesine sabitleniyor ve reboot
+  sonrası **ilk** sağlıklı döngüde "uzun süre sağlıklı kaldı" denip `RebootsUtc`
+  temizleniyordu. Yani "24 saatte en fazla N restart" bütçesi fiilen etkisizdi.
+  Artık sağlıklı seri, sağlıksızlıktan sağlığa geçişte **yeniden başlar**
+  (`ConsecutiveFailures`, `OutageStartUtc`, `PendingRebootUtc`, `NetResetPendingReboot`
+  temizlenmeden önce kontrol edilir) ve bütçe ancak `HealthyMinutesToReset` dk kesintisiz
+  sağlıktan sonra sıfırlanır.
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **370 kontrol** (0 hata): yetkisiz döngünün restart kararını
+  SYSTEM'e bırakması ve sağlıklı-seri sıfırlamasının geçiş anında yapılması regresyonları.
+- `tests/Test-UI.ps1` **54 kontrol**, `tests/Verify-OutageLogic.ps1` **33 kontrol** (0 hata).
+
 ## [1.3.4] - 2026-10-08
 
 Bu sürüm, **görev yönetiminin (zamanlanmış görev) iş mantığı incelemesinde** bulunan hataları
