@@ -292,6 +292,7 @@ function Get-State {
         LastRebootAnnounceUtc = ''
         OutageStartUtc = ''
         BreakerKey = ''
+        LastOutageReport = ''
     }
     if (Test-Path -LiteralPath $StateFile) {
         try {
@@ -488,14 +489,254 @@ function Get-NetworkHealth {
     return [pscustomobject]$h
 }
 
+function Get-DefaultGatewayIp {
+    <#  Varsayilan IPv4 gateway (hizli, yalnizca yerel sorgu). #>
+    try {
+        $r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1
+        if ($r) { return [string]$r.NextHop }
+    } catch { }
+    try {
+        $c = Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object { $_.IPv4DefaultGateway } | Select-Object -First 1
+        if ($c) { return [string]@($c.IPv4DefaultGateway.NextHop)[0] }
+    } catch { }
+    return ''
+}
+
+function Get-DefaultRouteIfIndex {
+    <#  Varsayilan rotanin arayuz indexi (adaptoru hedeflemek icin). #>
+    try {
+        $r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1
+        if ($r) { return [int]$r.InterfaceIndex }
+    } catch { }
+    return 0
+}
+
+function Get-OutageClass {
+    <#
+        Kesintiyi YEREL / YUKARI olarak hizli siniflar. Yalnizca YEREL ve HIZLI sorgu
+        kullanir; dis internete prob YOK (disarinin kopuk oldugu zaten biliniyor).
+        Donus: local-link | local-dhcp | local-segment | upstream | unknown.
+        Amac: "lokal servis mi, ag mi?" sorusunu rapora ve onarim sirasina yazmak.
+    #>
+    param([bool]$ExternalDown = $true)
+    $linkUp = $false
+    $ifNames = @()
+    try {
+        $ups = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' })
+        if ($ups.Count -gt 0) { $linkUp = $true; $ifNames = @($ups | ForEach-Object { $_.Name }) }
+    } catch { }
+    if (-not $linkUp) { return [pscustomobject]@{ Class = 'local-link'; Detail = 'hicbir adaptor Up degil (kablo/adaptor/surucu)'; Link = ''; Dhcp = $false; Gateway = ''; GatewayAlive = $false } }
+    $dhcpOk = $false
+    try { $dhcpOk = @((Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ConnectionState -eq 'Connected' -and $_.Dhcp -eq 'Enabled' })).Count -gt 0 } catch { }
+    if (-not $dhcpOk) { return [pscustomobject]@{ Class = 'local-dhcp'; Detail = 'bagli DHCP arayuzu yok (DHCP sunucusu/adaptor)'; Link = ($ifNames -join ','); Dhcp = $false; Gateway = ''; GatewayAlive = $false } }
+    $gw = ''
+    try { $gw = Get-DefaultGatewayIp } catch { }
+    if (-not $gw) { return [pscustomobject]@{ Class = 'local-segment'; Detail = 'varsayilan gateway yok (rota kayip)'; Link = ($ifNames -join ','); Dhcp = $true; Gateway = ''; GatewayAlive = $false } }
+    # Gateway canli mi? ARP + 1 sn ping. (Kurumsal gateway'ler ICMP kapatabilir; o yuzden ARP da sayilir.)
+    $gwAlive = $false
+    try { if ([bool](Get-NetNeighbor -IPAddress $gw -ErrorAction SilentlyContinue)) { $gwAlive = $true } } catch { }
+    if (-not $gwAlive) {
+        try {
+            $pg = New-Object System.Net.NetworkInformation.Ping
+            try { $pr = $pg.Send($gw, 1000); if ($pr.Status -eq 'Success') { $gwAlive = $true } } catch { }
+            try { $pg.Dispose() } catch { }
+        } catch { }
+    }
+    if (-not $gwAlive) { return [pscustomobject]@{ Class = 'local-segment'; Detail = ('gateway (' + $gw + ') ARP/ping yanitsiz; yerel segment, switch portu ya da NAC'); Link = ($ifNames -join ','); Dhcp = $true; Gateway = $gw; GatewayAlive = $false } }
+    if ($ExternalDown) { return [pscustomobject]@{ Class = 'upstream'; Detail = ('gateway (' + $gw + ') canli ama dis hat kopuk; firewall/ISS/yukari ag ya da kurumsal bakim'); Link = ($ifNames -join ','); Dhcp = $true; Gateway = $gw; GatewayAlive = $true } }
+    return [pscustomobject]@{ Class = 'unknown'; Detail = 'yerel segment saglikli, dis durum belirsiz'; Link = ($ifNames -join ','); Dhcp = $true; Gateway = $gw; GatewayAlive = $true }
+}
+
+function Write-OutageReport {
+    <#
+        Kesinti sonrasi detayli diagnostik raporu. HIZLI ve REBOOT'U GECIKTIRMEZ:
+        dongude ZATEN olculmus sonuclari ($script:Results) + yalnizca YEREL/ucuz sorgulari
+        kullanir; dis internete TEK hizli dogrulama (1.1.1.1:443, 1.2 sn) disinda prob YOK.
+        Cikti: diag\outage-<ts>.json + .md (insan ozeti, BT ile paylasilabilir).
+        En fazla 20 rapor tutulur, eskiler budanir. Yolu host-state.json'a
+        (LastOutageReport) yazar; last-run.json'a da tasinir, panel gosterir.
+    #>
+    param([string]$Phase = 'pre-reboot', $Burst = $null)
+    try {
+        $cfg = $global:cfg
+        $state = Get-State
+        $dir = Join-Path $BaseDir 'diag'
+        try { if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null } } catch { return '' }
+        $ts = (Get-Date).ToString('yyyyMMdd-HHmmss')
+        $cls = $null
+        try { $cls = Get-OutageClass -ExternalDown $true } catch { $cls = $null }
+        $extMs = -1
+        try { $extMs = Get-TcpMs -HostName '1.1.1.1' -Port 443 -TimeoutMs 1200 } catch { }
+        $ifaces = @()
+        try {
+            foreach ($a in @(Get-NetAdapter -ErrorAction SilentlyContinue)) {
+                $ifaces += [ordered]@{ name = [string]$a.Name; status = [string]$a.Status; speed = [string]$a.LinkSpeed; mac = [string]$a.MacAddress; ifIndex = [int]$a.ifIndex }
+            }
+        } catch { }
+        $dnsSrv = @()
+        try { $dnsSrv = @((Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses } | Where-Object { $_ }) | Select-Object -Unique) } catch { }
+        $gw = ''
+        try { $gw = Get-DefaultGatewayIp } catch { }
+        $lease = [ordered]@{ obtained = ''; expires = '' }
+        try {
+            $nc = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($nc) { $lease.obtained = [string]$nc.DHCPLeaseObtained; $lease.expires = [string]$nc.DHCPLeaseExpires }
+        } catch { }
+        # Son ag olaylari (Sistem gunlugu, sinirli; yavaslatmamak icin en fazla ~50 kayit taranir).
+        $evts = @()
+        try {
+            $evts = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = (Get-Date).AddMinutes(-45) } -MaxEvents 50 -ErrorAction SilentlyContinue | Where-Object { $_.ProviderName -match 'Dhcp|DNS|NDIS|Netwtw|e1i|Realtek|Tcpip|WLAN|wlan|dot3|Wired|Eap|Ndis|BFE|NetAdapter|NetSetup|Kernel-PnP|WdFilter|WdNis' } | Select-Object -First 25 | ForEach-Object { [ordered]@{ at = ([datetime]$_.TimeCreated).ToString('o'); id = [int]$_.Id; provider = [string]$_.ProviderName; level = [string]$_.LevelDisplayName; msg = (([string]$_.Message -replace '\s+',' ').Substring(0, [Math]::Min(220, (([string]$_.Message -replace '\s+',' ').Length)))) } })
+        } catch { }
+        $checks = @()
+        try { foreach ($r in @($script:Results)) { $checks += [ordered]@{ name = [string]$r.Name; ok = [bool]$r.Ok; skipped = [bool]$r.Skipped; detail = [string]$r.Detail; repair = [string]$r.Repair } } } catch { }
+        $rep = [ordered]@{
+            generated = (Get-Date).ToString('o'); phase = $Phase; host = $env:COMPUTERNAME; version = $script:AppVersion
+            outageStartUtc = [string]$state.OutageStartUtc; consecutiveFailures = [int]$state.ConsecutiveFailures; netRepairRung = [int]$state.NetRepairRung
+            class = $(if ($cls) { [string]$cls.Class } else { 'unknown' }); classDetail = $(if ($cls) { [string]$cls.Detail } else { '' })
+            externalConfirmMs = $extMs; gateway = $gw
+            interfaces = $ifaces; dnsServers = $dnsSrv; dhcpLease = $lease
+            checks = $checks; recentEvents = $evts
+            burst = $(if ($Burst) { [ordered]@{ recovered = [bool]$Burst.Recovered; rungs = @($Burst.Rungs); actions = @($Burst.Actions); elapsedSec = [int]$Burst.ElapsedSec } } else { $null })
+            budget24h = @($state.RebootsUtc).Count; maxPerDay = [int]$cfg.MaxRestartsPerDay
+            inBlackout = (Test-InBlackout)
+            recoveredAt = ''; outcome = ''
+        }
+        $base = Join-Path $dir ('outage-' + $ts)
+        $json = ($rep | ConvertTo-Json -Depth 7)
+        # Atomik yaz (Write-Status ile ayni desen; okuyan yari dosya gormez).
+        $tmp = $base + '.json.tmp'
+        [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($true)))
+        try {
+            if (Test-Path -LiteralPath ($base + '.json')) { [System.IO.File]::Replace($tmp, ($base + '.json'), $null) }
+            else { [System.IO.File]::Move($tmp, ($base + '.json')) }
+        } catch {
+            try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }
+            [System.IO.File]::WriteAllText(($base + '.json'), $json, (New-Object System.Text.UTF8Encoding($true)))
+        }
+        # Insan ozeti (.md) - BT ile paylasilabilir.
+        try {
+            $md = New-Object System.Collections.ArrayList
+            [void]$md.Add(('# Kesinti raporu — ' + $env:COMPUTERNAME + ' — ' + (Get-Date).ToString('yyyy-MM-dd HH:mm')))
+            [void]$md.Add('')
+            [void]$md.Add(('- Faz: ' + $Phase))
+            [void]$md.Add(('- Sinif: **' + $rep.class + '** — ' + $rep.classDetail))
+            [void]$md.Add(('- Kesinti baslangici: ' + $rep.outageStartUtc + ' | ardisik basarisizlik: ' + $rep.consecutiveFailures))
+            [void]$md.Add(('- Dis hat dogrulama (1.1.1.1:443): ' + $(if ($extMs -ge 0) { $extMs.ToString() + ' ms (ACIK)' } else { 'kapali' })))
+            [void]$md.Add(('- Gateway: ' + $(if ($gw) { $gw } else { 'yok' })))
+            [void]$md.Add(('- DNS sunuculari: ' + $(if (@($dnsSrv).Count) { (@($dnsSrv) -join ', ') } else { 'yok' })))
+            [void]$md.Add(('- DHCP lease: alindi=' + $lease.obtained + ' bitiyor=' + $lease.expires))
+            [void]$md.Add(('- Butce 24s: ' + $rep.budget24h + '/' + $rep.maxPerDay + ' | blackout: ' + $rep.inBlackout))
+            if ($Burst) { [void]$md.Add(('- Restart oncesi hizli onarim: ' + $(if ($Burst.Recovered) { 'KURTARDI' } else { 'yetmedi' }) + ' (kademe: ' + (($Burst.Rungs -join ',')) + ')')) }
+            [void]$md.Add('')
+            [void]$md.Add('## Kontroller')
+            foreach ($c in $checks) { [void]$md.Add(('- [' + $(if ($c.ok) { 'OK' } elseif ($c.skipped) { 'ATLANDI' } else { 'SORUN' }) + '] ' + $c.name + ' — ' + $c.detail)) }
+            [void]$md.Add('')
+            [void]$md.Add('## Son ag olaylari (Sistem gunlugu)')
+            if (@($evts).Count) { foreach ($e in $evts) { [void]$md.Add(('- ' + $e.at + ' [' + $e.id + '] ' + $e.provider + ': ' + $e.msg)) } } else { [void]$md.Add('- (ilgili olay yok)') }
+            [void]$md.Add('')
+            [void]$md.Add('## BT icin soru')
+            [void]$md.Add('- Bu saatlerde firewall politika basimi / oturum zaman asimi / NAC yeniden dogrulama var mi?')
+            [void]$md.Add('- WORKGROUP (domain-disi) cihazlar icin gece kisitlamasi uygulaniyor mu?')
+            [System.IO.File]::WriteAllText(($base + '.md'), (($md -join "`r`n")), (New-Object System.Text.UTF8Encoding($true)))
+        } catch { }
+        # Budama: en fazla 20 rapor tutulur.
+        try {
+            $all = @(Get-ChildItem -LiteralPath $dir -Filter 'outage-*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+            if ($all.Count -gt 20) {
+                foreach ($old in @($all | Select-Object -Skip 20)) {
+                    try {
+                        Remove-Item -LiteralPath $old.FullName -Force -ErrorAction SilentlyContinue
+                        $mdb = [System.IO.Path]::ChangeExtension($old.FullName, '.md')
+                        if (Test-Path -LiteralPath $mdb) { Remove-Item -LiteralPath $mdb -Force -ErrorAction SilentlyContinue }
+                    } catch { }
+                }
+            }
+        } catch { }
+        try { $null = Invoke-StateUpdate { param($st) $st.LastOutageReport = ($base + '.json') } } catch { }
+        $script:LastOutageReport = ($base + '.json')
+        Write-Log 'INFO' ('kesinti raporu yazildi: ' + ($base + '.json') + ' (sinif: ' + $rep.class + ')')
+        return ($base + '.json')
+    } catch { Write-Log 'WARN' ('kesinti raporu yazilamadi: ' + $_.Exception.Message); return '' }
+}
+
+function Complete-OutageReport {
+    <#
+        Acik (kurtulusu islenmemis) en yeni kesinti raporunu kapatir. Rapor yoksa
+        sessizce cikar (saglikli her dongude cagrilabilir).
+    #>
+    param([string]$Outcome = 'recovered')
+    try {
+        $dir = Join-Path $BaseDir 'diag'
+        if (-not (Test-Path -LiteralPath $dir)) { return }
+        $open = @(Get-ChildItem -LiteralPath $dir -Filter 'outage-*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+        if (-not $open -or $open.Count -eq 0) { return }
+        $p = $open[0].FullName
+        $raw = $null
+        try { $raw = Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return }
+        if (-not $raw) { return }
+        if (($raw.PSObject.Properties.Name -contains 'recoveredAt') -and [string]$raw.recoveredAt -ne '') { return }
+        $raw | Add-Member -NotePropertyName 'recoveredAt' -NotePropertyValue (Get-Date).ToString('o') -Force
+        $raw | Add-Member -NotePropertyName 'outcome' -NotePropertyValue $Outcome -Force
+        $j = ($raw | ConvertTo-Json -Depth 7)
+        $tmp = $p + '.tmp'
+        [System.IO.File]::WriteAllText($tmp, $j, (New-Object System.Text.UTF8Encoding($true)))
+        try {
+            [System.IO.File]::Replace($tmp, $p, $null)
+        } catch {
+            try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }
+            [System.IO.File]::WriteAllText($p, $j, (New-Object System.Text.UTF8Encoding($true)))
+        }
+        Write-Log 'INFO' ('kesinti raporu kapatildi (kurtulus): ' + $p)
+    } catch { }
+}
+
+function Invoke-PreRebootRepair {
+    <#
+        Restart ONCESI hizli onarim. Otomatik yolda reboot karari ayni dongude verildigi
+        icin (RebootAfterFailedCycles=1) reboot oncesi esasen yalnizca kademe-1 uygulanirdi.
+        Bu fonksiyon, reboot'tan ONCE 1-4 kademelerini hizli yoklamayla (tek hedef, 1.2 sn)
+        dener; kurtulursa reboot engellenir. Kademe-5 (winsock/IP reset) reboot GEREKTIRDIGI
+        icin burada YOKTUR; onu reboot'un kendisi halleder.
+        Repair kilidi (Invoke-RepairRungLocked) kullanilir: baska bir onarim suruyorsa
+        degismez, reboot yoluna devam edilir. Iptal dosyasi KONTROL EDILMEZ (bu otomatik
+        bir girisimdir; eski bir iptal kaydi reboot oncesi sansi oldurmemelidir).
+    #>
+    param([string[]]$BadNames = @())
+    $t0 = Get-Date
+    $rungs = @()
+    $actions = @()
+    try {
+        foreach ($r in @(1, 2, 3, 4)) {
+            # Sure tavani (180 sn): DHCP yenileme gibi adimlar yanitsiz agda takilabilir;
+            # reboot'u gereksiz yere geciktirmemek icin asilirsa birakilir.
+            if ([int]((Get-Date) - $t0).TotalSeconds -gt 180) { Write-Log 'WARN' 'restart oncesi hizli onarim sure sinirina takildi (180 sn); reboot yoluna devam ediliyor'; break }
+            Write-Log 'INFO' ('restart oncesi kademe ' + $r + ': ' + (Get-RepairRungName $r))
+            $steps = @(Invoke-RepairRungLocked -Rung $r)
+            $rungs += $r
+            $actions += $steps
+            Write-Log 'INFO' ('restart oncesi kademe ' + $r + ' uygulandi: ' + $(if ($steps.Count) { $steps -join '; ' } else { 'islem yok' }))
+            Start-Sleep -Seconds 2
+            $q = $null
+            try { $q = Get-QuickNetState -TimeoutMs 1200 } catch { }
+            if ($q -and $q.Ip -and $q.Dns -and $q.Signal) {
+                $el = [int]((Get-Date) - $t0).TotalSeconds
+                Write-Log 'INFO' ('restart oncesi hizli onarim KURTARDI (kademe ' + ($rungs -join ',') + ', ' + $el + ' sn)')
+                return [pscustomobject]@{ Recovered = $true; Rungs = $rungs; Actions = $actions; ElapsedSec = $el; Skipped = $false }
+            }
+        }
+    } catch { }
+    $el = [int]((Get-Date) - $t0).TotalSeconds
+    return [pscustomobject]@{ Recovered = $false; Rungs = $rungs; Actions = $actions; ElapsedSec = $el; Skipped = $false }
+}
+
 function Get-RepairRungName {
     <#  Onarim kademesinin adlari (panel canli izinde gosterir). #>
     param([int]$Rung)
     switch ($Rung) {
         1 { return 'DNS onbellegi temizleme + Dnscache servisi yeniden baslatma' }
         2 { return 'DHCP lease yenileme (release/renew)' }
-        3 { return 'Wi-Fi yeniden baglanma + adaptor kapat/ac' }
-        4 { return 'Dhcp/NlaSvc servisleri + surucu yeniden baslatma' }
+        3 { return 'ARP/neighbor temizleme + gateway yeniden ARP + varsayilan adaptor kapat/ac (+Wi-Fi)' }
+        4 { return 'Dhcp/NlaSvc/dot3svc (802.1X) servisleri + surucu yeniden baslatma' }
         5 { return 'winsock/IP reset (yeniden baslatma gerekir)' }
         default { return 'bilinmeyen kademe' }
     }
@@ -515,12 +756,56 @@ function Invoke-NetworkRepair {
         }
         3 {
             try { netsh wlan reconnect 2>&1 | Out-Null; $done += 'Wi-Fi yeniden baglanma denemesi' } catch { }
-            foreach ($a in @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' })) {
-                try { Disable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue; Start-Sleep 3; Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue; $done += ($a.Name + ' kapatildi/acildi') } catch { }
-            }
+            <#
+                ARP/neighbor temizleme + gateway yeniden ARP. Kurumsal agda bayat gateway
+                ya da dusmus NAC oturumu icin en dusuk maliyetli duzeltmedir; adaptor
+                kapatip acmadan once denenir.
+            #>
+            try {
+                $gw = ''
+                try { $gw = Get-DefaultGatewayIp } catch { }
+                try { arp -d * 2>&1 | Out-Null } catch { }
+                try { Get-NetNeighbor -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'Permanent' } | ForEach-Object { try { Remove-NetNeighbor -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue } catch { } } } catch { }
+                $done += 'ARP/neighbor onbellegi temizlendi'
+                if ($gw) {
+                    try {
+                        $pg = New-Object System.Net.NetworkInformation.Ping
+                        try { $null = $pg.Send($gw, 1000) } catch { }
+                        try { $pg.Dispose() } catch { }
+                    } catch { }
+                    $done += ('gateway yeniden yoklandi (ARP tazelendi): ' + $gw)
+                }
+            } catch { }
+            <#
+                Adaptor reset: TUM 'Up' adaptorler DEGIL, yalnizca varsayilan rotanin arayuzu.
+                Onceki surum WSL/Hyper-V sanal anahtarlarini da kapatip aciyordu; bu hem
+                gereksiz hem yikiciydi (sanal aglar kopuyordu). Bulunamazsa fiziksel
+                adaptorlere dusulur.
+            #>
+            try {
+                $ifIdx = 0
+                try { $ifIdx = Get-DefaultRouteIfIndex } catch { }
+                $targets = @()
+                if ($ifIdx -gt 0) { $targets = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.ifIndex -eq $ifIdx -and $_.Status -eq 'Up' }) }
+                if (-not $targets -or $targets.Count -eq 0) { $targets = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' }) }
+                foreach ($a in $targets) {
+                    try { Disable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue; Start-Sleep 3; Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue; $done += ($a.Name + ' kapatildi/acildi') } catch { }
+                }
+            } catch { }
         }
         4 {
             foreach ($s in @('Dhcp', 'NlaSvc')) { try { Restart-Service -Name $s -Force -ErrorAction Stop; $done += ($s + ' yeniden baslatildi') } catch { } }
+            <#
+                802.1X yeniden dogrulama (kurumsal kablolu ag). Wired AutoConfig (dot3svc)
+                yeniden baslatilinca switch ile yeniden dogrulama tetiklenir; dusmus NAC
+                oturumunu reboot'suz toparlayabilir. Servis yoksa/devre disiysa atlanir.
+            #>
+            try {
+                $d3 = Get-Service -Name 'dot3svc' -ErrorAction SilentlyContinue
+                if ($d3) {
+                    try { Restart-Service -Name 'dot3svc' -Force -ErrorAction Stop; $done += 'dot3svc (802.1X) yeniden baslatildi, yeniden dogrulama tetiklendi' } catch { $done += 'dot3svc yeniden baslatilamadi' }
+                }
+            } catch { }
             try {
                 $dev = @(Get-CimInstance -ClassName Win32_NetworkAdapter -Filter 'NetEnabled=True' -ErrorAction Stop | Select-Object -ExpandProperty DeviceID -Unique)
                 foreach ($d in $dev) { pnputil /restart-device $d 2>&1 | Out-Null; $done += ('surucu yeniden baslatildi: ' + $d) }
@@ -1766,6 +2051,9 @@ function Invoke-RebootIfNeeded {
             }
             $st.LastOkUtc = (Get-Date).ToString('o')
         }
+        # Kurtulus: acik bir kesinti raporu varsa sonucuyla kapat (rapor yoksa sessizce
+        # cikar; saglikli her dongude cagrilabilir).
+        try { $null = Complete-OutageReport -Outcome 'recovered' } catch { }
         return
     }
     <#
@@ -1888,6 +2176,38 @@ function Invoke-RebootIfNeeded {
         $null = Write-RebootAnnounce -Text 'Yeniden başlatma iptal edildi. Kaydedilmemiş belge var. Lütfen belgeleri kaydedin.' -CountdownSeconds 0 -Force -VoiceKey 'docsblock'
         return
     }
+    <#
+        RESTART ONCESI HIZLI ONARIM + KESINTI RAPORU.
+        Otomatik yolda reboot karari ayni dongude verildigi icin (RebootAfterFailedCycles=1)
+        reboot oncesi esasen yalnizca kademe-1 uygulanirdi; kademelerin tamami icin
+        panelden elle onarim beklenirdi. Artik karar kesinlesmeden ONCE 1-4 kademeleri
+        hizli yoklamayla denenir; kurtulursa reboot YAPILMAZ (toparlanma gibi sayaclar
+        sifirlanir). Kademe-5 (winsock reset) reboot gerektirdigi icin listede YOKTUR.
+        Kosullar: sorun AG ile ilgili olmali (Internet/Ag katmani), FixNetwork acik,
+        admin olunmali. Degilse eski yoldan devam edilir.
+    #>
+    $agSorunu = (@($bad | Where-Object { $_.Name -eq 'Internet' -or $_.Name -eq 'Ag katmani' }).Count -gt 0)
+    $burst = $null
+    if ($agSorunu -and $cfg.FixNetwork -and (Test-Admin) -and -not $Check) {
+        $burst = Invoke-PreRebootRepair -BadNames @($bad | ForEach-Object { $_.Name })
+        if ($burst.Recovered) {
+            $null = Invoke-StateUpdate {
+                param($st)
+                $st.ConsecutiveFailures = 0
+                $st.NetResetPendingReboot = 0
+                $st.OutageStartUtc = ''
+                $st.LastOkUtc = (Get-Date).ToString('o')
+            }
+            Send-Telegram ('[BILDIRIM] ' + $env:COMPUTERNAME + ' restart oncesi hizli onarim agi duzeltti (kademe ' + ($burst.Rungs -join ',') + ', ' + $burst.ElapsedSec + ' sn); yeniden baslatma YAPILMADI')
+            Write-Log 'INFO' ('restart iptal edildi: restart oncesi hizli onarim agi duzeltti (kademe ' + ($burst.Rungs -join ',') + ')')
+            $null = Complete-OutageReport -Outcome 'recovered-by-prereboot-repair'
+            return
+        }
+        Write-Log 'WARN' ('restart oncesi hizli onarim yetmedi (kademe ' + ($burst.Rungs -join ',') + ', ' + $burst.ElapsedSec + ' sn); restart devam ediyor')
+    }
+    # Kesinti raporu (burst sonucu dahil). Reboot karari kesinlesti; rapor, reboot'u
+    # geciktirmez (hizli yerel sorgular + tek 1.2 sn dis dogrulama).
+    if ($agSorunu) { $null = Write-OutageReport -Phase 'pre-reboot' -Burst $burst }
     $hist = @()
     if ($state.PSObject.Properties.Name -contains 'RebootsUtc') { $hist = @($state.RebootsUtc) }
     $cutoff = (Get-Date).AddHours(-24)
@@ -2284,6 +2604,7 @@ function Write-JsonStatus {
         uptimeMinutes = (Get-UptimeMinutes)
         publicIp = $script:PublicIp
         lastRepair = $lastRepair
+        lastOutageReport = [string]$state.LastOutageReport
         repairWatch = $(if (Get-ScheduledTask -TaskName 'RemoteHostRepairWatch' -ErrorAction SilentlyContinue) { 1 } else { 0 })
         taskInstalled = $(if ($task) { $true } elseif ($taskKnown) { $false } else { 'unknown' })
         taskVisible = $taskKnown

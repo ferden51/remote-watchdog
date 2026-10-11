@@ -1061,6 +1061,7 @@ function Get-RepairReport {
     [void]$lines.Add(('  uygulanan kademe: ' + $(if (@($lr.rungs).Count) { (@($lr.rungs) -join ' → ') } else { 'gerekmedi (ağ sağlıklıydı)' })))
     if (@($lr.actions).Count) { [void]$lines.Add('  yapılanlar: ' + ((@($lr.actions)) -join '; ')) }
     if (@($lr.stillBad).Count) { [void]$lines.Add('  kalan sorun: ' + ((@($lr.stillBad)) -join ', ') + '  (5. kademe restart önerir)') }
+    if ($hj.lastOutageReport) { [void]$lines.Add(('  kesinti raporu (detayli diagnostik): ' + [string]$hj.lastOutageReport)) }
     return ($lines -join "`n")
 }
 

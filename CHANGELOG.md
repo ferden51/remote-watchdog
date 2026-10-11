@@ -4,6 +4,43 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.6] - 2026-10-11
+
+Kurumsal ag baglaminda uc gece ust uste ~05:xx'de tam internet kopusu ve otomatik restart
+yasandi. Reboot'lar dogruydu ama iki eksik gorundu: (1) kesintinin nedenini gosteren bir
+diagnostik rapor yoktu ("lokal mi, ag mi?" bilinmiyordu); (2) otomatik yolda reboot'tan
+once esasen yalnizca kademe-1 uygulaniyordu.
+
+### 🆕 Kesinti sonrasi detayli diagnostik raporu (`Write-OutageReport`)
+
+- Reboot karari kesinlesince, reboot'u geciktirmeden hizli bir rapor yazilir:
+  dongude zaten olculmus sonuclar + yalnizca yerel/ucuz sorgular (arayuz, rota, DNS,
+  DHCP lease, son ag olaylari) + tek 1.2 sn dis dogrulama. Cikti `diag\outage-<ts>.json`
+  ve insan ozeti `.md` (BT ile paylasilabilir); en fazla 20 rapor tutulur.
+- Rapor, kesintiyi otomatik siniflar (`Get-OutageClass`): `local-link`, `local-dhcp`,
+  `local-segment` (gateway olu), `upstream` (gateway canli, dis kopuk). Boylece "lokal
+  servis mi, ag mi?" sorusu her kesintide cevaplanir.
+- Kurtulunca en yeni acik rapor sonucuyla kapatilir (`Complete-OutageReport`); yolu
+  `last-run.json` (`lastOutageReport`) tasir, panel onarim ozetinde gosterir.
+
+### 🆕 Restart oncesi hizli onarim (`Invoke-PreRebootRepair`) + guvenli yeni kademeler
+
+- Reboot'tan ONCE 1-4 kademeleri hizli yoklamayla denenir; kurtulursa reboot YAPILMAZ.
+  Kademe-5 (winsock reset) reboot gerektirdigi icin listede yoktur. Toplam 180 sn tavan.
+- Kademe-3 artik tum `Up` adaptorleri degil yalnizca varsayilan rotaninkini kapatir
+  (WSL/sanal anahtarlar korunur) + **ARP/neighbor temizleme + gateway yeniden ARP** icerir.
+- Kademe-4 **dot3svc (802.1X) yeniden dogrulama** ekler (kurumsal kablolu ag icin);
+  servis yoksa atlanir. Firewall/DNS-sunucu/proxy degisikligi YOK (kurumsal guvenli).
+- Kosul: sorun ag ile ilgili (Internet/Ag katmani) + `FixNetwork` acik + admin. Aksi halde
+  eski yoldan devam edilir.
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **383 kontrol** (0 hata): rapor/siniflandirma/budama, reboot oncesi
+  onarim (kurtarma ve kurtulmama), kilitli kademe + hizli yoklama, kademe-3/4 icerigi.
+- `tests/Test-UI.ps1` **54**, `tests/Verify-OutageLogic.ps1` **33** (0 hata). Ayrica
+  rapor/siniflandirma/budama ve burst kontrol akisi izole harness ile calistirilarak dogrulandi.
+
 ## [1.3.5] - 2026-10-10
 
 Gece günlüğü incelemesinde bulunan iki iş-mantığı kusuru kapatıldı. İkisi de aynı olay

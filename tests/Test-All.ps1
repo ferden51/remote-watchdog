@@ -618,9 +618,39 @@ if ($Section -eq 0 -or $Section -eq 1) {
     <#  last-run.json atomik yazilmiyordu; panel yazma aninda okuyunca null alip
         SAHTE YESIL "Bekleyen is yok" kartini gosteriyordu. #>
     Ok 'Contract last-run.json atomik yazıyor' ($contractText -match 'File\]::Replace')
+    Ok 'Contract lastOutageReport alanini normalize ediyor' ($contractText -match "lastOutageReport")
+    Ok 'panel onarim ozetinde kesinti rapor yolunu gosteriyor' ($panelText -match 'kesinti raporu \(detayli diagnostik\)')
     <#  Onarim akisi kilitlenmiyordu: uc tuketici repair-request.json okuyor ve panel
         ayrica RemoteHostRepair'i baslatiyor -> iki paralel kademe uygulamasi. #>
     Ok 'host aynı anda tek ağ onarımına izin veriyor' ($hostText -match 'Global\\RemoteWatchdogRepair')
+    <#
+        KESINTI RAPORU: reboot karari kesinlesmeden once hizli, reboot'u geciktirmeyen
+        bir diagnostik rapor yazilmali (sinif: local-link/dhcp/segment/upstream).
+    #>
+    Ok 'host kesinti raporu yaziyor (Write-OutageReport)' ($hostText -match 'function Write-OutageReport')
+    Ok 'host kesinti siniflandirmasi yapiyor (Get-OutageClass)' (($hostText -match 'function Get-OutageClass') -and ($hostText -match 'local-segment') -and ($hostText -match "'upstream'"))
+    Ok 'host kesinti raporu atomik yaziliyor ve budaniyor' (($hostText -match 'outage-') -and ($hostText -match 'en fazla 20 rapor'))
+    Ok 'host kurtulunca acik raporu kapatiyor (Complete-OutageReport)' (($hostText -match 'function Complete-OutageReport') -and ($hostText -match 'Complete-OutageReport -Outcome'))
+    Ok 'host last-run.json kesinti rapor yolunu tasiyor' (($hostText -match 'lastOutageReport = \[string\]\$state\.LastOutageReport') -and ($hostText -match "LastOutageReport = ''"))
+    <#
+        RESTART ONCESI HIZLI ONARIM: RebootAfterFailedCycles=1 iken reboot oncesi esasen
+        yalnizca kademe-1 uygulanirdi. Artik 1-4 hizli denenir; kademe-5 (winsock, reboot
+        ister) listede YOKTUR. Kurtulursa reboot yapilmaz.
+    #>
+    $preFn = [regex]::Match($hostText, '(?s)function Invoke-PreRebootRepair.*?\r?\n\}\r?\n')
+    Ok 'host restart oncesi hizli onarim var (Invoke-PreRebootRepair)' ($preFn.Success -and ($preFn.Value -match 'foreach \(\$r in @\(1, 2, 3, 4\)\)'))
+    Ok 'host restart oncesi onarim kilitli kademe + hizli yoklama kullaniyor' ($preFn.Success -and ($preFn.Value -match 'Invoke-RepairRungLocked') -and ($preFn.Value -match 'Get-QuickNetState'))
+    $rbnFn2 = [regex]::Match($hostText, '(?s)function Invoke-RebootIfNeeded.*?\r?\n\}\r?\n')
+    Ok 'host reboot karari oncesi hizli onarim + rapor calisiyor' ($rbnFn2.Success -and ($rbnFn2.Value -match 'Invoke-PreRebootRepair') -and ($rbnFn2.Value -match "Write-OutageReport -Phase 'pre-reboot'"))
+    <#
+        Guvenli yeni kademeler (kurumsal agda yasak islem YOK: firewall/DNS-sunucu/proxy
+        degisikligi yok). Kademe-3 artik tum 'Up' adaptorleri degil varsayilan rotaninkini
+        kapatir (WSL/sanal anahtarlar korunur) + ARP temizler; kademe-4 dot3svc (802.1X)
+        yeniden dogrular.
+    #>
+    Ok 'host kademe-3 varsayilan rota adaptorune + ARP temizlige odakli' (($hostText -match 'Get-DefaultRouteIfIndex') -and ($hostText -match 'arp -d') -and ($hostText -notmatch "Where-Object \{ \`$_.Status -eq 'Up' \}\) \}\) \{\s*\r?\n\s*try \{ Disable-NetAdapter"))
+    Ok 'host kademe-4 dot3svc (802.1X) yeniden dogruluyor' ($hostText -match "Restart-Service -Name 'dot3svc'")
+    Ok 'host kademe adlari guncel (3=ARP/adaptor, 4=dot3svc)' (($hostText -match 'ARP/neighbor temizleme') -and ($hostText -match 'dot3svc \(802\.1X\)'))
     <#  RepairWatch'in 5 dk'lik ExecutionTimeLimit'i akisi yarida kesiyor, ozet
         satirini yazmiyor ve panel "baslamadi" diyordu. #>
     $rwBlock = [regex]::Match($hostText, "(?s)\`$wAct = New-ScheduledTaskAction.*?Register-ScheduledTask -TaskName 'RemoteHostRepairWatch'")
