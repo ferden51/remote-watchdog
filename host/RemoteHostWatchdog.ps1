@@ -719,9 +719,22 @@ function Invoke-PreRebootRepair {
             $q = $null
             try { $q = Get-QuickNetState -TimeoutMs 1200 } catch { }
             if ($q -and $q.Ip -and $q.Dns -and $q.Signal) {
-                $el = [int]((Get-Date) - $t0).TotalSeconds
-                Write-Log 'INFO' ('restart oncesi hizli onarim KURTARDI (kademe ' + ($rungs -join ',') + ', ' + $el + ' sn)')
-                return [pscustomobject]@{ Recovered = $true; Rungs = $rungs; Actions = $actions; ElapsedSec = $el; Skipped = $false }
+                <#
+                    CIFT DOGRULAMA. Tek yoklama, onarim sirasinda adaptor acilip kapanirken
+                    olusan gecici "up" anini yakalayip YANLIS kurtulus ilan edebiliyordu
+                    (12 Eki 00:40:34: "KURTARDI" denildi ama sonraki tam dongu hala bozuktu;
+                    reboot 1 dongu gecikti). Test-RecoveryBeforeReboot ile ayni kural:
+                    iki ust uste saglikli yoklama gerekir.
+                #>
+                Start-Sleep -Seconds 2
+                $q2 = $null
+                try { $q2 = Get-QuickNetState -TimeoutMs 1200 } catch { }
+                if ($q2 -and $q2.Ip -and $q2.Dns -and $q2.Signal) {
+                    $el = [int]((Get-Date) - $t0).TotalSeconds
+                    Write-Log 'INFO' ('restart oncesi hizli onarim KURTARDI (kademe ' + ($rungs -join ',') + ', ' + $el + ' sn; cift dogrulamali)')
+                    return [pscustomobject]@{ Recovered = $true; Rungs = $rungs; Actions = $actions; ElapsedSec = $el; Skipped = $false }
+                }
+                Write-Log 'INFO' ('restart oncesi kademe ' + $r + ' sonrasi ilk yoklama saglikli ama ikincisi bozuk (ag dalgalaniyor); devam ediliyor')
             }
         }
     } catch { }

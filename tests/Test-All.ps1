@@ -640,6 +640,12 @@ if ($Section -eq 0 -or $Section -eq 1) {
     $preFn = [regex]::Match($hostText, '(?s)function Invoke-PreRebootRepair.*?\r?\n\}\r?\n')
     Ok 'host restart oncesi hizli onarim var (Invoke-PreRebootRepair)' ($preFn.Success -and ($preFn.Value -match 'foreach \(\$r in @\(1, 2, 3, 4\)\)'))
     Ok 'host restart oncesi onarim kilitli kademe + hizli yoklama kullaniyor' ($preFn.Success -and ($preFn.Value -match 'Invoke-RepairRungLocked') -and ($preFn.Value -match 'Get-QuickNetState'))
+    <#
+        12 Eki gecesi: patlama sirasinda adaptor acilip kapanirken tek yoklama gecici
+        "up" anini yakalayip YANLIS "KURTARDI" ilan etti (sonraki tam dongu hala bozuktu).
+        Kurtulus artik cift dogrulamali (iki ust uste saglikli).
+    #>
+    Ok 'host restart oncesi kurtulus cift dogrulamali (dalgalanma yanlis pozitifi)' ($preFn.Success -and ($preFn.Value -match '\$q2') -and ($preFn.Value -match 'dalgalan'))
     $rbnFn2 = [regex]::Match($hostText, '(?s)function Invoke-RebootIfNeeded.*?\r?\n\}\r?\n')
     Ok 'host reboot karari oncesi hizli onarim + rapor calisiyor' ($rbnFn2.Success -and ($rbnFn2.Value -match 'Invoke-PreRebootRepair') -and ($rbnFn2.Value -match "Write-OutageReport -Phase 'pre-reboot'"))
     <#

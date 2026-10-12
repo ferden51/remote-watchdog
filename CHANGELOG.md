@@ -4,6 +4,21 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.7] - 2026-10-12
+
+12 Ekim gecesi ilk gercek kesintide yeni kod calisti ve bir zayiflik yakaladi: patlama
+sirasinda adaptor acilip kapanirken tek hizli yoklama gecici "up" anini yakalayip YANLIS
+"KURTARDI" ilan etti (00:40:34); sonraki tam dongu hala bozuktu, reboot 1 dongu gecikti.
+Kurtulus artik **cift dogrulamali** (iki ust uste saglikli yoklama; `Test-RecoveryBeforeReboot`
+ile ayni kural). Ayni gece sunlar da dogrulandi: 3 yetkisiz dongu SYSTEM'e devretti (cift
+karar/YANLIS-KURULAMADI yok), kesinti raporu `upstream` sinifiyla yazilip kurtulusta kapatildi,
+butce 33 dk sagliktan sonra sifirlandi.
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **384 kontrol** (0 hata). Cift-dogrulama mantigi ayrica izole
+  harness ile dogrulandi (dalgalanmada kurtulmaz, cift sagliklida kurtulur).
+
 ## [1.3.6] - 2026-10-11
 
 Kurumsal ag baglaminda uc gece ust uste ~05:xx'de tam internet kopusu ve otomatik restart
