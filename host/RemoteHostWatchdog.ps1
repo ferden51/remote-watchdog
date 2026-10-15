@@ -1853,14 +1853,40 @@ function Sync-RebootAccounting {
             $st.LastBootUtc = $boot
             $st.ConsecutiveFailures = 0
             $st.BreakerKey = ''
+            <#
+                Saglikli seri REBOOT ILE yeniden baslar. Aksi halde LastHealthyUtc eski
+                kalir ve sonraki saglikli dongu, reboot'tan hemen sonra butceyi ANINDA
+                sifirlar. (AllOk'daki $oncekiSagliksiz kontrolu tek basina yetmedi:
+                Sync once ConsecutiveFailures/PendingRebootUtc'yi temizliyor ve OutageStartUtc
+                bir iptal/onay yolunda bosaltilmissa dort sinyal de temiz gorunuyordu -
+                14 Eki gecesi LastHealthyUtc 13 Ekim'de kaldi.)
+            #>
+            $st.LastHealthyUtc = (Get-Date).ToString('o')
             Write-Log 'INFO' ('makine yeniden acildi; restart butceye yazildi (' + $liste.Count + '/' + $cfg.MaxRestartsPerDay + ') | acilis=' + $boot)
             return
         }
         if ($st.PendingRebootUtc) {
-            $sahte = [string]$st.PendingRebootUtc
-            $st.RebootsUtc = @(@($st.RebootsUtc) | Where-Object { $_ -and ([string]$_ -ne $sahte) })
-            $st.PendingRebootUtc = ''
-            Write-Log 'WARN' ('restart GERCEKLESMEDI (acilis zamani degismedi, shutdown reddedilmis olabilir); sahte butce kaydi temizlendi')
+            <#
+                ERKEN HUKUM VERME. Bekleyen reboot henuz suruyor olabilir (geri sayim +
+                nobetci + kapanma + acilis). Acilis degismedi diye ANINDA "olmadi" deyip
+                damgayi silmek, gerceklesen reboot'un butceye YAZILMAMASINA yol acar
+                (14 Eki 21:59:56'da, 30 sn'lik sayacin 6. saniyesinde yapildi).
+                Kural: damga, reboot penceresinden (gecikme + 180 sn, en az 120 sn) eskiyse
+                sahte sayilir; daha gencse "hala suruyor olabilir" denip birakilir.
+            #>
+            $bekleyenYasSn = -1
+            try { $bekleyenYasSn = [int](((Get-Date) - [datetime]::Parse([string]$st.PendingRebootUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalSeconds) } catch { }
+            $pencere = ([int]$global:cfg.RebootDelaySeconds + 180)
+            if ($pencere -lt 120) { $pencere = 120 }
+            if ($pencere -gt 900) { $pencere = 900 }
+            if ($bekleyenYasSn -ge 0 -and $bekleyenYasSn -lt $pencere) {
+                Write-Log 'INFO' ('bekleyen restart henuz suruyor olabilir (' + $bekleyenYasSn + ' sn, pencere ' + $pencere + ' sn); sahte kayit temizlenmedi')
+            } else {
+                $sahte = [string]$st.PendingRebootUtc
+                $st.RebootsUtc = @(@($st.RebootsUtc) | Where-Object { $_ -and ([string]$_ -ne $sahte) })
+                $st.PendingRebootUtc = ''
+                Write-Log 'WARN' ('restart GERCEKLESMEDI (acilis zamani degismedi, shutdown reddedilmis olabilir); sahte butce kaydi temizlendi')
+            }
         }
     }
 }
@@ -3421,7 +3447,20 @@ function Invoke-DeadlineReboot {
             foreach ($probeIp in @('1.1.1.1', '8.8.8.8', '9.9.9.9')) {
                 if ((Get-TcpMs -HostName $probeIp -Port 443 -TimeoutMs 1500) -ge 0) { $ok = $true; break }
             }
-            if ($ok) { $saglikli = $true; break }
+            if ($ok) {
+                <#
+                    CIFT DOGRULAMA. Onarim/dalgalanma sirasinda tek "up" gorulebilir ve
+                    iptal anonse edilip nobetci kaldirilir; ama ag hala kopuktur ve 1 dk
+                    sonra yine reboot gerekir (14 Eki 22:00:26'da oldu: "geri geldi, iptal"
+                    denildi, 22:00:28'de hala kopuktu, 22:01'de yine kapatildi).
+                    Tam yoklama da saglikliysa GERCEKTEN duzeldi; degilse devam edilir.
+                #>
+                Start-Sleep -Seconds 2
+                $q2 = $null
+                try { $q2 = Get-QuickNetState -TimeoutMs 1500 } catch { }
+                if ($q2 -and $q2.Ip -and $q2.Dns -and $q2.Signal) { $saglikli = $true; break }
+                Write-Log 'INFO' 'deadline nöbetçisi: ilk yoklama saglikli ama dogrulama bozuk (dalgalanma); devam ediliyor'
+            }
             $basarisiz++
             Write-Log 'WARN' ('deadline nöbetçisi: internet yok (deneme ' + $deneme + '/3)')
             if ($deneme -lt 3) { Start-Sleep -Seconds 3 }

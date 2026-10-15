@@ -95,14 +95,21 @@ Write-Host ''
 Write-Host '== A) Butce YALNIZCA dogrulanmis restarti sayar ==' -ForegroundColor Cyan
 Reset-State
 $script:NetUp = $false
-# 3 kez "restart istendi" ama makine hic acilmadi (eski hatanin tamami)
+# 3 kez "restart istendi" ama makine hic acilmadi (eski hatanin tamami).
+# Damga ESKI verilir: taze damga "geri sayim/nobetci henuz suruyor olabilir" diye
+# korunur (erken hukum verilmez). Bu yeni ve dogru davranistir.
 foreach ($i in 1..3) {
-    Invoke-StateUpdate { param($st) $st.PendingRebootUtc = (Get-Date).ToString('o') }
+    Invoke-StateUpdate { param($st) $st.PendingRebootUtc = (Get-Date).AddMinutes(-10).ToString('o') }
     $null = Sync-RebootAccounting
 }
 $s = Get-State
 Ok '3 restart istemesine rağmen bütçe BOŞ kaldı (sahte kayıt yok)' (@($s.RebootsUtc).Count -eq 0) ("count=" + @($s.RebootsUtc).Count)
-Ok 'PendingRebootUtc temizlendi' ([string]$s.PendingRebootUtc -eq '')
+Ok 'PendingRebootUtc temizlendi (eski sahte damga)' ([string]$s.PendingRebootUtc -eq '')
+# Taze damga korunur: 30 sn'lik sayacin 6. saniyesinde "olmadi" denemez.
+Invoke-StateUpdate { param($st) $st.PendingRebootUtc = (Get-Date).ToString('o') }
+$null = Sync-RebootAccounting
+$s = Get-State
+Ok 'taze PendingRebootUtc korunur (hala suruyor olabilir)' ([string]$s.PendingRebootUtc -ne '')
 
 Write-Host ''
 Write-Host '== B) Gercek restart bütçeye yazılır ==' -ForegroundColor Cyan

@@ -4,6 +4,36 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.8] - 2026-10-15
+
+14 Ekim gecesi (21:51-22:02 kesintisi) canli gozlemle uc kusur daha bulundu. Hepsi ayni
+kokten: onarim/dalgalanma sirasinda TEK olcume guvenip erken hukum vermek.
+
+### 🐞 Düzeltilen
+
+- **`Sync-RebootAccounting` rebootta saglikli seriyi yeniden baslatiyor.** Onceki surumde
+  (1.3.5) `AllOk` icine eklenen `$oncekiSagliksiz` kontrolu yetmedi: Sync once
+  `ConsecutiveFailures`/`PendingRebootUtc`'yi temizliyor ve `OutageStartUtc` bir iptal
+  yolunda bosaltilmissa dort sinyal de temiz gorunuyordu (14 Eki gecesi `LastHealthyUtc`
+  13 Ekim'de kaldi). Artik Sync, acilis degisikligini gordugu anda `LastHealthyUtc`'yi
+  simdiye kuruyor; butce ancak gercek 30 dk sagliktan sonra sifirlanir.
+- **`Sync` taze bekleyen rebootu sahte saymiyor.** 30 sn'lik sayacin 6. saniyesinde
+  "GERCEKLESMEDI" denip damga siliniyordu; gerceklesen reboot butceye yazilmiyordu.
+  Artik damga, reboot penceresinden (`RebootDelaySeconds`+180 sn, en az 120 sn) gencse
+  "hala suruyor olabilir" diye birakilir; ancak pencereyi asmis ve acilis degismemisse
+  sahte sayilip temizlenir.
+- **Nobetci toparlanma iptalini cift dogruluyor.** Tek "up" gorup iptal anonse ediliyor,
+  nobetci kaldiriliyor, ama ag hala kopuk oluyordu (14 Eki 22:00:26; 1 dk sonra yine
+  reboot gerekti ve kullaniciya once "iptal" denmisti). Artik ilk saglikli yoklamadan
+  sonra tam yoklama (`Get-QuickNetState`) da saglikliysa iptal edilir; degilse
+  "dalgalanma" sayılıp devam edilir.
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **387 kontrol** (0 hata) + 3 yeni regresyon; `Verify-OutageLogic`
+  **34 kontrol** (taze damganin korunmasi + eski sahte damganin temizlenmesi ayri
+  dogrulaniyor). `Test-UI` **54**. Sync A/B/C senaryolari izole harness ile dogrulandi.
+
 ## [1.3.7] - 2026-10-12
 
 12 Ekim gecesi ilk gercek kesintide yeni kod calisti ve bir zayiflik yakaladi: patlama

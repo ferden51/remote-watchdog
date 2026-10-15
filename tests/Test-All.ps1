@@ -261,6 +261,22 @@ if ($Section -eq 0 -or $Section -eq 1) {
     <#  Restart butcesi yalnizca DOGRULANMIS (makine yeniden acilmis) restartlari saymali. #>
     Ok 'host restart butcesi dogrulamasi (Sync-RebootAccounting) var' ($hostText -match 'function Sync-RebootAccounting')
     <#
+        14 Eki gecesi: (1) reboot sonrasi LastHealthyUtc guncellenmedigi icin butce hemen
+        sifirlaniyordu - artik Sync, acilis degisince saglikli seriyi yeniden baslatir.
+        (2) 30 sn'lik sayacin 6. saniyesinde "GERCEKLESMEDI" denip damga siliniyordu;
+        gerceklesen reboot butceye yazilmiyordu. Artik damga, reboot penceresinden
+        (gecikme+180sn) gencse "hala suruyor olabilir" diye birakilir.
+    #>
+    $syncFn = [regex]::Match($hostText, '(?s)function Sync-RebootAccounting.*?\r?\n\}\r?\n')
+    Ok 'host Sync rebootta saglikli seriyi yeniden baslatiyor' ($syncFn.Success -and ($syncFn.Value -match '\$st\.LastHealthyUtc = \(Get-Date\)\.ToString'))
+    Ok 'host Sync taze bekleyen rebootu sahte saymiyor (pencere mantigi)' ($syncFn.Success -and ($syncFn.Value -match 'bekleyenYasSn') -and ($syncFn.Value -match 'bekleyen restart henuz suruyor olabilir'))
+    <#
+        14 Eki 22:00:26: nobetci tek "up" gorup iptal anonse etti ama ag hala kopuktu;
+        1 dk sonra yine reboot gerekti. Toparlanma iptali artik cift dogrulamali.
+    #>
+    $guardFn = [regex]::Match($hostText, '(?s)function Invoke-DeadlineReboot.*?\r?\n\}\r?\n')
+    Ok 'host nobetci toparlanma iptalini cift dogruluyor' ($guardFn.Success -and ($guardFn.Value -match 'Get-QuickNetState -TimeoutMs 1500') -and ($guardFn.Value -match 'dalgalanma'))
+    <#
         GECE BULGUSU 1: yetkisiz (admin=False) tam dongu zorla restart karari verirse,
         deadline nöbetçisini KURAMAZ ("KURULAMADI (yonetici yetkisi yok)") ve kirilgan
         geri sayima duser. Ayni kesintiyi SYSTEM dongusu admin olarak zaten cozer.
