@@ -1406,13 +1406,27 @@ function Show-RebootModal {
             }
 
             # (B) Onay dosyasi: bekleyen hala dururken iptal onaylandiysa (kucuk yaris) kapat.
+            #     BAYAT ack KABUL EDILMEZ. reboot-ack.json onceki bir reboot'tan diskte
+            #     kalabilir (host onu countdown BASINDA siler ama panel icerik-uyaran
+            #     onarim suresi boyunca once acabliyor). Zaman damgasi istekten ESKI ise
+            #     bu bizim iptalimiz degildir; yalan "onaylandi" uretmemek icin yok sayilir.
             if ($script:RebootCancelRequested -and (Test-Path -LiteralPath $RebootAckFile)) {
-                Write-Trace 'restart iptali watchdog tarafindan onaylandi (ack)'
-                try { Speak-Text 'Yeniden başlatma iptal edildi. Bilgisayar açık kalıyor.' -Sfx 'recover' -Force } catch { }
-                try { Show-Balloon -Title 'Yeniden başlatma iptal edildi' -Text 'Bilgisayar yeniden başlatılmadı.' -Icon 'Info' -Always } catch { }
-                try { Update-Actions } catch { }
-                Close-RebootModal
-                return
+                $ackFresh = $false
+                try {
+                    $aj = Get-Content -LiteralPath $RebootAckFile -Raw -ErrorAction Stop | ConvertFrom-Json
+                    if ($aj -and $aj.cancelled -and $aj.at -and $script:RebootCancelAt) {
+                        $ackAt = [datetime]::Parse([string]$aj.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime()
+                        $ackFresh = ($ackAt -ge $script:RebootCancelAt.AddSeconds(-5))
+                    }
+                } catch { $ackFresh = $false }
+                if ($ackFresh) {
+                    Write-Trace 'restart iptali watchdog tarafindan onaylandi (ack)'
+                    try { Speak-Text 'Yeniden başlatma iptal edildi. Bilgisayar açık kalıyor.' -Sfx 'recover' -Force } catch { }
+                    try { Show-Balloon -Title 'Yeniden başlatma iptal edildi' -Text 'Bilgisayar yeniden başlatılmadı.' -Icon 'Info' -Always } catch { }
+                    try { Update-Actions } catch { }
+                    Close-RebootModal
+                    return
+                }
             }
 
             # (C) Iptal isteyip makul sure icinde onay gelmediyse butonlari geri ac AMA

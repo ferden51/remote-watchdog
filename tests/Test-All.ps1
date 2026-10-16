@@ -659,6 +659,7 @@ if ($Section -eq 0 -or $Section -eq 1) {
         yazilamazsa kullaniciya YALAN onay verilmez. #>
     Ok 'panel iptal istegini zaman asiminda dusurmuyor' (($panelText -match 'RebootCancelTimeoutFired') -and ($uiText -notmatch "iptali onaylanmadi; geri sayim suruyor olabilir"))
     Ok 'panel iptal dosyasi yazilamazsa durumu geri aliyor' (($panelText -match 'iptal dosyasi yazilamadi') -and ($panelText -match 'iptal dosyasi yazilamadi') -and ($panelText -match '\$yazildi = \$true'))
+    Ok 'panel bayat reboot-ack.json ile yalan onay vermiyor (tazelik kontrolu)' (($panelText -match '\$ackFresh') -and ($panelText -match 'RebootCancelAt.AddSeconds\(-5\)'))
     Ok 'host Write-Log konsol hatasi yuzunden geri sayim dongusunu dusurmuyor' (($hostText -match 'try \{ Write-Host \$line -ForegroundColor') -and ($hostText -notmatch "Rotate-LogIfNeeded\r?\n\s*Write-Host"))
     Ok 'host last-run.json kesinti rapor yolunu tasiyor' (($hostText -match 'lastOutageReport = \[string\]\$state\.LastOutageReport') -and ($hostText -match "LastOutageReport = ''"))
     <#

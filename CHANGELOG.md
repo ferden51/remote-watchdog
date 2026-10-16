@@ -4,6 +4,21 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.11] - 2026-10-16
+
+1.3.10 incelemesinde kalan bir yalan-onay yolu kapatildi.
+
+### 🐞 Düzeltilen
+
+- **Bayat `reboot-ack.json`.** Onceki bir reboot'tan diskte kalan ack dosyasi, yeni bir
+  iptal tiklendiginde aninda "iptal edildi" diyordu; oysa istek host'a ulasmamis ve
+  reboot suruyor olabilirdi. Artik ack yalnizca zaman damgasi iptal isteginden TAZE ise
+  (>= istek-5 sn) kabul edilir; eski/bayat ack yok sayilir.
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **394 kontrol** (0 hata). `Test-UI` 54.
+
 ## [1.3.10] - 2026-10-16
 
 Restart iptal modalinde "Iptal et" tiklaninca HICBIR sey olmuyordu; iki ayri hata.
