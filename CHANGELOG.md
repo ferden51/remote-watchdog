@@ -4,6 +4,31 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.10] - 2026-10-16
+
+Restart iptal modalinde "Iptal et" tiklaninca HICBIR sey olmuyordu; iki ayri hata.
+
+### 🐞 Düzeltilen
+
+- **Istek 8. saniyede dusuruluyordu.** Panel, host onayini 8 sn bekler ve beklemezse
+  `reboot-cancel.flag` dosyasini SILIYORDU. Host ack`i 24 sn gecikmeyle yazabiliyor
+  (13:45 vakasi: tiklama 13:45:35, ack 13:45:59) -> onay geldi ama kullanici artik
+  "iptal etmedim" saniyordu. Artik istek CANLI kalir; 8 sn sonunda butonlar acilir ve
+  "onay bekleniyor" denir, gec ack gelince modal kapanir. Zaman asimi mesaji bir kez
+  gosterilir; tekrar tiklamak sayaci sifirlar.
+- **Dosya yazilamazsa yalan onay.** Iptal dosyasi yazilamazsa (ACL/disk) istek isaretleniyor
+  ve butonlar kilitleniyordu; kullanici onay beklerken "istek iletildi" goruyordu. Artik
+  durum geri alinir, butonlar acilir ve hata gosterilir.
+- **`Write-Log` geri sayim dongusunu dusurebiliyordu.** Gizli SYSTEM gorevinde konsol
+  yazimi hata verirse `Write-Host` firlatir, cagiran dongu sessizce cokup giderdi.
+  Dosya ve konsol yazimi AYRI korumali.
+- Rapor tekrari onlemesi `OutageStartUtc` ile baglanir: yeni bir kesinti, onceki
+  kapanmamis (orphan) rapora yanlis baglanmaz.
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **393 kontrol** (0 hata). `Test-UI` 54, `Verify-OutageLogic` 34.
+
 ## [1.3.9] - 2026-10-16
 
 "Kesinti nedenleri teşhis edildi mi?" sorusuna cevap: konum (upstream) ve mekanizma

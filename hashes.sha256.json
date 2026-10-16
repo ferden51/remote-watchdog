@@ -2,11 +2,11 @@
     "algorithm":  "SHA256",
     "note":  "Bu dosyalar indirildikten sonra Verify-Hashes.ps1 ile dogrulanir. Manifesti degistirdiyseniz de guvenli de degildir: kaynak de ayni anda ele gecmis olabilir.",
     "files":  {
-                  "host\\RemoteHostWatchdog.ps1":  "237920D224A8996E07A8F615D7680B68160D4A9CFF0852F88B667F0BCA14EE86",
+                  "host\\RemoteHostWatchdog.ps1":  "C2D42FBDC3D1BA3A10ABF065AA4DAD5EE8337E93F3882C38949C323F032B9993",
                   "client\\RemoteClientWatchdog.ps1":  "0A861DACE409BAE77D5B395FF3ED691E8C8566AF208A44C4BCE34B24240D43C1",
                   "host\\Protect-OpenDocuments.ps1":  "507B335DA3707F7C30CB35EB2FBBD57628E096BF42EF313ABBD9FC233CFB247B",
                   "host\\Collect-Diagnostics.ps1":  "7A4174327E18E9CE32241B2FFDBDD42E1A0361AA6075D92371CD87821F1C3592",
-                  "ui\\RemoteWatchdogPanel.ps1":  "8019462CFFA41D5C6EFFB6DE7C636E9D0BBAC35BB67C7D8ADDEEA65FF727970C",
+                  "ui\\RemoteWatchdogPanel.ps1":  "7E17C2CA53CF5125FFFF09F8ABA10E096B54B4735A168B99B0AB9B2376882375",
                   "ui\\Panel-Setup.ps1":  "C0885D34337C6C1CB9D7F1D4BE82DEA7CF14D6E5FB764FCE8F5EA462CBDE3392",
                   "host\\Start-Hidden.vbs":  "C00063E85B133DAED87061B09E24EB367D9CB59B8E7EEF2617C42B9B9A6703DA",
                   "lib\\Common.ps1":  "7A3404F389E4B537FB394F8617742C8F74F903AE8E6EE3517F25A001F05C71F3",

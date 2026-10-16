@@ -172,11 +172,13 @@ function Write-Log {
         if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
         Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8
         Rotate-LogIfNeeded
-        # Konsol yazimi da korumali: gizli SYSTEM gorevinde konsol/host destegi
-        # kesilirse Write-Host firlatir ve cagiran (orn. geri sayim dongusu) sessizce
-        # olurdu. Dosya zaten yazildi; konsol basarisizsa sorun degil.
-        Write-Host $line -ForegroundColor (Get-LogColor -Level $Level -Text $Message)
     } catch { }
+    # Konsol yazimi AYRI korumali: gizli SYSTEM gorevinde konsol/host destegi kesilirse
+    # Write-Host firlatir ve cagiran (orn. geri sayim dongusu) sessizce cokup giderdi.
+    # Dosya satiri zaten yazildi; konsol basarisizsa sorun degil. Dosya yazimi
+    # basarisiz olsa bile konsol gosterilmeli -> AYRI try (tek try'da ilk hata ikisini de
+    # dusururdu).
+    try { Write-Host $line -ForegroundColor (Get-LogColor -Level $Level -Text $Message) } catch { }
 }
 
 function Get-Config {
@@ -592,7 +594,14 @@ function Write-OutageReport {
                 if ($oj -and -not ([string]$oj.recoveredAt)) {
                     $ageMin = 999
                     try { $ageMin = ((Get-Date) - $openRep[0].LastWriteTime).TotalMinutes } catch { }
-                    if ($ageMin -lt 15) {
+                    # AYNI kesinti mi? Anahtar OutageStartUtc: farkli bir kesinti yanlislikla
+                    # eski (kapanmamis, orn. reboot sirasinda orphan kalan) rapora baglanmasin.
+                    # OutageStartUtc bilinmiyorsa yalnizca 15 dk penceresi yeter.
+                    $sameOutage = $true
+                    $cur = [string]$state.OutageStartUtc
+                    $old = [string]$oj.outageStartUtc
+                    if ($cur -and $old) { $sameOutage = ($cur -eq $old) }
+                    if ($sameOutage -and $ageMin -lt 15) {
                         $reuseBase = [System.IO.Path]::Combine($dir, [System.IO.Path]::GetFileNameWithoutExtension($openRep[0].FullName))
                         try { $updateCount = [int]$oj.updateCount + 1 } catch { $updateCount = 1 }
                     }

@@ -654,6 +654,12 @@ if ($Section -eq 0 -or $Section -eq 1) {
     #>
     Ok 'host kesinti aninda adli kanit topluyor (DHCP/DNS/traceroute)' (($hostText -match 'dhcpServerAlive') -and ($hostText -match 'corpDnsAlive') -and ($hostText -match 'tracert -d -h 3'))
     Ok 'host ayni kesintide raporu tekrar acmiyor (acigi gunceller)' (($hostText -match 'TEKRAR ONLEME') -and ($hostText -match 'updateCount'))
+    Ok 'host farkli kesintiyi eski rapora baglamiyor (OutageStartUtc anahtari)' (($hostText -match '\$sameOutage') -and ($hostText -match '\$cur -eq \$old'))
+    <#  Panel: iptal istegi zaman asiminda DUSURULMEZ (gec ack gelebilir) ve dosya
+        yazilamazsa kullaniciya YALAN onay verilmez. #>
+    Ok 'panel iptal istegini zaman asiminda dusurmuyor' (($panelText -match 'RebootCancelTimeoutFired') -and ($uiText -notmatch "iptali onaylanmadi; geri sayim suruyor olabilir"))
+    Ok 'panel iptal dosyasi yazilamazsa durumu geri aliyor' (($panelText -match 'iptal dosyasi yazilamadi') -and ($panelText -match 'iptal dosyasi yazilamadi') -and ($panelText -match '\$yazildi = \$true'))
+    Ok 'host Write-Log konsol hatasi yuzunden geri sayim dongusunu dusurmuyor' (($hostText -match 'try \{ Write-Host \$line -ForegroundColor') -and ($hostText -notmatch "Rotate-LogIfNeeded\r?\n\s*Write-Host"))
     Ok 'host last-run.json kesinti rapor yolunu tasiyor' (($hostText -match 'lastOutageReport = \[string\]\$state\.LastOutageReport') -and ($hostText -match "LastOutageReport = ''"))
     <#
         RESTART ONCESI HIZLI ONARIM: RebootAfterFailedCycles=1 iken reboot oncesi esasen
