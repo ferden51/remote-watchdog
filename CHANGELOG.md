@@ -4,6 +4,30 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.9] - 2026-10-16
+
+"Kesinti nedenleri teşhis edildi mi?" sorusuna cevap: konum (upstream) ve mekanizma
+(oturum dususu; reboot duzeltir) biliniyordu ama HANGI yukari bilesen oldugu icin kanit
+yoktu. Bu surum kesinti ANINDA adli kanit toplar. Ayrica ayni kesintide rapor tekrari
+onlenir (13 Eki'de 11 dk'da 12 rapor birikmisti).
+
+### 🆕 Kesinti-ani adli kanit
+
+- Rapor artik sunlari icerir: DHCP sunucusuna erisim, kurum DNS'ine erisim, ilk 3 hop
+  izleri (`tracert`, kisa zaman asimli). Hepsi toplami ~5 sn; reboot gecikmez.
+- Yorum kilavuzu: DHCP olu + DNS olu + iz gateway'de bitiyor = firewall/NAC oturumu;
+  gateway otesi hop yok = ISS/hay hat; hepsi canli ama dis kopuk = kurumsal bakim penceresi.
+
+### 🐞 Düzeltilen
+
+- Ayni acik kesinti icin 15 dk icinde yeni rapor acilmaz; en guncel olcumlerle mevcut
+  rapor guncellenir (`updateCount` artar). Kurtulus kapatmasi aynen calisir.
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **389 kontrol** (0 hata). Adli alanlar + tekrar-onleme izole
+  harness ile gercek agda dogrulandi (DHCP/DNS IP'leri, hop izleri, tek-dosya guncelleme).
+
 ## [1.3.8] - 2026-10-15
 
 14 Ekim gecesi (21:51-22:02 kesintisi) canli gozlemle uc kusur daha bulundu. Hepsi ayni

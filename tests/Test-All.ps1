@@ -647,6 +647,13 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host kesinti siniflandirmasi yapiyor (Get-OutageClass)' (($hostText -match 'function Get-OutageClass') -and ($hostText -match 'local-segment') -and ($hostText -match "'upstream'"))
     Ok 'host kesinti raporu atomik yaziliyor ve budaniyor' (($hostText -match 'outage-') -and ($hostText -match 'en fazla 20 rapor'))
     Ok 'host kurtulunca acik raporu kapatiyor (Complete-OutageReport)' (($hostText -match 'function Complete-OutageReport') -and ($hostText -match 'Complete-OutageReport -Outcome'))
+    <#
+        Adli kanit: kesinti ANINDA DHCP sunucusu + kurum DNS erisimi + ilk hop izleri.
+        Amac "firewall mi, ISS mi?" sorusunu reboot oncesi cevaplamak. Ayrica ayni
+        kesintide her degerlendirme yeni rapor acmasin (13 Eki'de 11 dk'da 12 rapor).
+    #>
+    Ok 'host kesinti aninda adli kanit topluyor (DHCP/DNS/traceroute)' (($hostText -match 'dhcpServerAlive') -and ($hostText -match 'corpDnsAlive') -and ($hostText -match 'tracert -d -h 3'))
+    Ok 'host ayni kesintide raporu tekrar acmiyor (acigi gunceller)' (($hostText -match 'TEKRAR ONLEME') -and ($hostText -match 'updateCount'))
     Ok 'host last-run.json kesinti rapor yolunu tasiyor' (($hostText -match 'lastOutageReport = \[string\]\$state\.LastOutageReport') -and ($hostText -match "LastOutageReport = ''"))
     <#
         RESTART ONCESI HIZLI ONARIM: RebootAfterFailedCycles=1 iken reboot oncesi esasen

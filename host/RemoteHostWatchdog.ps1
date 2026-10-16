@@ -172,8 +172,11 @@ function Write-Log {
         if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
         Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8
         Rotate-LogIfNeeded
+        # Konsol yazimi da korumali: gizli SYSTEM gorevinde konsol/host destegi
+        # kesilirse Write-Host firlatir ve cagiran (orn. geri sayim dongusu) sessizce
+        # olurdu. Dosya zaten yazildi; konsol basarisizsa sorun degil.
+        Write-Host $line -ForegroundColor (Get-LogColor -Level $Level -Text $Message)
     } catch { }
-    Write-Host $line -ForegroundColor (Get-LogColor -Level $Level -Text $Message)
 }
 
 function Get-Config {
@@ -511,6 +514,16 @@ function Get-DefaultRouteIfIndex {
     return 0
 }
 
+function Test-FastPing {
+    <#  Tek paket, sert zaman asimli ping (kurumsal gateway'ler ICMP kapatabilir; yokluk tek basina hukumsuzdur, ARP ile birlikte okunur). #>
+    param([string]$Ip, [int]$TimeoutMs = 1000)
+    if (-not $Ip) { return $false }
+    try {
+        $p = New-Object System.Net.NetworkInformation.Ping
+        try { $r = $p.Send($Ip, $TimeoutMs); return ($r.Status -eq 'Success') } catch { return $false } finally { try { $p.Dispose() } catch { } }
+    } catch { return $false }
+}
+
 function Get-OutageClass {
     <#
         Kesintiyi YEREL / YUKARI olarak hizli siniflar. Yalnizca YEREL ve HIZLI sorgu
@@ -563,6 +576,29 @@ function Write-OutageReport {
         $dir = Join-Path $BaseDir 'diag'
         try { if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null } } catch { return '' }
         $ts = (Get-Date).ToString('yyyyMMdd-HHmmss')
+        <#
+            TEKRAR ONLEME: ayni kesintide her reboot degerlendirmesi yeni rapor acmasin
+            (13 Eki 01:39-01:50 arasi 11 dk'da 12 rapor birikti). Acik (kurtulusu
+            islenmemis) ve 15 dk'dan taze bir rapor varsa YENISINI acmak yerine onu
+            GUNCELLE (en guncel olcumlerle uzerine yazilir).
+        #>
+        $reuseBase = ''
+        $updateCount = 0
+        try {
+            $openRep = @(Get-ChildItem -LiteralPath $dir -Filter 'outage-*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+            if ($openRep -and $openRep.Count -gt 0) {
+                $oj = $null
+                try { $oj = Get-Content -LiteralPath $openRep[0].FullName -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+                if ($oj -and -not ([string]$oj.recoveredAt)) {
+                    $ageMin = 999
+                    try { $ageMin = ((Get-Date) - $openRep[0].LastWriteTime).TotalMinutes } catch { }
+                    if ($ageMin -lt 15) {
+                        $reuseBase = [System.IO.Path]::Combine($dir, [System.IO.Path]::GetFileNameWithoutExtension($openRep[0].FullName))
+                        try { $updateCount = [int]$oj.updateCount + 1 } catch { $updateCount = 1 }
+                    }
+                }
+            }
+        } catch { }
         $cls = $null
         try { $cls = Get-OutageClass -ExternalDown $true } catch { $cls = $null }
         $extMs = -1
@@ -582,6 +618,30 @@ function Write-OutageReport {
             $nc = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($nc) { $lease.obtained = [string]$nc.DHCPLeaseObtained; $lease.expires = [string]$nc.DHCPLeaseExpires }
         } catch { }
+        <#
+            Adli kanit (kesinti ANINDA, reboot oncesi): DHCP sunucusuna ve kurum DNS'ine
+            erisim + ilk birkac hop. Amac: "firewall oturumu mu dustu, ISS mi, modem mi?"
+            sorusunu reboot'tan once cevaplamak. Hepsi kisa zaman asimli (ping 1 sn,
+            traceroute hop basi 0.8 sn, en fazla 3 hop); toplam ~5 sn'yi gecmez.
+        #>
+        $dhcpSrv = ''
+        try {
+            $nc2 = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True and DHCPEnabled=True' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($nc2 -and $nc2.DHCPServer) { $dhcpSrv = [string]$nc2.DHCPServer }
+        } catch { }
+        $dhcpAlive = $false
+        if ($dhcpSrv) { try { $dhcpAlive = Test-FastPing -Ip $dhcpSrv -TimeoutMs 1000 } catch { } }
+        $corpDns = ''
+        try {
+            $priv = @((Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses } | Where-Object { $_ }) | Select-Object -Unique | Where-Object { $_ -match '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)' } | Select-Object -First 1)
+            if ($priv) { $corpDns = [string]$priv }
+        } catch { }
+        $corpDnsAlive = $false
+        if ($corpDns) { try { $corpDnsAlive = Test-FastPing -Ip $corpDns -TimeoutMs 1000 } catch { } }
+        $hops = @()
+        try {
+            $hops = @(tracert -d -h 3 -w 800 1.1.1.1 2>&1 | ForEach-Object { [string]$_ } | Where-Object { $_ -match '\S' } | Select-Object -First 6)
+        } catch { }
         # Son ag olaylari (Sistem gunlugu, sinirli; yavaslatmamak icin en fazla ~50 kayit taranir).
         $evts = @()
         try {
@@ -595,13 +655,16 @@ function Write-OutageReport {
             class = $(if ($cls) { [string]$cls.Class } else { 'unknown' }); classDetail = $(if ($cls) { [string]$cls.Detail } else { '' })
             externalConfirmMs = $extMs; gateway = $gw
             interfaces = $ifaces; dnsServers = $dnsSrv; dhcpLease = $lease
+            dhcpServer = $dhcpSrv; dhcpServerAlive = $dhcpAlive
+            corpDns = $corpDns; corpDnsAlive = $corpDnsAlive; traceHops = @($hops)
+            updateCount = $updateCount
             checks = $checks; recentEvents = $evts
             burst = $(if ($Burst) { [ordered]@{ recovered = [bool]$Burst.Recovered; rungs = @($Burst.Rungs); actions = @($Burst.Actions); elapsedSec = [int]$Burst.ElapsedSec } } else { $null })
             budget24h = @($state.RebootsUtc).Count; maxPerDay = [int]$cfg.MaxRestartsPerDay
             inBlackout = (Test-InBlackout)
             recoveredAt = ''; outcome = ''
         }
-        $base = Join-Path $dir ('outage-' + $ts)
+        $base = $(if ($reuseBase) { $reuseBase } else { Join-Path $dir ('outage-' + $ts) })
         $json = ($rep | ConvertTo-Json -Depth 7)
         # Atomik yaz (Write-Status ile ayni desen; okuyan yari dosya gormez).
         $tmp = $base + '.json.tmp'
@@ -626,6 +689,9 @@ function Write-OutageReport {
             [void]$md.Add(('- DNS sunuculari: ' + $(if (@($dnsSrv).Count) { (@($dnsSrv) -join ', ') } else { 'yok' })))
             [void]$md.Add(('- DHCP lease: alindi=' + $lease.obtained + ' bitiyor=' + $lease.expires))
             [void]$md.Add(('- Butce 24s: ' + $rep.budget24h + '/' + $rep.maxPerDay + ' | blackout: ' + $rep.inBlackout))
+            [void]$md.Add(('- DHCP sunucusu: ' + $(if ($dhcpSrv) { $dhcpSrv + ' (' + $(if ($dhcpAlive) { 'erisilebilir' } else { 'ERISILEMIYOR' }) + ')' } else { 'bilinmiyor' })))
+            [void]$md.Add(('- Kurum DNS: ' + $(if ($corpDns) { $corpDns + ' (' + $(if ($corpDnsAlive) { 'erisilebilir' } else { 'ERISILEMIYOR' }) + ')' } else { 'yok' })))
+            if (@($hops).Count) { [void]$md.Add('- Ilk hop izleri (tracert 1.1.1.1, max 3 hop):'); foreach ($hh in @($hops)) { [void]$md.Add(('    ' + $hh)) } }
             if ($Burst) { [void]$md.Add(('- Restart oncesi hizli onarim: ' + $(if ($Burst.Recovered) { 'KURTARDI' } else { 'yetmedi' }) + ' (kademe: ' + (($Burst.Rungs -join ',')) + ')')) }
             [void]$md.Add('')
             [void]$md.Add('## Kontroller')
@@ -654,7 +720,7 @@ function Write-OutageReport {
         } catch { }
         try { $null = Invoke-StateUpdate { param($st) $st.LastOutageReport = ($base + '.json') } } catch { }
         $script:LastOutageReport = ($base + '.json')
-        Write-Log 'INFO' ('kesinti raporu yazildi: ' + ($base + '.json') + ' (sinif: ' + $rep.class + ')')
+        Write-Log 'INFO' ('kesinti raporu ' + $(if ($reuseBase) { 'guncellendi' } else { 'yazildi' }) + ': ' + ($base + '.json') + ' (sinif: ' + $rep.class + ')')
         return ($base + '.json')
     } catch { Write-Log 'WARN' ('kesinti raporu yazilamadi: ' + $_.Exception.Message); return '' }
 }
