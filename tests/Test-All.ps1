@@ -165,10 +165,10 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok ('powercfg okunabildi (STANDBYIDLE=' + $pwr + ')') ($null -ne $pwr)
     $gc = Get-Config
     Ok 'Get-Config varsayilanlar donduruyor' (($gc.RestartPolicy -eq 'blackout') -and ($gc.RebootAfterFailedCycles -eq 1) -and ($gc.OfficeSaveBeforeReboot -eq $true))
+    Ok 'hizli karar ama reboot-siz onarim son-care sirasi varsayilan' (($gc.MinOutageMinutes -eq 0) -and ($gc.NetMaxRepairRung -eq 4))
     Ok 'Get-Config devre kesici varsayilanlari' (($gc.MaxRestartsPerDay -eq 3) -and ($gc.RebootCooldownMinutes -eq 2) -and ($gc.HealthyMinutesToReset -eq 30))
-    <#  HIZ varsayilanlari: tespitten restart'a ~1 dk. Tek anlik kopmada bile restart
-        karari gecikmemeli; blip korumasi taze toparlanma kontrolu + geri sayim iptali. #>
-    Ok 'Get-Config hizli karar varsayilanlari' (($gc.MinOutageMinutes -eq 0) -and ($gc.MinUptimeMinutes -eq 3) -and ($gc.RebootDelaySeconds -eq 30))
+    <#  Karar gecikmez, fakat otomatik reboot'tan once tam reboot-siz merdiven ve taze kontroller calisir. #>
+    Ok 'Get-Config hizli tespit ve taze son kontrol varsayilanlari' (($gc.MinOutageMinutes -eq 0) -and ($gc.MinUptimeMinutes -eq 3) -and ($gc.RebootDelaySeconds -eq 30))
     Ok 'Get-Config ekran mesaji anahtari var' (@($gc.Keys) -contains 'EkranMesaji')
     foreach ($code in (Get-FnCode $Host_ @('Get-RebootBudget', 'Get-RebootDecision'))) { Invoke-Expression $code }
     $now = [datetime]'2026-09-26T23:30:00'
@@ -725,9 +725,9 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host Write-Log konsol hatasi yuzunden geri sayim dongusunu dusurmuyor' (($hostText -match 'try \{ Write-Host \$line -ForegroundColor') -and ($hostText -notmatch "Rotate-LogIfNeeded\r?\n\s*Write-Host"))
     Ok 'host last-run.json kesinti rapor yolunu tasiyor' (($hostText -match 'lastOutageReport = \[string\]\$state\.LastOutageReport') -and ($hostText -match "LastOutageReport = ''"))
     <#
-        RESTART ONCESI HIZLI ONARIM: RebootAfterFailedCycles=1 iken reboot oncesi esasen
-        yalnizca kademe-1 uygulanirdi. Artik 1-4 hizli denenir; kademe-5 (winsock, reboot
-        ister) listede YOKTUR. Kurtulursa reboot yapilmaz.
+        RESTART SON CARE: reboot'tan once tum reboot-siz kademeler 1-4 denenir.
+        Winsock/IP catalog reset bu akista uygulanmaz; kendisi reboot borcu yaratir.
+        Son karar, 3 basarisiz dongu + 10 dk kesinti esigi sonrasi verilir.
     #>
     $preFn = [regex]::Match($hostText, '(?s)function Invoke-PreRebootRepair.*?\r?\n\}\r?\n')
     Ok 'host restart oncesi hizli onarim var (Invoke-PreRebootRepair)' ($preFn.Success -and ($preFn.Value -match 'foreach \(\$r in @\(1, 2, 3, 4\)\)'))
@@ -740,15 +740,25 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host restart oncesi kurtulus cift dogrulamali (dalgalanma yanlis pozitifi)' ($preFn.Success -and ($preFn.Value -match '\$q2') -and ($preFn.Value -match 'dalgalan'))
     $rbnFn2 = [regex]::Match($hostText, '(?s)function Invoke-RebootIfNeeded.*?\r?\n\}\r?\n')
     Ok 'host reboot karari oncesi hizli onarim + rapor calisiyor' ($rbnFn2.Success -and ($rbnFn2.Value -match 'Invoke-PreRebootRepair') -and ($rbnFn2.Value -match "Write-OutageReport -Phase 'pre-reboot'"))
-    <#
-        Guvenli yeni kademeler (kurumsal agda yasak islem YOK: firewall/DNS-sunucu/proxy
-        degisikligi yok). Kademe-3 artik tum 'Up' adaptorleri degil varsayilan rotaninkini
-        kapatir (WSL/sanal anahtarlar korunur) + ARP temizler; kademe-4 dot3svc (802.1X)
-        yeniden dogrular.
-    #>
-    Ok 'host kademe-3 varsayilan rota adaptorune + ARP temizlige odakli' (($hostText -match 'Get-DefaultRouteIfIndex') -and ($hostText -match 'arp -d') -and ($hostText -notmatch "Where-Object \{ \`$_.Status -eq 'Up' \}\) \}\) \{\s*\r?\n\s*try \{ Disable-NetAdapter"))
-    Ok 'host kademe-4 dot3svc (802.1X) yeniden dogruluyor' ($hostText -match "Restart-Service -Name 'dot3svc'")
-    Ok 'host kademe adlari guncel (3=ARP/adaptor, 4=dot3svc)' (($hostText -match 'ARP/neighbor temizleme') -and ($hostText -match 'dot3svc \(802\.1X\)'))
+    Ok 'paralel reboot-siz onarim varken restart atlanip erteleniyor' (($preFn.Success -and ($preFn.Value -match 'Skipped = \$true')) -and ($rbnFn2.Success -and ($rbnFn2.Value -match '\$burst\.Skipped')))
+    <#  Reboot-siz merdiven: DNS/ARP -> yalniz varsayilan fiziksel NIC PnP -> ag servisleri -> NIC DHCP renew.
+        Sanal/VPN NIC'lere degmez ve Winsock/IP resetini calistirmaz (reboot borcu yok). #>
+    $rungFn = [regex]::Match($hostText, '(?s)function Invoke-NetworkRepair\s*\{.*?\r?\n\}')
+    $rungCode = if ($rungFn.Success) { Strip-CodeComments $rungFn.Value } else { '' }
+    $routeFn = [regex]::Match($hostText, '(?s)function Get-DefaultRouteIfIndex\s*\{.*?\r?\n\}')
+    Ok 'host varsayilan route adapterini yalniz fiziksel NIC listesinden seciyor' ($routeFn.Success -and ($routeFn.Value -match 'Get-NetAdapter -Physical') -and ($routeFn.Value -match 'physicalIndices'))
+    Ok 'host NIC PnP yenilemesi varsayilan fiziksel adapterle sinirli' ($rungCode -match 'Get-DefaultRouteIfIndex' -and $rungCode -match 'Get-NetAdapter -Physical' -and $rungCode -match 'Disable-PnpDevice' -and $rungCode -match 'Enable-PnpDevice')
+    Ok 'host NIC yenilemesi tum NetEnabled aygitlari / VPNleri dolasmiyor' (($rungCode -notmatch 'Win32_NetworkAdapter -Filter') -and ($rungCode -notmatch 'pnputil /restart-device'))
+    Ok 'host reboot-siz kademede DNS/ARP, servisler ve fiziksel NIC DHCP sirali' (($rungCode -match 'ipconfig /flushdns') -and ($rungCode -match 'arp -d \*') -and ($rungCode -match "'Dhcp', 'Dnscache', 'NlaSvc', 'WlanSvc', 'dot3svc'") -and ($rungCode -match 'ipconfig /release') -and ($rungCode -match 'ipconfig /renew'))
+    Ok 'host reboot-siz onarimda Winsock/IP reset calistirmiyor' (($rungCode -notmatch 'netsh winsock reset') -and ($rungCode -notmatch 'netsh int ipv4 reset'))
+    Ok 'host reboot-siz onarim akisini en fazla 4 kademeyle sinirliyor' (($hostText -match 'reboot-siz onarim en fazla 4 kademe') -and ($hostText -match '\[math\]::Min\(4, \[math\]::Max\(1, \[int\]\$cfg\.NetMaxRepairRung\)\)'))
+    Ok 'host reboot bekleyen onarim bayragini son-care olarak acikliyor' ($hostText -match 'reboot-siz ag onarim kademeleri tukenmisti; restart son care')
+    Ok 'panel reboot anonsunu onarim-tukendi bayragiyla degil gerçek pending ile verir' (($panelText -match 'RebootPending = \(Test-Path -LiteralPath \$RebootPendingFile\)') -and ($panelText -match 'if \(\$snap\.RebootPending -and -not \$p\.RebootPending\) \{ Announce-Reboot \}'))
+    $forceBlock = [regex]::Match($hostText, '(?s)if \(\$ForceReboot\) \{.*?\r?\n\}')
+    Ok 'elle restart onarim merdiveni tükendi gibi isaretlenmiyor' ($forceBlock.Success -and ($forceBlock.Value -notmatch 'NetResetPendingReboot\s*=\s*1'))
+    $preIndex = $rbnFn2.Value.IndexOf('Invoke-PreRebootRepair')
+    $countdownIndex = $rbnFn2.Value.IndexOf('Start-CountdownReboot')
+    Ok 'host tum reboot-siz onarim kademelerini countdown/reboot kararindan once deniyor' ($preIndex -ge 0 -and $countdownIndex -gt $preIndex)
     <#  RepairWatch'in 5 dk'lik ExecutionTimeLimit'i akisi yarida kesiyor, ozet
         satirini yazmiyor ve panel "baslamadi" diyordu. #>
     $rwBlock = [regex]::Match($hostText, "(?s)\`$wAct = New-ScheduledTaskAction.*?Register-ScheduledTask -TaskName 'RemoteHostRepairWatch'")

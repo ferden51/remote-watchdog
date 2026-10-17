@@ -596,8 +596,8 @@ function Get-Actions {
             if ([int]$ds.unsaved -gt 0) { [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ($ds.unsaved + ' kaydedilmemiş belge'); Detail = (@($ds.names) -join ', '); Key = 'docs'; Action = 'Kaydet ve kapat' }) }
         } catch { }
     }
-    if ($hj.state -and [int]$hj.state.netResetPendingReboot -eq 1) { [void]$a.Add([pscustomobject]@{ Level = 'bad'; Title = 'winsock/IP reset uygulandi'; Detail = 'Etkisi icin makine yeniden baslatilmali.'; Key = 'reboot'; Action = 'Yeniden başlat' }) }
-    if ($hj.state -and [int]$hj.state.consecutiveFailures -gt 0) { [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ('Ardisik basarisiz deneme: ' + $hj.state.consecutiveFailures); Detail = 'Blackout saatlerinde otomatik restart yapilir, disinda sadece bilgilendirilir.'; Key = 'reboot'; Action = 'Yeniden başlat' }) }
+    if ($hj.state -and [int]$hj.state.netResetPendingReboot -eq 1 -and -not (Test-Path -LiteralPath $RebootPendingFile)) { [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = 'Ağ onarım kademeleri tükendi'; Detail = 'DNS/ARP, fiziksel adaptör, ağ servisleri ve DHCP yenilemesi denendi. Otomatik reboot yalnızca kesinti eşiği ve başarısız deneme koşulları da sağlanırsa son çare olarak yapılır.'; Key = ''; Action = '' }) }
+    if ($hj.state -and [int]$hj.state.consecutiveFailures -gt 0) { [void]$a.Add([pscustomobject]@{ Level = 'warn'; Title = ('Ardisik basarisiz deneme: ' + $hj.state.consecutiveFailures); Detail = 'Önce yeniden başlatmasız ağ onarımı denenir. Restart için başarısız döngü ve minimum kesinti süresi eşikleri de dolmalıdır.'; Key = 'reboot'; Action = 'Yeniden başlat' }) }
     if ($a.Count -eq 0) { [void]$a.Add([pscustomobject]@{ Level = 'ok'; Title = 'Bekleyen is yok'; Detail = 'Her sey yolunda.'; Key = ''; Action = '' }) }
     return $a
 }
@@ -881,7 +881,7 @@ $Xaml = @'
         </StackPanel>
         <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
           <Button x:Name="BtnCheck" Content="Şimdi denetle" Style="{StaticResource BtnAccent}" Margin="0,0,6,0"/>
-          <Button x:Name="BtnRepairNet" Content="Ağı onar" Style="{StaticResource Btn}" Margin="0,0,6,0" ToolTip="Ağ katmanını sırayla onarır: DNS → DHCP → adaptör/sürücü → winsock. Her kademeden sonra tekrar ölçer, düzelince durur."/>
+          <Button x:Name="BtnRepairNet" Content="Ağı onar" Style="{StaticResource Btn}" Margin="0,0,6,0" ToolTip="Yeniden başlatmasız kademeler: DNS/ARP önbelleği → yalnızca varsayılan fiziksel adaptör → ağ servisleri → o adaptörde DHCP yenileme. Düzelince durur. Winsock/IP reseti bu akışta yapılmaz; reboot son çaredir."/>
           <Button x:Name="BtnReboot" Content="Yeniden başlat" Style="{StaticResource BtnDanger}"/>
         </StackPanel>
       </Grid>
@@ -1617,7 +1617,7 @@ function Show-RepairWindow {
     [void]$sp.Children.Add($row)
 
     $hint = New-Object System.Windows.Controls.TextBlock
-    $hint.Text = 'Adımlar sistem günlüğünden anlık okunur: DNS → DHCP → adaptör → servis/sürücü → winsock/IP. Onarım SYSTEM görevi üzerinden çalışır (UAC çıkmaz).'
+    $hint.Text = 'Yeniden başlatmasız adımlar sistem günlüğünden izlenir: DNS/ARP → varsayılan fiziksel adaptör PnP yenileme → DHCP/DNS/NLA/WLAN/802.1X servisleri → fiziksel adaptörde DHCP renew. Sanal/VPN adaptörlerine dokunulmaz. Winsock/IP reseti bu akışta yapılmaz; reboot son çaredir.'
     $hint.Foreground = Bx 'Muted'
     $hint.FontSize = 11
     $hint.TextWrapping = 'Wrap'
@@ -3699,7 +3699,7 @@ function Update-VoiceAlerts {
         $snap = [ordered]@{
             Ok = [bool]$hj.ok
             Bad = @(@($hj.checks | Where-Object { -not $_.ok }) | ForEach-Object { [string]$_.name })
-            Rung = 0; ResetPending = 0; ForceAlways = $false; Reboots = 0; Uptime = -1
+            Rung = 0; ResetPending = 0; RebootPending = (Test-Path -LiteralPath $RebootPendingFile); ForceAlways = $false; Reboots = 0; Uptime = -1
         }
         if ($stt) {
             try { $snap.Rung = [int]$stt.NetRepairRung } catch { }
@@ -3723,7 +3723,8 @@ function Update-VoiceAlerts {
         } elseif (-not $snap.Ok -and [int]$snap.Rung -gt [int]$p.Rung) {
             Speak-Text 'Bağlantı onarılıyor.' -Sfx 'repair'
         }
-        if ([int]$snap.ResetPending -eq 1 -and [int]$p.ResetPending -ne 1) { Announce-Reboot }
+        if ($snap.RebootPending -and -not $p.RebootPending) { Announce-Reboot }
+        elseif ([int]$snap.ResetPending -eq 1 -and [int]$p.ResetPending -ne 1) { Speak-Text 'Ağ onarım kademeleri tükendi. Sistem kesintiyi izliyor; restart yalnızca son çare koşulları sağlanırsa yapılacak.' -Sfx 'warn' }
         elseif ($snap.ForceAlways -and -not $p.ForceAlways) { Announce-Reboot }
         <#
             Gercek restart kontrolu. Iki kosulun bir araya gelmesi gerekir:

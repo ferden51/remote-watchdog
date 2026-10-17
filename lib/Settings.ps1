@@ -17,20 +17,20 @@ function Get-SettingsDefs { return @(
     @{ Sec = 'Restart'; Key = 'BlackoutEnd'; Title = 'Blackout bitiş saati (geceye sarar)'; Type = 'int' }
     @{ Sec = 'Restart'; Key = 'BlackoutFullDays'; Title = 'Tam gün blackout (hafta sonu)'; Type = 'days' }
     @{ Sec = 'Restart'; Key = 'BlackoutNights'; Title = 'Blackout geceleri'; Type = 'days' }
-    @{ Sec = 'Restart'; Key = 'RebootAfterFailedCycles'; Title = 'Kaç başarısız döngüden sonra restart (1 = hemen)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'RebootAfterFailedCycles'; Title = 'Reboot kararı için başarısız döngü sayısı (1 = en hızlı tespit)'; Type = 'int' }
     @{ Sec = 'Restart'; Key = 'RebootDelaySeconds'; Title = 'Restart geri sayımı (saniye, sesli anons süresi)'; Type = 'int' }
     @{ Sec = 'Restart'; Key = 'MaxRestartsPerDay'; Title = '24 saatte en fazla restart (0 = sınırsız)'; Type = 'int' }
     @{ Sec = 'Restart'; Key = 'RebootCooldownMinutes'; Title = 'İki restart arası bekleme (dakika)'; Type = 'int' }
     @{ Sec = 'Restart'; Key = 'HealthyMinutesToReset'; Title = 'Bu kadar sağlıklı kalınca bütçe sıfırlansın (dk)'; Type = 'int' }
     @{ Sec = 'Restart'; Key = 'MinUptimeMinutes'; Title = 'Yeniden açılıştan sonra bekleme (dk, restart döngüsünü önler)'; Type = 'int' }
-    @{ Sec = 'Restart'; Key = 'MinOutageMinutes'; Title = 'Kesinti bu kadar dk sürünce karar ver (1 = hemen, 0 = bekleme yok)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'MinOutageMinutes'; Title = 'Minimum kesinti süresi (dk, 0 = bekleme yok; onarım yine önce çalışır)'; Type = 'int' }
     @{ Sec = 'Restart'; Key = 'RebootSkipIfUnregistered'; Title = 'CRD kayıtsızken restart etme'; Type = 'bool' }
     @{ Sec = 'Restart'; Key = 'ForceRestartAlways'; Title = 'DAIMA zorla kapat (saat fark etmez)'; Type = 'bool' }
     @{ Sec = 'Restart'; Key = 'ForceRestartUntil'; Title = 'Daima zorla kapat bitis zamani'; Type = 'datetime' }
 
     @{ Sec = 'OTOMATIK ONARIM'; Type = 'section' }
     @{ Sec = 'Onarim'; Key = 'FixNetwork'; Title = 'Ağ onarımıni uygula'; Type = 'bool' }
-    @{ Sec = 'Onarim'; Key = 'NetMaxRepairRung'; Title = 'Ag onarim kademesi (1-5)'; Type = 'int' }
+    @{ Sec = 'Onarim'; Key = 'NetMaxRepairRung'; Title = 'Yeniden başlatmasız ağ onarım kademesi (1-4)'; Type = 'int' }
     @{ Sec = 'Onarim'; Key = 'FixRdp'; Title = 'RDP ayarlarini onar (firewall + servis)'; Type = 'bool' }
     @{ Sec = 'Onarim'; Key = 'FixCrd'; Title = 'CRD servisini onar'; Type = 'bool' }
     @{ Sec = 'Onarim'; Key = 'CrdNoConnRestartCycles'; Title = 'CRD baglantisi yoksa kac dongu sonra yeniden baslat'; Type = 'int' }
@@ -101,7 +101,7 @@ function Get-HelpBalloonTopics { return @(
         [pscustomobject]@{ Title = 'Ayar yardımı 7/11 - Devre kesici (sonsuz restart koruması)'; Text = 'Otomatik restart sonsuz döngüye girmesin diye iki koruma var: 24 saatte en fazla MaxRestartsPerDay (varsayılan 3) kez restart edilir ve iki restart arasında RebootCooldownMinutes (varsayılan 60) dakika beklenir. Sınıra ulaşılınca otomatik restart durur, ekranda ve Telegram''da uyarı gider; bu süreden sonra yeniden denenir.' }
         [pscustomobject]@{ Title = 'Ayar yardımı 8/11 - Sunucu modu'; Text = 'Açık: uyku, hibernasyon ve Fast Startup kapatılır, ağ adaptörü uykuya girmez. Dizüstü kullanıyorsanız kapatın (kurulumda -KeepSleep). Kapalıyken bu kontrol atlanır, zorla restart baskısı oluşmaz.' }
         [pscustomobject]@{ Title = 'Ayar yardımı 9/11 - Belge koruma'; Text = 'Word/Excel belgeleri 2 dakikada bir otomatik kaydedilir. Restart öncesi kaydedilip kapatılır. Kaydedilemeyen belge varsa restart iptal edilir. "Daima zorla kapatma" bu korumayı baypaslar.' }
-        [pscustomobject]@{ Title = 'Ayar yardımı 10/11 - Ağ onarımı'; Text = 'Ağ bozulursa sırayla DNS, DHCP, adaptör/sürücü ve winsock onarımı uygulanır. Kademe 5 gerektiğinde restart önerilir. 4. kademe adaptörü sıfırlar; uzak erişiminiz tamamen kesilebilir.' }
+        [pscustomobject]@{ Title = 'Ayar yardımı 10/11 - Ağ onarımı'; Text = 'Yeniden başlatmasız ağ merdiveni DNS/ARP önbelleği, varsayılan fiziksel adaptörün PnP yenilemesi, DHCP/DNS/NLA/WLAN/802.1X servisleri ve DHCP adres yenilemesidir. Sanal/VPN adaptörleri atlanır. Winsock/IP reset reboot gerektirdiğinden bu merdivende uygulanmaz; reboot ancak başarısız denemeler ve kesinti süresi eşiği dolunca son çaredir.' }
         [pscustomobject]@{ Title = 'Ayar yardımı 11/11 - Dış izleme (heartbeat)'; Text = 'Ping, makine kendi alarmını gönderemediği zaman için vardır. Sizin kurulumunuzda host hep açık, istemci bazen kapalı olduğu için: host ping adresi ÖNEMLİDİR - makine çöktüğünde, elektrik gittiğinde, interneti kesildiğinde veya watchdog görevi silindiğinde host size hiçbir şey bildiremez, ama dışarıdaki kontrol susar ve sizi uyarır. İstemci ping adresi çoğu durumda GEREKMEZ: istemci saatlerce kapalıysa kontrol sürekli DOWN görünür ve yanlış alarm üretir; istemcinin gerçek katkısı Telegram uyarısı ve uzak hedefe TCP probu (kopuk olduğunda bildirir), ping değil. Host un interneti kesildi mi yoksa makine mi kapandı ayrımını yapmak isterseniz üçüncü bir bakış açısı gerekir: install klasöründeki GitHub Actions dosyası, sizin makineniz kapalıyken bile dışarıdan erişim testi yapar.' }
     )
 }

@@ -4,6 +4,32 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.13] - 2026-10-17
+
+Reboot öncesi ağ kurtarma adımları reboot’siz, fiziksel adaptörle sınırlı ve son-çare
+restart sırasına göre netleştirildi. Hızlı tespit eşikleri korunuyor.
+
+### 🐞 Düzeltilen / değiştirilen
+
+- Reboot’siz ağ merdiveni artık sırayla: DNS+ARP önbelleği → varsayılan fiziksel NIC’in
+  PnP stop/start’ı (gerekirse `Restart-NetAdapter`) → DHCP/DNS/NLA/WLAN/802.1X servisleri
+  → yalnızca o fiziksel NIC’te DHCP adres yenilemesi.
+- Sanal/VPN NIC’leri topluca yeniden başlatan `pnputil /restart-device` kaldırıldı;
+  varsayılan fiziksel adaptör bulunamazsa adaptör işlemi atlanır.
+- `netsh winsock reset` ve `netsh int ipv4 reset` reboot’siz onarımdan çıkarıldı;
+  1–4 kademeleriyle sınırlama eski `NetMaxRepairRung=5` değerlerini çalışma anında 4’e indirir.
+- Son reboot kararı öncesinde aynı 1–4 merdiveni ve çift ağ doğrulaması çalışır. Eşikler
+  hızlı kalır (1 başarısız döngü / 0 dk bekleme); reboot’siz onarım başarısız olmadan
+  yeniden başlatma yapılmaz.
+- Durum kartı ve sesli bildirim, “Winsock reset uygulandı” demek yerine reboot’siz
+  kademelerin tükendiğini bildirir. Gerçek reboot anonsu yalnız `reboot-pending.json`
+  oluştuğunda verilir.
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **416 kontrol** (0 hata); `Test-UI` 54/0;
+  `Verify-OutageLogic` 34/0.
+
 ## [1.3.12] - 2026-10-17
 
 Günlük kesinti/reboot özetini programın otomatik üretmesi ve panelden açılması eklendi.

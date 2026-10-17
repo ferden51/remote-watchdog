@@ -193,19 +193,10 @@ function Get-Config {
         DisableFastStartup = $true
         ServiceAutoStart = $true
         ServiceCrashRecovery = $true
-        <#
-            HIZ: amac "en hizli tespit -> en hizli karar -> en hizli eylem". Zincir:
-              t=0     kesinti -> ag olay dinleyicisi ANINDA yakalar (yoksa hizli yoklama <=1 dk)
-              t~0.05  tetiklenen tam dongu ANINDA baslar (yaklasik 10-15 sn surer)
-              t~0.3   ilk basarisiz dongu: RebootAfterFailedCycles=1, MinOutageMinutes=0
-                      -> KARAR. (Taze toparlanma kontrolu + sesli "30 saniye icinde" anonsu)
-              t~1.0   30 sn geri sayim biter -> RESTART
-            Yani tespitten restart'a ~1 dakika. Blip korumasi korunur: karar aninda interneti
-            iki kez daha yoklar (taze kontrol) ve geri sayim icinde internet gelirse iptal eder.
-            Daha da hizli istemiyorsaniz: RebootDelaySeconds=10 (anons yine duyulur).
-            Guvenlik sinirlari (bilerek kalir): MaxRestartsPerDay=3 (restart firtinasi olmaz)
-            ve MinUptimeMinutes (yeniden acilis sonrasi kisa bekleme -> boot dongusu olmaz).
-        #>
+        <# HIZLI TESPIT, SON CARE RESTART: ilk tam dongude reboot'siz merdiven 1-4
+           (DNS/ARP -> fiziksel NIC -> servisler -> DHCP renew) tamamlanir; yalnizca
+           kurtulmazsa son kontrol + cift dogrulama + geri sayimdan sonra reboot edilir.
+           0 dk minimum, karar vermeyi bekletmez; onarim kademelerini atlamaz. #>
         RebootAfterFailedCycles = 1
         RebootDelaySeconds = 30
         MaxRestartsPerDay = 3
@@ -263,6 +254,9 @@ function Get-Config {
             foreach ($k in @($cfg.Keys)) { if ($saved.PSObject.Properties.Name -contains $k) { $cfg[$k] = $saved.$k } }
         } catch { }
     }
+    # Winsock/IP catalog reset reboot gerektirir; reboot'siz onarim akisi yalnizca
+    # 1-4 kademelerini destekler. Eski config'ten 5 veya ustu gelirse kes.
+    try { $cfg.NetMaxRepairRung = [math]::Min(4, [math]::Max(1, [int]$cfg.NetMaxRepairRung)) } catch { $cfg.NetMaxRepairRung = 4 }
     # Gizli alanlari COZ: config.json'da "dpapi:..." olarak saklanir, ama cagiran kod
     # ($cfg.TelegramToken) duz metin gorur -> Telegram cagrisi hic degismez.
     $null = Unprotect-RwSecretInObject -Obj $cfg
@@ -512,10 +506,20 @@ function Get-DefaultGatewayIp {
 }
 
 function Get-DefaultRouteIfIndex {
-    <#  Varsayilan rotanin arayuz indexi (adaptoru hedeflemek icin). #>
+    <#
+        Varsayilan rotanin FIZIKSEL arayuz indexi. Sanal/VPN adaptoru default route
+        olarak gorunse bile sadece fiziksel NIC'lere ait rotalardan secim yapilir.
+        Fiziksel default interface saptanamazsa 0 doner; rastgele NIC kapatilmaz.
+    #>
     try {
-        $r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1
-        if ($r) { return [int]$r.InterfaceIndex }
+        $physical = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.HardwareInterface -and $_.Status -eq 'Up' })
+        if ($physical.Count -eq 0) { return 0 }
+        $physicalIndices = @($physical | ForEach-Object { [int]$_.ifIndex })
+        $routes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+                Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric, InterfaceMetric)
+        foreach ($r in $routes) {
+            if ($physicalIndices -contains [int]$r.InterfaceIndex) { return [int]$r.InterfaceIndex }
+        }
     } catch { }
     return 0
 }
@@ -1058,13 +1062,12 @@ function Write-DailyReport {
 
 function Invoke-PreRebootRepair {
     <#
-        Restart ONCESI hizli onarim. Otomatik yolda reboot karari ayni dongude verildigi
-        icin (RebootAfterFailedCycles=1) reboot oncesi esasen yalnizca kademe-1 uygulanirdi.
-        Bu fonksiyon, reboot'tan ONCE 1-4 kademelerini hizli yoklamayla (tek hedef, 1.2 sn)
-        dener; kurtulursa reboot engellenir. Kademe-5 (winsock/IP reset) reboot GEREKTIRDIGI
-        icin burada YOKTUR; onu reboot'un kendisi halleder.
-        Repair kilidi (Invoke-RepairRungLocked) kullanilir: baska bir onarim suruyorsa
-        degismez, reboot yoluna devam edilir. Iptal dosyasi KONTROL EDILMEZ (bu otomatik
+        SON CARE reboot'tan ONCE reboot'siz kademeler 1-4'ü (DNS/ARP, varsayilan fiziksel
+        NIC, servisler, DHCP renew) tek sefer daha hizli yoklar; cift dogrulamali kurtulus
+        gorurse reboot iptal edilir. Winsock/IP catalog reseti burada YOKTUR; reboot gerektirir.
+        Repair kilidi (Invoke-RepairRungLocked) kullanilir: baska bir reboot-siz onarim
+        suruyorsa bu son-care denemesi ertelenir; onarim bitince sonraki dongu tekrar dener.
+        Iptal dosyasi KONTROL EDILMEZ (bu otomatik
         bir girisimdir; eski bir iptal kaydi reboot oncesi sansi oldurmemelidir).
     #>
     param([string[]]$BadNames = @())
@@ -1078,6 +1081,11 @@ function Invoke-PreRebootRepair {
             if ([int]((Get-Date) - $t0).TotalSeconds -gt 180) { Write-Log 'WARN' 'restart oncesi hizli onarim sure sinirina takildi (180 sn); reboot yoluna devam ediliyor'; break }
             Write-Log 'INFO' ('restart oncesi kademe ' + $r + ': ' + (Get-RepairRungName $r))
             $steps = @(Invoke-RepairRungLocked -Rung $r)
+            if (@($steps | Where-Object { [string]$_ -match 'baska bir onarim suruyor' }).Count -gt 0) {
+                $el = [int]((Get-Date) - $t0).TotalSeconds
+                Write-Log 'INFO' 'restart ertelendi: baska bir reboot-siz ag onarimi halen calisiyor; once onun bitmesi beklenecek'
+                return [pscustomobject]@{ Recovered = $false; Rungs = $rungs; Actions = $actions; ElapsedSec = $el; Skipped = $true }
+            }
             $rungs += $r
             $actions += $steps
             Write-Log 'INFO' ('restart oncesi kademe ' + $r + ' uygulandi: ' + $(if ($steps.Count) { $steps -join '; ' } else { 'islem yok' }))
@@ -1112,88 +1120,106 @@ function Get-RepairRungName {
     <#  Onarim kademesinin adlari (panel canli izinde gosterir). #>
     param([int]$Rung)
     switch ($Rung) {
-        1 { return 'DNS onbellegi temizleme + Dnscache servisi yeniden baslatma' }
-        2 { return 'DHCP lease yenileme (release/renew)' }
-        3 { return 'ARP/neighbor temizleme + gateway yeniden ARP + varsayilan adaptor kapat/ac (+Wi-Fi)' }
-        4 { return 'Dhcp/NlaSvc/dot3svc (802.1X) servisleri + surucu yeniden baslatma' }
-        5 { return 'winsock/IP reset (yeniden baslatma gerekir)' }
+        1 { return 'DNS ve ARP/neighbor onbellegini temizleme' }
+        2 { return 'yalnizca varsayilan fiziksel adaptoru PnP stop/start' }
+        3 { return 'DHCP/DNS/NLA/WLAN/802.1X servislerini tazeleme' }
+        4 { return 'yalnizca varsayilan fiziksel adaptorde DHCP adresini yenileme' }
+        5 { return 'Winsock/IP catalog reseti (reboot gerektirir; reboot-siz onarim disinda)' }
         default { return 'bilinmeyen kademe' }
     }
 }
 
 function Invoke-NetworkRepair {
     param([int]$Rung)
-    $cfg = $global:cfg
     $done = @()
     switch ($Rung) {
         1 {
             try { ipconfig /flushdns 2>&1 | Out-Null; $done += 'DNS onbellegi temizlendi' } catch { }
-            try { Restart-Service -Name 'Dnscache' -Force -ErrorAction Stop; $done += 'Dnscache servisi yeniden baslatildi' } catch { }
-        }
-        2 {
-            try { ipconfig /release 2>&1 | Out-Null; Start-Sleep 2; ipconfig /renew 2>&1 | Out-Null; $done += 'DHCP lease yenilendi' } catch { }
-        }
-        3 {
-            try { netsh wlan reconnect 2>&1 | Out-Null; $done += 'Wi-Fi yeniden baglanma denemesi' } catch { }
-            <#
-                ARP/neighbor temizleme + gateway yeniden ARP. Kurumsal agda bayat gateway
-                ya da dusmus NAC oturumu icin en dusuk maliyetli duzeltmedir; adaptor
-                kapatip acmadan once denenir.
-            #>
             try {
-                $gw = ''
-                try { $gw = Get-DefaultGatewayIp } catch { }
                 try { arp -d * 2>&1 | Out-Null } catch { }
                 try { Get-NetNeighbor -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'Permanent' } | ForEach-Object { try { Remove-NetNeighbor -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue } catch { } } } catch { }
                 $done += 'ARP/neighbor onbellegi temizlendi'
-                if ($gw) {
-                    try {
-                        $pg = New-Object System.Net.NetworkInformation.Ping
-                        try { $null = $pg.Send($gw, 1000) } catch { }
-                        try { $pg.Dispose() } catch { }
-                    } catch { }
-                    $done += ('gateway yeniden yoklandi (ARP tazelendi): ' + $gw)
-                }
             } catch { }
-            <#
-                Adaptor reset: TUM 'Up' adaptorler DEGIL, yalnizca varsayilan rotanin arayuzu.
-                Onceki surum WSL/Hyper-V sanal anahtarlarini da kapatip aciyordu; bu hem
-                gereksiz hem yikiciydi (sanal aglar kopuyordu). Bulunamazsa fiziksel
-                adaptorlere dusulur.
-            #>
+        }
+        2 {
+            # PnP stop/start yalnizca etkin varsayilan FIZIKSEL NIC'e uygulanir.
+            # Sanal, VPN ve Hyper-V adaptorlari asla fallback/hedef yapilmaz.
             try {
-                $ifIdx = 0
-                try { $ifIdx = Get-DefaultRouteIfIndex } catch { }
-                $targets = @()
-                if ($ifIdx -gt 0) { $targets = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.ifIndex -eq $ifIdx -and $_.Status -eq 'Up' }) }
-                if (-not $targets -or $targets.Count -eq 0) { $targets = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' }) }
-                foreach ($a in $targets) {
-                    try { Disable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue; Start-Sleep 3; Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction SilentlyContinue; $done += ($a.Name + ' kapatildi/acildi') } catch { }
+                $ifIdx = Get-DefaultRouteIfIndex
+                $a = $null
+                if ($ifIdx -gt 0) { $a = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.ifIndex -eq $ifIdx -and $_.HardwareInterface -and $_.Status -eq 'Up' } | Select-Object -First 1 }
+                if (-not $a) {
+                    $done += 'varsayilan fiziksel adaptor saptanamadi; sanal/VPN adaptorlerine dokunulmadan atlandi'
+                } else {
+                    $pnpId = [string]$a.PnPDeviceID
+                    $disabled = $false
+                    $restarted = $false
+                    if ($pnpId -and (Get-Command Disable-PnpDevice -ErrorAction SilentlyContinue) -and (Get-Command Enable-PnpDevice -ErrorAction SilentlyContinue)) {
+                        try {
+                            Disable-PnpDevice -InstanceId $pnpId -Confirm:$false -ErrorAction Stop | Out-Null
+                            $disabled = $true
+                            Start-Sleep -Seconds 2
+                            Enable-PnpDevice -InstanceId $pnpId -Confirm:$false -ErrorAction Stop | Out-Null
+                            $disabled = $false
+                            $restarted = $true
+                            $done += ($a.Name + ' varsayilan fiziksel adaptor PnP stop/start yapildi')
+                        } catch {
+                            if ($disabled) { try { Enable-PnpDevice -InstanceId $pnpId -Confirm:$false -ErrorAction Stop | Out-Null; $disabled = $false } catch { } }
+                            Write-Log 'WARN' ('PnP adaptor yenileme basarisiz (' + $a.Name + '): ' + $_.Exception.Message)
+                        } finally {
+                            if ($disabled) {
+                                try { Enable-PnpDevice -InstanceId $pnpId -Confirm:$false -ErrorAction Stop | Out-Null; $disabled = $false }
+                                catch {
+                                    try { Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction Stop; $disabled = $false; $done += ($a.Name + ' Enable-NetAdapter yedegiyle yeniden acildi') }
+                                    catch { Write-Log 'ERR' ('devre disi kalan adaptoru yeniden acma basarisiz (' + $a.Name + ')') }
+                                }
+                            }
+                        }
+                    }
+                    if (-not $restarted) {
+                        try { Restart-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction Stop; $done += ($a.Name + ' varsayilan fiziksel adaptor miniport yenilendi') }
+                        catch { $done += ($a.Name + ' fiziksel adaptor yenilenemedi: ' + $_.Exception.Message) }
+                    }
                 }
             } catch { }
+        }
+        3 {
+            # Servis yok/devre disi ise atla; DNS istemcisi ve Wi-Fi servisi de dahildir.
+            foreach ($s in @('Dhcp', 'Dnscache', 'NlaSvc', 'WlanSvc', 'dot3svc')) {
+                try {
+                    $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
+                    if (-not $svc) { continue }
+                    if ($svc.Status -eq 'Running') {
+                        Restart-Service -Name $s -Force -ErrorAction Stop
+                        $done += ($s + ' servisi yeniden baslatildi')
+                    } elseif ($svc.Status -eq 'Stopped') {
+                        $svcCfg = Get-CimInstance Win32_Service -Filter ("Name='" + $s + "'") -ErrorAction SilentlyContinue
+                        if ($svcCfg -and [string]$svcCfg.StartMode -ne 'Disabled') {
+                            Start-Service -Name $s -ErrorAction Stop
+                            $done += ($s + ' servisi baslatildi')
+                        } else { $done += ($s + ' devre disi/servis yok, atlandi') }
+                    }
+                } catch { $done += ($s + ' servisi atlandi: ' + $_.Exception.Message) }
+            }
         }
         4 {
-            foreach ($s in @('Dhcp', 'NlaSvc')) { try { Restart-Service -Name $s -Force -ErrorAction Stop; $done += ($s + ' yeniden baslatildi') } catch { } }
-            <#
-                802.1X yeniden dogrulama (kurumsal kablolu ag). Wired AutoConfig (dot3svc)
-                yeniden baslatilinca switch ile yeniden dogrulama tetiklenir; dusmus NAC
-                oturumunu reboot'suz toparlayabilir. Servis yoksa/devre disiysa atlanir.
-            #>
-            try {
-                $d3 = Get-Service -Name 'dot3svc' -ErrorAction SilentlyContinue
-                if ($d3) {
-                    try { Restart-Service -Name 'dot3svc' -Force -ErrorAction Stop; $done += 'dot3svc (802.1X) yeniden baslatildi, yeniden dogrulama tetiklendi' } catch { $done += 'dot3svc yeniden baslatilamadi' }
-                }
-            } catch { }
-            try {
-                $dev = @(Get-CimInstance -ClassName Win32_NetworkAdapter -Filter 'NetEnabled=True' -ErrorAction Stop | Select-Object -ExpandProperty DeviceID -Unique)
-                foreach ($d in $dev) { pnputil /restart-device $d 2>&1 | Out-Null; $done += ('surucu yeniden baslatildi: ' + $d) }
-            } catch { }
+            # DHCP islemi de yalnizca secilmis varsayilan fiziksel adaptore yoneltilir.
+            $ifIdx = Get-DefaultRouteIfIndex
+            $a = $null
+            if ($ifIdx -gt 0) { $a = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.ifIndex -eq $ifIdx -and $_.HardwareInterface } | Select-Object -First 1 }
+            if (-not $a) {
+                $done += 'varsayilan fiziksel adaptor bulunamadi; DHCP release/renew atlandi'
+            } else {
+                try {
+                    ipconfig /release "$($a.Name)" 2>&1 | Out-Null
+                    Start-Sleep -Seconds 2
+                    ipconfig /renew "$($a.Name)" 2>&1 | Out-Null
+                    $done += ($a.Name + ' fiziksel adaptorde DHCP adresi yenilendi')
+                } catch { $done += ($a.Name + ' adaptorde DHCP yenileme basarisiz: ' + $_.Exception.Message) }
+            }
         }
         5 {
-            netsh winsock reset 2>&1 | Out-Null
-            netsh int ipv4 reset 2>&1 | Out-Null
-            $done += 'winsock/IP reset uygulandi (yENIDEN BASLATMA gerekiyor)'
+            $done += 'Winsock/IP reset reboot gerektirir; reboot-siz onarim akisi bunu calistirmadi'
         }
     }
     return $done
@@ -1216,7 +1242,7 @@ function Invoke-NetworkRepairFlow {
         degil. Uc ayri tuketici repair-request.json okuyor (Test-NetworkLayer,
         Invoke-Watchdog, -RepairWatch) ve panel istegi yazdiktan sonra
         RemoteHostRepair'i de baslatiyor. Kilit olmadan iki onarim akisi paralel
-        kademe uyguluyordu (ikisi de winsock/adaptor degistiriyor, ikisi de
+        kademe uyguluyordu (ikisi de PnP adaptor/servis durumunu degistiriyor, ikisi de
         LastRepair yaziyor -> panel sonucu hangisine ait oldugunu bilemiyor).
         Kilit mesgulse kademe UYGULANMAZ, sonuc "baska bir onarim suruyor" olur.
     #>
@@ -1247,6 +1273,7 @@ function Invoke-NetworkRepairFlow {
     try {
         $cfg = $global:cfg
         if ($MaxRung -le 0) { $MaxRung = [int]$cfg.NetMaxRepairRung }
+        if ($MaxRung -gt 4) { Write-Log 'WARN' ('reboot-siz onarim en fazla 4 kademe destekler; istenen ' + $MaxRung + ' -> 4 olarak sinirlandi'); $MaxRung = 4 }
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $applied = @()
         $rungs = @()
@@ -1365,7 +1392,7 @@ function Invoke-RepairRungLocked {
         Neden: Invoke-NetworkRepairFlow kilidi aliyor, ama Test-NetworkLayer icindeki
         OTOMATIK kademe dogrudan Invoke-NetworkRepair'i cagiriyordu. Dongu (cycle) ile
         60 sn'lik izleyicinin onarim akisi AYNI ANDA kosabildigi icin, iki surec paralel
-        adaptor/winsock degistirebiliyordu. Kilit mesgulse kademe ATLANIR (bir sonraki
+        fiziksel adaptor/servisleri degistirebiliyordu. Kilit mesgulse kademe ATLANIR (bir sonraki
         dongude tekrar denenir).
     #>
     param([int]$Rung)
@@ -1403,14 +1430,15 @@ function Test-NetworkLayer {
         if ([int]$state.NetRepairRung -gt 0) { $repair += 'saga likli, onarim merdiveni sifirlandi (son: ' + $state.NetRepairRung + '. kademe)' }
         $null = Invoke-StateUpdate { param($st) $st.NetRepairRung = 0 }
     } else {
+        $maxRung = [math]::Min(4, [math]::Max(1, [int]$cfg.NetMaxRepairRung))
         $rung = [int]$state.NetRepairRung + 1
-        if ($rung -gt [int]$cfg.NetMaxRepairRung) { $rung = [int]$cfg.NetMaxRepairRung }
+        if ($rung -gt $maxRung) { $rung = $maxRung }
         $repair += ('bozuk: eksik=' + (@(if (-not $h.Ip) { 'IP' }) + @(if (-not $h.Dns) { 'DNS' }) + @(if (-not $h.Https) { 'HTTPS' }) -join ','))
         $resetPending = 0
         if ($cfg.FixNetwork -and (Test-Admin) -and -not $Check) {
             $rungSteps = @(Invoke-RepairRungLocked -Rung $rung)
             $repair += ($rungSteps -join '; ')
-            if ($rung -ge [int]$cfg.NetMaxRepairRung) { $resetPending = 1; $repair += 'onerilen: makineyi yeniden baslat' }
+            if ($rung -ge $maxRung) { $resetPending = 1; $repair += 'reboot-siz onarim kademeleri tukendi; restart yalnizca son care olarak degerlendirilecek' }
         } else {
             $repair += 'kademe ' + $rung + ' uygulanmadi (admin gerekir)'
         }
@@ -2434,8 +2462,8 @@ function Invoke-RebootIfNeeded {
                 ANINDA sifirliyordu. Sonuc: "24 saatte en fazla N restart" butcesi
                 fiilen etkisizdi.
                 Cozum: bu dongu SAGLIKSIZ durumdan SAGLIKLI duruma gecis mi? (kesinti
-                sayaci > 0, kesinti baslangici var, bekleyen reboot var ya da winsock
-                reset bekliyor). Oyleyse LastHealthyUtc = simdi (seri sifirdan baslar);
+                sayaci > 0, kesinti baslangici var, bekleyen reboot var ya da reboot-siz
+                onarim merdiveni tukenmis). Oyleyse LastHealthyUtc = simdi (seri sifirdan baslar);
                 yalnizca seri HealthyMinutesToReset dk'ya ulasirsa butce sifirlanir.
             #>
             $oncekiSagliksiz = (([int]$st.ConsecutiveFailures) -gt 0) -or (([string]$st.OutageStartUtc) -ne '') -or ([bool]$st.PendingRebootUtc) -or (([int]$st.NetResetPendingReboot) -eq 1)
@@ -2494,7 +2522,7 @@ function Invoke-RebootIfNeeded {
         if (-not $st.OutageStartUtc) { $st.OutageStartUtc = (Get-Date).ToString('o') }
     }
     $limit = [int]$cfg.RebootAfterFailedCycles
-    if ([int]$state.NetResetPendingReboot -eq 1) { $limit = [math]::Min($limit, 1); Write-Log 'INFO' 'winsock/IP reset uygulanmisti, etkisi icin yeniden baslatma bir sonraki dongude yapilacak' }
+    if ([int]$state.NetResetPendingReboot -eq 1) { $limit = [math]::Min($limit, 1); Write-Log 'INFO' 'reboot-siz ag onarim kademeleri tukenmisti; restart son care olarak degerlendiriliyor' }
     Write-Log 'INFO' ('basarisiz dongu ' + $state.ConsecutiveFailures + '/' + $limit)
     if ($limit -le 0 -or $state.ConsecutiveFailures -lt $limit) { return }
     $uptime = Get-UptimeMinutes
@@ -2554,8 +2582,8 @@ function Invoke-RebootIfNeeded {
         SON KONTROL: karar verildi ama henuz hicbir sey yapilmadi. Burada interneti TAZE
         tekrar yoklariz; kullanici adaptoru (ya da kabloyu) geri acmissa RESTART IPTAL EDILIR.
         Boylece "adaptoru geri actim ama yine de restart etti" durumu olmaz.
-        Not: iptal edilirse ConsecutiveFailures ve NetResetPendingReboot sifirlanir, boylece
-        eski "winsock reset sonrasi zorla restart" bayragi da temizlenir.
+        Not: iptal edilirse ConsecutiveFailures ve NetResetPendingReboot sifirlanir; boylece
+        eski onarim/restart-son-care isareti temizlenir.
     #>
     if (Test-RecoveryBeforeReboot) {
         $null = Invoke-StateUpdate {
@@ -2567,7 +2595,6 @@ function Invoke-RebootIfNeeded {
         }
         return
     }
-    Send-Telegram ('[KRİTİK] ' + $env:COMPUTERNAME + ' ' + $state.ConsecutiveFailures + ' kez onarılamadı, ' + $cfg.RebootDelaySeconds + ' sn sonra yeniden başlatılıyor')
     if (-not (Request-OfficeSave -TimeoutSeconds ([int]$cfg.OfficeSaveTimeoutSeconds))) {
         Write-Log 'ALERT' 'yeniden başlatma iptal edildi: Word/Excel belgeleri kaydedilemedi (kayıp olmaması için durduruldu)'
         <#
@@ -2582,12 +2609,11 @@ function Invoke-RebootIfNeeded {
         return
     }
     <#
-        RESTART ONCESI HIZLI ONARIM + KESINTI RAPORU.
-        Otomatik yolda reboot karari ayni dongude verildigi icin (RebootAfterFailedCycles=1)
-        reboot oncesi esasen yalnizca kademe-1 uygulanirdi; kademelerin tamami icin
-        panelden elle onarim beklenirdi. Artik karar kesinlesmeden ONCE 1-4 kademeleri
-        hizli yoklamayla denenir; kurtulursa reboot YAPILMAZ (toparlanma gibi sayaclar
-        sifirlanir). Kademe-5 (winsock reset) reboot gerektirdigi icin listede YOKTUR.
+        RESTART SON CARE + KESINTI RAPORU.
+        Hızlı tespiti geciktirme: ilk failed dongude karar verilebilir, ancak bu fonksiyon
+        restart bildiriminden once reboot'siz 1-4 merdivenini hizli yoklamayla calistirir.
+        Iki ardışık saglikli probe gorurse restart iptal edilir; duzelmezse reboot son care.
+        Winsock/IP catalog reset bu onarimda yoktur; calistirilirsa Windows reboot borcu olur.
         Kosullar: sorun AG ile ilgili olmali (Internet/Ag katmani), FixNetwork acik,
         admin olunmali. Degilse eski yoldan devam edilir.
     #>
@@ -2608,8 +2634,15 @@ function Invoke-RebootIfNeeded {
             $null = Complete-OutageReport -Outcome 'recovered-by-prereboot-repair'
             return
         }
+        if ($burst.Skipped) {
+            Write-Log 'WARN' 'restart ertelendi: paralel reboot-siz onarim bitmeden reboot son-care karari verilmeyecek'
+            return
+        }
         Write-Log 'WARN' ('restart oncesi hizli onarim yetmedi (kademe ' + ($burst.Rungs -join ',') + ', ' + $burst.ElapsedSec + ' sn); restart devam ediyor')
     }
+    $lastResortReason = 'otomatik onarım ve son sağlık kontrolleri restartı önleyemedi'
+    if ($burst -and -not $burst.Skipped) { $lastResortReason = 'reboot-siz ağ onarım kademeleri yetmedi' }
+    Send-Telegram ('[KRİTİK] ' + $env:COMPUTERNAME + ' ' + $state.ConsecutiveFailures + ' kez onarılamadı; ' + $lastResortReason + '. ' + $cfg.RebootDelaySeconds + ' sn sonra yeniden başlatılıyor')
     # Kesinti raporu (burst sonucu dahil). Reboot karari kesinlesti; rapor, reboot'u
     # geciktirmez (hizli yerel sorgular + tek 1.2 sn dis dogrulama).
     if ($agSorunu) { $null = Write-OutageReport -Phase 'pre-reboot' -Burst $burst }
@@ -4110,7 +4143,6 @@ if ($ForceReboot) {
     $global:cfg = Get-Config
     $state = Get-State
     $state.ConsecutiveFailures = [int]$cfg.RebootAfterFailedCycles
-    $state.NetResetPendingReboot = 1
     Save-State $state
     Write-Log 'ALERT' 'elle restart istendi (pano butonu), geri sayimli yeniden baslatma: ' + $cfg.RebootDelaySeconds + ' sn'
     Send-Telegram ('[BILDIRIM] ' + $env:COMPUTERNAME + ' elle restart istendi, ' + $cfg.RebootDelaySeconds + ' sn sonra yeniden baslatilacak')
