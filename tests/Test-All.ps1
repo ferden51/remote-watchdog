@@ -752,6 +752,9 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host reboot-siz kademede DNS/ARP, servisler ve fiziksel NIC DHCP sirali' (($rungCode -match 'ipconfig /flushdns') -and ($rungCode -match 'arp -d \*') -and ($rungCode -match "'Dhcp', 'Dnscache', 'NlaSvc', 'WlanSvc', 'dot3svc'") -and ($rungCode -match 'ipconfig /release') -and ($rungCode -match 'ipconfig /renew'))
     Ok 'host reboot-siz onarimda Winsock/IP reset calistirmiyor' (($rungCode -notmatch 'netsh winsock reset') -and ($rungCode -notmatch 'netsh int ipv4 reset'))
     Ok 'host reboot-siz onarim akisini en fazla 4 kademeyle sinirliyor' (($hostText -match 'reboot-siz onarim en fazla 4 kademe') -and ($hostText -match '\[math\]::Min\(4, \[math\]::Max\(1, \[int\]\$cfg\.NetMaxRepairRung\)\)'))
+    <# Gercek reboot sonrasi gunluk rapor yenilenir; yoksa eski rapor "gecici kesinti"
+       gosterir ve yeni reboot gozukmez (kullanici raporu actiginda sasirir). #>
+    Ok 'host gercek reboot sonrasi gunluk raporu yeniden uretmek icin siliyor' (($hostText -match 'GUNLUK RAPORU YENILE') -and ($hostText -match 'Write-DailyReport') -and ($hostText -match 'Remove-Item -LiteralPath \$oldReport'))
     Ok 'host reboot bekleyen onarim bayragini son-care olarak acikliyor' ($hostText -match 'reboot-siz ag onarim kademeleri tukenmisti; restart son care')
     Ok 'panel reboot anonsunu onarim-tukendi bayragiyla degil gerçek pending ile verir' (($panelText -match 'RebootPending = \(Test-Path -LiteralPath \$RebootPendingFile\)') -and ($panelText -match 'if \(\$snap\.RebootPending -and -not \$p\.RebootPending\) \{ Announce-Reboot \}'))
     $forceBlock = [regex]::Match($hostText, '(?s)if \(\$ForceReboot\) \{.*?\r?\n\}')

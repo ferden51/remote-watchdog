@@ -24,6 +24,10 @@ restart sırasına göre netleştirildi. Hızlı tespit eşikleri korunuyor.
 - Durum kartı ve sesli bildirim, “Winsock reset uygulandı” demek yerine reboot’siz
   kademelerin tükendiğini bildirir. Gerçek reboot anonsu yalnız `reboot-pending.json`
   oluştuğunda verilir.
+- **Günlük rapor yenilenir.** Rapor gün başında bir kez üretilir; geç bir reboot eski
+  raporda görünmez ve kullanıcı “geçici kesinti” sanıyordu. Gerçek reboot sonrası
+  `Sync-RebootAccounting` aynı günün raporunu siler, sonraki döngüde `Write-DailyReport`
+  onu yeniden üretir — yeni reboot/olaylar anında görünür.
 
 ### 🧪 Test
 

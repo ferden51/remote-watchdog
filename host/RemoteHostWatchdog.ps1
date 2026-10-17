@@ -2257,6 +2257,21 @@ function Sync-RebootAccounting {
             #>
             $st.LastHealthyUtc = (Get-Date).ToString('o')
             Write-Log 'INFO' ('makine yeniden acildi; restart butceye yazildi (' + $liste.Count + '/' + $cfg.MaxRestartsPerDay + ') | acilis=' + $boot)
+            <#
+                GUNLUK RAPORU YENILE. Rapor gun basina bir kez uretilir (08:00 sonrasi ilk
+                dongude) ve reboot'tan SONRAKIN olaylari icermez; kullanici eski raporda
+                "gecici kesinti" gorur cunku yeni reboot henuz eklenmemis. Kullanici "her
+                gun sormak istemiyor" dedigi icin gercek reboot olunca bugunun raporu
+                silinir; ayni dongunun Write-DailyReport'i onu yeniden uretir.
+            #>
+            try {
+                $diagDir = Join-Path $BaseDir 'diag'
+                $todayStamp = (Get-Date).ToString('yyyy-MM-dd')
+                foreach ($ext in @('.json', '.md')) {
+                    $oldReport = Join-Path $diagDir ('daily-' + $todayStamp + $ext)
+                    if (Test-Path -LiteralPath $oldReport) { Remove-Item -LiteralPath $oldReport -Force -ErrorAction SilentlyContinue }
+                }
+            } catch { }
             return
         }
         if ($st.PendingRebootUtc) {
