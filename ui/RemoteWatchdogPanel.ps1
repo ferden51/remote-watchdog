@@ -937,6 +937,17 @@ $Xaml = @'
                 <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
               </ItemsControl.ItemsPanel>
             </ItemsControl>
+            <Border x:Name="DailyReportCard" Style="{StaticResource CardStyle}" Margin="0,4,0,10">
+              <StackPanel>
+                <Grid Margin="0,0,0,6">
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                  <TextBlock Grid.Column="0" Text="Günlük özet" Style="{StaticResource H2}" VerticalAlignment="Center"/>
+                  <Button x:Name="BtnOpenDailyReport" Grid.Column="1" Content="Raporu aç" Style="{StaticResource Btn}" Padding="12,5"/>
+                </Grid>
+                <TextBlock x:Name="TxtDailySummary" Text="İlk günlük özet, her gün saat 08:00 sonrasında otomatik hazırlanır." Style="{StaticResource Small}" TextWrapping="Wrap"/>
+                <TextBlock x:Name="TxtDailyReportAt" Text="" Style="{StaticResource Small}" Margin="0,6,0,0" Foreground="{StaticResource Mut}"/>
+              </StackPanel>
+            </Border>
             <Border Style="{StaticResource CardStyle}" Margin="0,4,0,0">
               <StackPanel>
                 <TextBlock Text="Ortam" Style="{StaticResource H2}" Margin="0,0,0,10"/>
@@ -2221,6 +2232,29 @@ function Update-Overview {
         $ic = El $script:Win 'Cards'
         $ic.ItemsSource = $cards
         $ic.ItemTemplate = $script:Win.Resources['StatusCard']
+
+        $dailySummary = ''
+        $dailyAt = ''
+        $dailyPath = ''
+        if ($hj) {
+            try { $dailySummary = [string]$hj.dailySummary } catch { }
+            try { $dailyAt = [string]$hj.dailyReportAt } catch { }
+            try { $dailyPath = [string]$hj.dailyReportPath } catch { }
+        }
+        $dailyBox = El $script:Win 'TxtDailySummary'
+        if ($dailyBox) {
+            $dailyBox.Text = $(if ($dailySummary) { $dailySummary } else { 'İlk günlük özet, her gün saat 08:00 sonrasında otomatik hazırlanır.' })
+        }
+        $dailyTimeBox = El $script:Win 'TxtDailyReportAt'
+        if ($dailyTimeBox) {
+            $dailyTimeBox.Text = $(if ($dailyAt) { 'Son rapor: ' + $dailyAt } else { 'Henüz günlük rapor oluşturulmadı.' })
+        }
+        $dailyButton = El $script:Win 'BtnOpenDailyReport'
+        if ($dailyButton) {
+            $dailyButton.Tag = $dailyPath
+            $dailyButton.IsEnabled = ($dailyPath -and (Test-Path -LiteralPath $dailyPath))
+            $dailyButton.ToolTip = $(if ($dailyButton.IsEnabled) { $dailyPath } else { 'Rapor hazır olduğunda burada açılabilir.' })
+        }
 
         $env = New-Object System.Collections.ArrayList
         if ($hj) {
@@ -3923,6 +3957,10 @@ function Wire-UI {
         })
     (El $script:Win 'BtnCheck').Add_Click({ Start-ManualCheck })
     (El $script:Win 'BtnRepairNet').Add_Click({ Invoke-NetworkRepair })
+    (El $script:Win 'BtnOpenDailyReport').Add_Click({
+            $path = [string](El $script:Win 'BtnOpenDailyReport').Tag
+            if ($path -and (Test-Path -LiteralPath $path)) { Start-Process -FilePath 'notepad.exe' -ArgumentList ('"' + $path + '"') }
+        })
     (El $script:Win 'BtnDiag').Add_Click({
             $r = [System.Windows.MessageBox]::Show('Collect-Diagnostics calisacak (okuma modunda, ~40 sn). Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Question')
             if ($r -eq 'Yes') { $script:DiagProc = Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $HostDiag + '"')) -WindowStyle Hidden -PassThru }

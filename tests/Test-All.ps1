@@ -635,6 +635,7 @@ if ($Section -eq 0 -or $Section -eq 1) {
         SAHTE YESIL "Bekleyen is yok" kartini gosteriyordu. #>
     Ok 'Contract last-run.json atomik yazıyor' ($contractText -match 'File\]::Replace')
     Ok 'Contract lastOutageReport alanini normalize ediyor' ($contractText -match "lastOutageReport")
+    Ok 'Contract günlük rapor alanlarını eski JSON için varsayılanla tamamlıyor' (($contractText -match 'dailyReportPath') -and ($contractText -match 'dailyReportAt') -and ($contractText -match 'dailySummary'))
     Ok 'panel onarim ozetinde kesinti rapor yolunu gosteriyor' ($panelText -match 'kesinti raporu \(detayli diagnostik\)')
     <#  Onarim akisi kilitlenmiyordu: uc tuketici repair-request.json okuyor ve panel
         ayrica RemoteHostRepair'i baslatiyor -> iki paralel kademe uygulamasi. #>
@@ -657,7 +658,68 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host farkli kesintiyi eski rapora baglamiyor (OutageStartUtc anahtari)' (($hostText -match '\$sameOutage') -and ($hostText -match '\$cur -eq \$old'))
     <#  Panel: iptal istegi zaman asiminda DUSURULMEZ (gec ack gelebilir) ve dosya
         yazilamazsa kullaniciya YALAN onay verilmez. #>
-    Ok 'panel iptal istegini zaman asiminda dusurmuyor' (($panelText -match 'RebootCancelTimeoutFired') -and ($uiText -notmatch "iptali onaylanmadi; geri sayim suruyor olabilir"))
+    <#  Gunluk insan-dili raporu: kesintileri, gercek reboot'lari ve teshis guvenini ozetler. #>
+    Ok 'host günlük rapor saf özet fonksiyonuna sahip' ($hostText -match 'function Get-DailyDigest')
+    Ok 'host günlük raporu 08:00 sonrası üretir ve gün başına bir kez yazar' (($hostText -match 'function Write-DailyReport') -and ($hostText -match 'TimeOfDay -lt \[TimeSpan\]::FromHours\(8\)') -and ($hostText -match 'daily-') -and ($hostText -match '\$day'))
+    Ok 'host günlük raporu normal watchdog çevriminde çağrılır, -Check kirletmez' ($hostText -match '(?s)if \(-not \$Check\) \{\s*try \{ \$null = Write-DailyReport')
+    Ok 'host günlük rapor özetini last-run.json içine koyar' (($hostText -match 'dailyReportPath = \[string\]\$state\.LastDailyReport') -and ($hostText -match 'dailySummary = \[string\]\$state\.LastDailySummary'))
+    Ok 'panel genel durumda günlük özeti ve raporu aç düğmesini gösterir' (($panelText -match 'x:Name="TxtDailySummary"') -and ($panelText -match 'x:Name="BtnOpenDailyReport"') -and ($panelText -match "BtnOpenDailyReport'\)\.Add_Click"))
+    $digestFns = Get-FnCode $Host_ @('ConvertTo-DailyLocalDateTime', 'Get-DailyDigest')
+    foreach ($code in $digestFns) { Invoke-Expression $code }
+    $sampleLogs = @(
+        '2026-10-16 21:33:54 [ALERT] ANLIK AG SORUNU: Ağ sorunu algılandı. Eksik: IP,DNS. Onarım başlatılıyor.',
+        '2026-10-16 21:45:10 [ALERT] yeniden başlatma Windows''a iletildi: shutdown.exe /r /t 5',
+        '2026-10-16 21:46:22 [ALERT] [DUZELDI] DESKTOP-TEST | Internet=OK',
+        '2026-10-16 21:46:22 [INFO] makine yeniden acildi; restart butceye yazildi (1/5)'
+    )
+    $sampleOutage = [pscustomobject]@{
+        # Windows PowerShell 5.1 ConvertFrom-Json deserializes these ISO values as DateTime.
+        generated = [datetime]::SpecifyKind([datetime]'2026-10-16T21:44:32', [DateTimeKind]::Local)
+        outageStartUtc = [datetime]::SpecifyKind([datetime]'2026-10-16T21:33:54', [DateTimeKind]::Local)
+        recoveredAt = [datetime]::SpecifyKind([datetime]'2026-10-16T21:46:22', [DateTimeKind]::Local)
+        class = 'upstream'; outcome = 'recovered'
+    }
+    $dailyTest = Get-DailyDigest -LogLines $sampleLogs -OutageReports @($sampleOutage) -PeriodStart ([datetime]'2026-10-16T08:00:00') -PeriodEnd ([datetime]'2026-10-17T08:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
+    $dailyIncident = @($dailyTest.Incidents)[0]
+    Ok 'günlük rapor kesinti ve gerçek reboot sayısını doğru çıkarıyor' (($dailyTest.IncidentCount -eq 1) -and ($dailyTest.RebootCount -eq 1) -and [bool]$dailyIncident.recovered -and [bool]$dailyIncident.rebooted)
+    Ok 'günlük rapor kesinti başlangıç/bitiş saatini ve süresini gösteriyor' ($dailyTest.Markdown -match '16\.10 21:33–21:46 \(yaklaşık 13 dk\)')
+    Ok 'günlük rapor upstream teşhisini ve ICMP belirsizliğini insan dilinde yazar' (($dailyTest.Markdown -match 'Ağ geçidi yanıt veriyordu') -and ($dailyTest.Markdown -match 'ICMP engeli'))
+    $emptyDaily = Get-DailyDigest -LogLines @() -OutageReports @() -PeriodStart ([datetime]'2026-10-16T08:00:00') -PeriodEnd ([datetime]'2026-10-17T08:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
+    Ok 'günlük rapor reboot yoksa bunu açıkça söyler' ($emptyDaily.Markdown -match 'gerçek reboot olmadı')
+    $flapLogs = @(
+        '2026-10-16 09:19:12 [ALERT] ANLIK AG SORUNU: Ağ sorunu. Eksik: IP. Onarım başlatılıyor.',
+        '2026-10-16 09:20:02 [INFO] SONUC: tum kontroller tamam.',
+        '2026-10-16 11:17:17 [ALERT] ANLIK AG SORUNU: Ağ sorunu. Eksik: IP,DNS,HTTPS,sinyal. Onarım başlatılıyor.',
+        '2026-10-16 11:19:41 [ALERT] [DUZELDI] DESKTOP-TEST | Internet=OK'
+    )
+    $flapDaily = Get-DailyDigest -LogLines $flapLogs -OutageReports @() -PeriodStart ([datetime]'2026-10-16T08:00:00') -PeriodEnd ([datetime]'2026-10-17T08:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
+    Ok 'günlük rapor sağlıklı döngüyle ayrılan kesintileri birleştirmiyor' (($flapDaily.IncidentCount -eq 2) -and ($flapDaily.Incidents[0].missing -eq 'IP') -and ($flapDaily.Incidents[1].missing -eq 'IP,DNS,HTTPS,sinyal'))
+    <# Writer regresyonu: 08:00 öncesi çalışmaz, ilk uygun çevrimde iki dosya üretir,
+       aynı gün ikinci çağrı kopya rapor yaratmaz. #>
+    $dailyOldBase = $script:BaseDir; $dailyOldState = $script:StateFile; $dailyOldLog = $script:LogFile; $dailyOldVersion = $script:AppVersion
+    $dailyTestRoot = Join-Path $env:TEMP ('rw-daily-report-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $dailyTestRoot | Out-Null
+    $script:BaseDir = $dailyTestRoot
+    $script:StateFile = Join-Path $dailyTestRoot 'host-state.json'
+    $script:LogFile = Join-Path $dailyTestRoot 'host-watchdog.log'
+    $script:AppVersion = 'test'
+    function Invoke-StateUpdate {
+        param([scriptblock]$Mutate)
+        $s = Get-State
+        if ($Mutate) { $null = & $Mutate $s }
+        Save-State $s
+        return $s
+    }
+    foreach ($code in (Get-FnCode $Host_ @('Write-DailyReport'))) { Invoke-Expression $code }
+    $beforeDaily = Write-DailyReport -At ([datetime]'2026-10-16T07:59:00') -CurrentOk $true -CurrentSummary 'Internet=OK'
+    Ok 'günlük rapor 08:00 öncesi oluşmuyor' ([string]::IsNullOrEmpty([string]$beforeDaily))
+    $dailyPath = Write-DailyReport -At ([datetime]'2026-10-16T08:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK'
+    $dailyAgain = Write-DailyReport -At ([datetime]'2026-10-16T08:05:00') -CurrentOk $true -CurrentSummary 'Internet=OK'
+    $dailyFiles = @(Get-ChildItem (Join-Path $dailyTestRoot 'diag') -Filter 'daily-2026-10-16.*' -File -ErrorAction SilentlyContinue)
+    Ok 'günlük rapor MD+JSON yazar ve aynı gün bir kez üretir' (($dailyPath -eq $dailyAgain) -and (Test-Path -LiteralPath $dailyPath) -and (Test-Path -LiteralPath ([System.IO.Path]::ChangeExtension($dailyPath, '.json'))) -and ($dailyFiles.Count -eq 2))
+    Remove-Item -LiteralPath $dailyTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+    $script:BaseDir = $dailyOldBase; $script:StateFile = $dailyOldState; $script:LogFile = $dailyOldLog; $script:AppVersion = $dailyOldVersion
+    Ok 'panel iptal istegini zaman asiminda dusurmuyor' (($panelText -match 'RebootCancelTimeoutFired') -and ($panelText -notmatch "iptali onaylanmadi; geri sayim suruyor olabilir"))
     Ok 'panel iptal dosyasi yazilamazsa durumu geri aliyor' (($panelText -match 'iptal dosyasi yazilamadi') -and ($panelText -match 'iptal dosyasi yazilamadi') -and ($panelText -match '\$yazildi = \$true'))
     Ok 'panel bayat reboot-ack.json ile yalan onay vermiyor (tazelik kontrolu)' (($panelText -match '\$ackFresh') -and ($panelText -match 'RebootCancelAt.AddSeconds\(-5\)'))
     Ok 'host Write-Log konsol hatasi yuzunden geri sayim dongusunu dusurmuyor' (($hostText -match 'try \{ Write-Host \$line -ForegroundColor') -and ($hostText -notmatch "Rotate-LogIfNeeded\r?\n\s*Write-Host"))

@@ -4,6 +4,27 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.12] - 2026-10-17
+
+Günlük kesinti/reboot özetini programın otomatik üretmesi ve panelden açılması eklendi.
+
+### 🆕 Günlük insan-dili raporu
+
+- Watchdog, her gün yerel saatle **08:00 sonrasında** son rapordan bu ana kadarki dönemi
+  bir kez özetler. İlk rapor geriye dönük son 24 saati kapsar.
+- Raporlar `C:\ProgramData\RemoteWatchdog\diag\daily-YYYY-MM-DD.md` ve `.json` olarak
+  saklanır; 90 günlük geçmiş korunur.
+- Özet; kesintilerin başlangıç/bitiş saatini ve süresini, başarıyla dönen bağlantıyı,
+  gerçek reboot'ları ve varsa upstream/DHCP teşhisini sade Türkçeyle anlatır. Ping ve
+  traceroute yanıt vermemesinin ICMP engelinden kaynaklanabileceğini ayrıca belirtir.
+- Panelin **Genel durum** sayfasında kısa günlük özet ve **Raporu aç** düğmesi bulunur.
+- Aynı gün tekrarlanan watchdog döngüleri ikinci bir günlük rapor üretmez.
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **407 kontrol** (0 hata); `Test-UI` 54/0;
+  `Verify-OutageLogic` 34/0.
+
 ## [1.3.11] - 2026-10-16
 
 1.3.10 incelemesinde kalan bir yalan-onay yolu kapatildi.

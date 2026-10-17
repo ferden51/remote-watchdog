@@ -337,8 +337,9 @@ if ($script:WinClosed -and $sw.ElapsedMilliseconds -lt 15000) { 'PASS ' + $sw.El
     $exitRes = $null
     try { $exitRes = (& powershell -NoProfile -STA -ExecutionPolicy Bypass -File $exitScript 2>$null | Select-Object -Last 1) } catch { $exitRes = 'HATA' }
     Remove-Item -LiteralPath $exitScript -Force -ErrorAction SilentlyContinue
-    $exitOk = ([string]$exitRes -match '^PASS (\d+)')
-    Ok ('tray Cikis -> Dispatcher.Run donuyor, surec bitiyor (mutex birakiliyor)' + $(if ($exitOk) { ': ' + $exitOk.Matches[0].Groups[1].Value + ' ms' } elseif ($exitRes) { ': ' + $exitRes } else { '' })) $exitOk
+    $exitMatch = [regex]::Match([string]$exitRes, '^PASS (\d+)')
+    $exitOk = $exitMatch.Success
+    Ok ('tray Cikis -> Dispatcher.Run donuyor, surec bitiyor (mutex birakiliyor)' + $(if ($exitOk) { ': ' + $exitMatch.Groups[1].Value + ' ms' } elseif ($exitRes) { ': ' + $exitRes } else { '' })) $exitOk
     # Yanan WPF sureci kalmasin diye kalan pencereyi kapat (guvenlik agi)
     try { if ($script:Win) { $script:Win.Close() } } catch { }
 

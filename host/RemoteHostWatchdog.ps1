@@ -298,6 +298,10 @@ function Get-State {
         OutageStartUtc = ''
         BreakerKey = ''
         LastOutageReport = ''
+        LastDailyReport = ''
+        LastDailyReportAt = ''
+        LastDailyReportEnd = ''
+        LastDailySummary = ''
     }
     if (Test-Path -LiteralPath $StateFile) {
         try {
@@ -763,6 +767,293 @@ function Complete-OutageReport {
         }
         Write-Log 'INFO' ('kesinti raporu kapatildi (kurtulus): ' + $p)
     } catch { }
+}
+
+function ConvertTo-DailyLocalDateTime {
+    param($Value)
+    if ($null -eq $Value -or [string]$Value -eq '') { return $null }
+    if ($Value -is [datetimeoffset]) { return $Value.LocalDateTime }
+    if ($Value -is [datetime]) {
+        if ($Value.Kind -eq [DateTimeKind]::Utc) { return $Value.ToLocalTime() }
+        if ($Value.Kind -eq [DateTimeKind]::Unspecified) { return [datetime]::SpecifyKind($Value, [DateTimeKind]::Local) }
+        return $Value
+    }
+    try {
+        $text = [string]$Value
+        if ($text -match '(?i)(Z|[+-]\d{2}:\d{2})$') { return ([datetimeoffset]::Parse($text, [Globalization.CultureInfo]::InvariantCulture)).LocalDateTime }
+        return [datetime]::SpecifyKind([datetime]::Parse($text, [Globalization.CultureInfo]::InvariantCulture), [DateTimeKind]::Local)
+    } catch { return $null }
+}
+
+function Get-DailyDigest {
+    <#
+        Gunluk insan-dili ozetini mevcut host gunlugu + kesinti raporlarindan kurar.
+        Saf/yan etkisiz kisim ayri tutulur ki sentetik gece olaylariyla test edilebilsin.
+    #>
+    param(
+        [string[]]$LogLines = @(),
+        [object[]]$OutageReports = @(),
+        [datetime]$PeriodStart = (Get-Date).AddDays(-1),
+        [datetime]$PeriodEnd = (Get-Date),
+        [bool]$CurrentOk = $true,
+        [string]$CurrentSummary = '',
+        [string]$HostName = $env:COMPUTERNAME,
+        [string]$Version = $script:AppVersion
+    )
+    $entries = New-Object System.Collections.ArrayList
+    $lineSequence = 0
+    foreach ($line in @($LogLines)) {
+        if ([string]$line -notmatch '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') { continue }
+        $when = $null
+        try { $when = [datetime]::SpecifyKind([datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture), [DateTimeKind]::Local) } catch { continue }
+        if ($when -lt $PeriodStart -or $when -gt $PeriodEnd) { continue }
+        [void]$entries.Add([pscustomobject]@{ At = $when; Sequence = $lineSequence; Text = [string]$line })
+        $lineSequence++
+    }
+
+    $incidents = New-Object System.Collections.ArrayList
+    $active = $null
+    $reboots = New-Object System.Collections.ArrayList
+    # Ayni saniyedeki reboot ve [DUZELDI] satirlarinda dosya sirasini koru;
+    # aksi halde PS 5 Sort-Object onlari ters cevirip reboot'u olaya baglamayabilir.
+    foreach ($entry in @($entries | Sort-Object At, Sequence)) {
+        $text = [string]$entry.Text
+        if ($text -match 'ANLIK AG SORUNU:') {
+            $missing = ''
+            if ($text -match 'Eksik:\s*([^\.]+)\.') { $missing = [string]$Matches[1] }
+            if (-not $active) {
+                $active = [pscustomobject]@{
+                    startedAt = $entry.At.ToString('o'); endedAt = ''; missing = $missing
+                    recovered = $false; rebooted = $false; rebootAt = ''; diagnosis = ''; class = ''; reportOutcome = ''
+                }
+                [void]$incidents.Add($active)
+            } elseif ($missing -and $active.missing -notmatch [regex]::Escape($missing)) {
+                $active.missing = (@(@($active.missing -split ',') + @($missing -split ',')) | Where-Object { $_ } | Select-Object -Unique) -join ','
+            }
+        }
+        if ($text -match 'makine yeniden acildi; restart butceye yazildi') {
+            [void]$reboots.Add([pscustomobject]@{ at = $entry.At.ToString('o'); text = $text })
+            if ($active) { $active.rebooted = $true; $active.rebootAt = $entry.At.ToString('o') }
+        }
+        if ($text -match '\[DUZELDI\]') {
+            if ($active) {
+                $active.endedAt = $entry.At.ToString('o')
+                $active.recovered = $true
+                $active = $null
+            }
+        } elseif ($active -and $text -match 'SONUC: tum kontroller tamam') {
+            # Bazi tek-prob (IP) alarmlari tam kontrolde zaten saglikli cikabilir ve
+            # Invoke-Alerts [DUZELDI] anonsu basmaz. Tamamen saglikli dongu olayi kapatir;
+            # saatler sonraki yeni kesinti onceki olaya yanlis eklenmesin.
+            $active.endedAt = $entry.At.ToString('o')
+            $active.recovered = $true
+            $active = $null
+        }
+    }
+
+    foreach ($report in @($OutageReports)) {
+        if (-not $report) { continue }
+        $reportAt = ConvertTo-DailyLocalDateTime $report.generated
+        $recoveredAt = ConvertTo-DailyLocalDateTime $report.recoveredAt
+        $outageAt = ConvertTo-DailyLocalDateTime $report.outageStartUtc
+        $isInPeriod = (($reportAt -and $reportAt -ge $PeriodStart -and $reportAt -le $PeriodEnd) -or ($recoveredAt -and $recoveredAt -ge $PeriodStart -and $recoveredAt -le $PeriodEnd))
+        if (-not $isInPeriod) { continue }
+        $anchor = if ($outageAt) { $outageAt } elseif ($reportAt) { $reportAt } else { $PeriodStart }
+        $match = $null
+        $best = [double]::MaxValue
+        foreach ($i in $incidents) {
+            $started = $null
+            try { $started = [datetime]::Parse([string]$i.startedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime() } catch { }
+            if (-not $started) { continue }
+            $distance = [Math]::Abs(($started - $anchor).TotalMinutes)
+            if ($distance -lt $best -and $distance -le 180) { $best = $distance; $match = $i }
+        }
+        if (-not $match) {
+            $startAt = if ($anchor -lt $PeriodStart) { $PeriodStart } else { $anchor }
+            $match = [pscustomobject]@{
+                startedAt = $startAt.ToString('o'); endedAt = ''; missing = ''
+                recovered = $false; rebooted = $false; rebootAt = ''; diagnosis = ''; class = ''; reportOutcome = ''
+            }
+            [void]$incidents.Add($match)
+        }
+        $match.class = [string]$report.class
+        $match.reportOutcome = [string]$report.outcome
+        switch ([string]$report.class) {
+            'upstream' {
+                $match.diagnosis = 'Ağ geçidi yanıt veriyordu, ancak dış bağlantı başarısızdı. Olası yön üst ağ/firewall veya ISS. DHCP/DNS ping ve traceroute yanıt vermemiş; ICMP engeli olabileceği için tek başına kesin cihaz teşhisi sayılmaz.'
+            }
+            'local-link' { $match.diagnosis = 'Sorun bilgisayarın yerel ağ bağlantısı/adaptör katmanında görünüyordu.' }
+            'local-dhcp' { $match.diagnosis = 'Sorun IP adresi/DHCP alma veya yenileme katmanında görünüyordu.' }
+            'local-segment' { $match.diagnosis = 'Bilgisayar ile ağ geçidi arasındaki yerel ağ bölümünde sorun görünüyordu.' }
+            default { $match.diagnosis = 'Olay için kesin ağ katmanı sınıflandırılamadı.' }
+        }
+        if ($recoveredAt) {
+            $match.endedAt = $recoveredAt.ToString('o')
+            $match.recovered = $true
+        }
+    }
+
+    # Host reboot kaydini, ayni saniyede [DUZELDI] satiri once yazilmis olsa bile
+    # en yakin son kesintiye bagla. (Gercek reboot'ta acilis/iyilesme satirlari ayni saniye.)
+    foreach ($reboot in $reboots) {
+        $rebootAt = ConvertTo-DailyLocalDateTime $reboot.at
+        if (-not $rebootAt) { continue }
+        $match = $null
+        $best = [double]::MaxValue
+        foreach ($i in $incidents) {
+            $started = ConvertTo-DailyLocalDateTime $i.startedAt
+            if (-not $started -or $started -gt $rebootAt) { continue }
+            $ended = ConvertTo-DailyLocalDateTime $i.endedAt
+            if ($ended -and $ended -lt $rebootAt.AddMinutes(-10)) { continue }
+            $distance = [Math]::Abs(($rebootAt - $started).TotalMinutes)
+            if ($distance -lt $best) { $best = $distance; $match = $i }
+        }
+        if ($match) { $match.rebooted = $true; $match.rebootAt = $rebootAt.ToString('o') }
+    }
+
+    $incidents = @($incidents | Sort-Object { try { [datetime]::Parse([string]$_.startedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) } catch { [datetime]::MaxValue } })
+    $reboots = @($reboots | Sort-Object { [datetime]::Parse([string]$_.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) })
+    $incidentCount = $incidents.Count
+    $rebootCount = $reboots.Count
+    if ($incidentCount -eq 0 -and $rebootCount -eq 0) {
+        $headline = 'Rapor döneminde kayda değer ağ kesintisi veya gerçek yeniden başlatma görülmedi.'
+    } elseif ($CurrentOk -and @($incidents | Where-Object { -not $_.recovered }).Count -eq 0) {
+        $headline = "$incidentCount ağ olayı görüldü; $rebootCount gerçek yeniden başlatma oldu. Rapor hazırlanırken bağlantı ve kontroller sağlıklı."
+    } else {
+        $headline = "$incidentCount ağ olayı ve $rebootCount gerçek yeniden başlatma kaydedildi. Rapor hazırlanırken sistemde hâlâ kontrol edilmesi gereken durum var."
+    }
+
+    $md = New-Object System.Collections.ArrayList
+    [void]$md.Add("# Günlük durum özeti — $HostName")
+    [void]$md.Add('')
+    [void]$md.Add(('- Dönem: **' + $PeriodStart.ToString('dd.MM.yyyy HH:mm') + ' – ' + $PeriodEnd.ToString('dd.MM.yyyy HH:mm') + '**'))
+    [void]$md.Add(('- Üretildi: ' + $PeriodEnd.ToString('dd.MM.yyyy HH:mm') + ' | sürüm: ' + $Version))
+    [void]$md.Add('')
+    [void]$md.Add('## Kısa özet')
+    [void]$md.Add('')
+    [void]$md.Add($headline)
+    if ($CurrentSummary) { [void]$md.Add(('Son kontrol: ' + $CurrentSummary)) }
+    [void]$md.Add('')
+    [void]$md.Add('## Önemli olaylar')
+    [void]$md.Add('')
+    if ($incidentCount -eq 0) { [void]$md.Add('- Ağ kesintisi kaydı yok.') }
+    foreach ($i in $incidents) {
+        $startAt = ConvertTo-DailyLocalDateTime $i.startedAt
+        $endAt = ConvertTo-DailyLocalDateTime $i.endedAt
+        $span = if ($startAt) { $startAt.ToString('dd.MM HH:mm') } else { 'saat bilinmiyor' }
+        if ($endAt) {
+            $endLabel = if ($startAt -and $startAt.Date -eq $endAt.Date) { $endAt.ToString('HH:mm') } else { $endAt.ToString('dd.MM HH:mm') }
+            $minutes = [Math]::Max(1, [int][Math]::Ceiling(($endAt - $startAt).TotalMinutes))
+            $span += '–' + $endLabel + ' (yaklaşık ' + $minutes + ' dk)'
+        } else { $span += '–devam ediyor' }
+        $line = '- **' + $span + '** — Ağ erişim sorunu'
+        if ($i.missing) { $line += ' (başarısız kontroller: ' + $i.missing + ')' }
+        $line += '.'
+        [void]$md.Add($line)
+        if ($i.diagnosis) { [void]$md.Add(('  - Teşhis: ' + $i.diagnosis)) }
+        if ($i.rebooted) {
+            $rt = $i.rebootAt
+            try { $rt = ([datetime]::Parse([string]$i.rebootAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToLocalTime().ToString('HH:mm') } catch { }
+            [void]$md.Add(('  - Makine ' + $rt + ' civarında gerçekten yeniden başlatıldı.'))
+        } elseif ($i.recovered) {
+            [void]$md.Add('  - Bağlantı geri geldi; reboot gerekmedi.')
+        } else {
+            [void]$md.Add('  - Rapor hazırlanırken bu olay için kurtuluş kaydı yoktu.')
+        }
+    }
+    [void]$md.Add('')
+    [void]$md.Add('## Gerçek yeniden başlatmalar')
+    [void]$md.Add('')
+    if ($rebootCount -eq 0) { [void]$md.Add('- Bu dönemde gerçek reboot olmadı.') }
+    foreach ($r in $reboots) {
+        $rt = $r.at
+        try { $rt = ([datetime]::Parse([string]$r.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToLocalTime().ToString('dd.MM.yyyy HH:mm') } catch { }
+        [void]$md.Add(('- ' + $rt + ' — reboot tamamlandı ve makine yeniden açıldı.'))
+    }
+    [void]$md.Add('')
+    [void]$md.Add('## Rapor hazırlanırken')
+    [void]$md.Add('')
+    [void]$md.Add($(if ($CurrentOk) { '- Son watchdog kontrolü sağlıklı.' } else { '- Son watchdog kontrolünde sorun vardı: ' + $CurrentSummary }))
+    [void]$md.Add('')
+    [void]$md.Add('Not: Sınıflandırma mevcut ağ ölçümlerine dayanır. Ping/traceroute yanıt vermemesi, kurum ağında ICMP engelliyse tek başına arızalı cihazı kanıtlamaz.')
+    return [pscustomobject]@{ Summary = $headline; Incidents = @($incidents); Reboots = @($reboots); Markdown = ($md -join "`r`n"); IncidentCount = $incidentCount; RebootCount = $rebootCount }
+}
+
+function Write-DailyReport {
+    <# Her gün yerel saatle 08:00 sonrasında, son rapordan bu ana kadarki insan-dili özeti bir kez üretir. #>
+    param([datetime]$At = (Get-Date), [bool]$CurrentOk = $true, [string]$CurrentSummary = '')
+    if ($At.TimeOfDay -lt [TimeSpan]::FromHours(8)) { return '' }
+    $dir = Join-Path $BaseDir 'diag'
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $day = $At.ToString('yyyy-MM-dd')
+    $base = Join-Path $dir ('daily-' + $day)
+    $jsonPath = $base + '.json'
+    $mdPath = $base + '.md'
+    if (Test-Path -LiteralPath $jsonPath) {
+        # If a prior cycle wrote the report files but died before state/last-run.json,
+        # restore the panel pointer from the committed JSON instead of leaving it hidden.
+        try {
+            $existing = Get-Content -LiteralPath $jsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $existingPath = if ($existing.markdownPath) { [string]$existing.markdownPath } else { $mdPath }
+            if (-not (Test-Path -LiteralPath $existingPath) -and $existing.markdown) {
+                [System.IO.File]::WriteAllText($existingPath, [string]$existing.markdown, (New-Object System.Text.UTF8Encoding($true)))
+            }
+            $null = Invoke-StateUpdate {
+                param($st)
+                $st.LastDailyReport = $existingPath
+                $st.LastDailyReportAt = $existing.generated
+                $st.LastDailyReportEnd = $existing.periodEnd
+                $st.LastDailySummary = [string]$existing.summary
+            }
+            return $existingPath
+        } catch { return $mdPath }
+    }
+
+    $state = Get-State
+    $periodStart = $At.AddDays(-1)
+    if ($state.LastDailyReportEnd) {
+        try {
+            $last = ConvertTo-DailyLocalDateTime $state.LastDailyReportEnd
+            if ($last -lt $At) { $periodStart = $last }
+        } catch { }
+    }
+    $logLines = @()
+    try { if (Test-Path -LiteralPath $LogFile) { $logLines = @(Get-Content -LiteralPath $LogFile -Encoding UTF8 -ErrorAction SilentlyContinue) } } catch { }
+    $reports = @()
+    try {
+        foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter 'outage-*.json' -File -ErrorAction SilentlyContinue)) {
+            try { $reports += (Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { }
+        }
+    } catch { }
+    $digest = Get-DailyDigest -LogLines $logLines -OutageReports $reports -PeriodStart $periodStart -PeriodEnd $At -CurrentOk $CurrentOk -CurrentSummary $CurrentSummary -HostName $env:COMPUTERNAME -Version $script:AppVersion
+    $report = [ordered]@{
+        generated = $At.ToString('o'); periodStart = $periodStart.ToString('o'); periodEnd = $At.ToString('o')
+        host = $env:COMPUTERNAME; version = $script:AppVersion; summary = $digest.Summary
+        currentOk = $CurrentOk; incidentCount = $digest.IncidentCount; rebootCount = $digest.RebootCount
+        incidents = @($digest.Incidents); reboots = @($digest.Reboots); markdownPath = $mdPath; markdown = $digest.Markdown
+    }
+    $json = $report | ConvertTo-Json -Depth 8
+    foreach ($item in @(@{ Path = $jsonPath; Content = $json }, @{ Path = $mdPath; Content = $digest.Markdown })) {
+        $tmp = $item.Path + '.tmp.' + [guid]::NewGuid().ToString('N')
+        [System.IO.File]::WriteAllText($tmp, [string]$item.Content, (New-Object System.Text.UTF8Encoding($true)))
+        try { if (Test-Path -LiteralPath $item.Path) { [System.IO.File]::Replace($tmp, $item.Path, $null) } else { [System.IO.File]::Move($tmp, $item.Path) } }
+        catch { try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }; [System.IO.File]::WriteAllText($item.Path, [string]$item.Content, (New-Object System.Text.UTF8Encoding($true))) }
+    }
+    try {
+        $null = Invoke-StateUpdate {
+            param($st)
+            $st.LastDailyReport = $mdPath
+            $st.LastDailyReportAt = $At.ToString('o')
+            $st.LastDailyReportEnd = $At.ToString('o')
+            $st.LastDailySummary = [string]$digest.Summary
+        }
+    } catch { }
+    try {
+        $old = @(Get-ChildItem -LiteralPath $dir -Filter 'daily-*.md' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -Skip 90)
+        foreach ($f in $old) { try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ([System.IO.Path]::ChangeExtension($f.FullName, '.json')) -Force -ErrorAction SilentlyContinue } catch { } }
+    } catch { }
+    Write-Log 'INFO' ('gunluk durum raporu hazir: ' + $mdPath + ' | ' + $digest.Summary)
+    return $mdPath
 }
 
 function Invoke-PreRebootRepair {
@@ -2719,6 +3010,9 @@ function Write-JsonStatus {
         publicIp = $script:PublicIp
         lastRepair = $lastRepair
         lastOutageReport = [string]$state.LastOutageReport
+        dailyReportPath = [string]$state.LastDailyReport
+        dailyReportAt = $(if ($state.LastDailyReportAt) { (ConvertTo-DailyLocalDateTime $state.LastDailyReportAt).ToString('dd.MM.yyyy HH:mm') } else { '' })
+        dailySummary = [string]$state.LastDailySummary
         repairWatch = $(if (Get-ScheduledTask -TaskName 'RemoteHostRepairWatch' -ErrorAction SilentlyContinue) { 1 } else { 0 })
         taskInstalled = $(if ($task) { $true } elseif ($taskKnown) { $false } else { 'unknown' })
         taskVisible = $taskKnown
@@ -2874,6 +3168,10 @@ function Invoke-Watchdog {
     Send-Heartbeat -Ok $allOk -Summary $summary
     Invoke-Alerts -AllOk $allOk -Summary $summary
     Invoke-RebootIfNeeded -AllOk $allOk
+    if (-not $Check) {
+        try { $null = Write-DailyReport -At (Get-Date) -CurrentOk $allOk -CurrentSummary $summary }
+        catch { Write-Log 'WARN' ('gunluk rapor uretilemedi: ' + $_.Exception.Message) }
+    }
     $null = Write-JsonStatus -AllOk $allOk -Summary $summary -BadCount $badCount
     return $badCount
 }
