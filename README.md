@@ -1,140 +1,204 @@
 # remote-watchdog
 
-English / Türkçe (bilingual)
+> English / Türkçe
+>
+> [README.en.md](README.en.md) · License: [MIT](LICENSE) · Contributions: [CONTRIBUTING.md](CONTRIBUTING.md) / [CONTRIBUTING.en.md](CONTRIBUTING.en.md)
 
-This repository contains a self-healing Windows watchdog for a remote PC: detects what broke, repairs the network in steps, reboots only when justified, and notifies you (Telegram / healthchecks). Everything is implemented in PowerShell 5.1 with no external dependencies.
+RemoteWatchdog is a self-healing Windows watchdog for a remote PC. It detects connectivity and service problems, repairs the network in stages, reboots only when necessary, and keeps you informed via Telegram and healthchecks.
 
-Bu depo, uzaktaki bilgisayarı kendini onaran bir Windows watchdog olarak çalıştırır: neyin bozulduğunu tespit eder, ağı kademeli olarak onarır, yalnızca gerekliyse yeniden başlatır ve sizi bilgilendirir (Telegram / healthchecks). Her şey PowerShell 5.1 ile, bağımlılık olmadan yazılmıştır.
+RemoteWatchdog, uzaktaki bir Windows PC için kendi kendini iyileştiren bir watchdog'dur. Bağlantı ve servis sorunlarını tespit eder, ağ sorunlarını aşamalı şekilde onarır, sadece gerekli olduğunda yeniden başlatır ve Telegram/healthchecks üzerinden sizi bilgilendirir.
 
----
+## Overview / Genel bakış
 
-English
+### English
 
-Run a remote PC like a server: a two-part PowerShell watchdog that detects what broke, repairs it in steps (restarting the machine if that is the only cure) and keeps you informed.
+The project has two parts:
 
-Most connection problems are "the machine is on but unreachable", and that needs two layers:
+1. Host side: runs on the remote machine as SYSTEM and checks local Windows services, RDP/CRD, clock sync, network health, sleep/hibernate settings, and reboot policy.
+2. Client side: runs on your own PC and monitors whether the remote machine is reachable over TCP. If the link is down, it alerts you and can launch the remote desktop or browser automatically.
 
-1. On-site (host): finds the root cause from scratch, repairs it, and pings outward.
-2. Remote (client): if the link is really down, alerts you and opens the client automatically.
+A tray panel exposes status, logs, actions, and repair flows, while the scripts are intentionally dependency-free and work with Windows PowerShell 5.1.
 
-Everything runs on stock Windows with Windows PowerShell 5.1. No modules, no agents, no build step.
+### Türkçe
 
-What it does
+Proje iki parçadan oluşur:
 
-| Module | Where it runs | Job |
-|---|---|---|
-| `host/RemoteHostWatchdog.ps1` | Remote PC (as SYSTEM) | Checks CRD/RDP/clock/network/power, repairs the network in steps, configures services, sends heartbeats and Telegram alerts, reboots when required |
-| `host/Protect-OpenDocuments.ps1` | Remote PC (user session) | Autosaves open Word/Excel documents, shortens AutoRecover, saves-and-closes before a reboot |
-| `host/Collect-Diagnostics.ps1` | Remote PC | 14 days of event log + network/DHCP/power analysis with a scored suspect list (read-only) |
-| `host/Enable-ConsoleAutoLogon.ps1` | Remote PC (admin) | Optional auto console logon after a reboot (stores the password in plain text - see warning) |
-| `client/RemoteClientWatchdog.ps1` | Your own PC | TCP reachability test, disconnect alert, automatic RDP/browser launch |
-| `ui/RemoteWatchdogPanel.ps1` | Both machines (user session) | System-tray control panel: status, pending work, all settings, forced-shutdown switch, logs, diagnostics |
+1. Host tarafı: uzaktaki makinada SYSTEM olarak çalışır ve yerel Windows servisleri, RDP/CRD, saat senkronu, ağ sağlığı, uyku/hibernasyon ayarları ve yeniden başlatma politikasını kontrol eder.
+2. Client tarafı: kendi bilgisayarınızda çalışır ve uzaktaki makinenin TCP üzerinden erişilebilir olup olmadığını izler. Bağlantı koparsa sizi uyarır ve otomatik olarak uzak masaüstü veya tarayıcı açabilir.
 
-Plus `lib/` (shared helpers, the data contract, settings definitions), `install/` (admin installers) and `tests/` (regression suites).
+Tepsi paneli durum, günlük, işlemler ve onarım akışlarını gösterir; betikler kasıtlı olarak bağımlılık içermeden Windows PowerShell 5.1 ile çalışacak şekilde tasarlanmıştır.
 
-Install
+## What it does / Neler yapar
 
-Copy or clone the whole folder to the target machine, then:
+| Module / Modül | English summary / Türkçe özeti |
+| --- | --- |
+| `host/RemoteHostWatchdog.ps1` | Checks CRD/RDP/network/clock/power, repairs issues step-by-step, configures services, sends heartbeats and Telegram alerts, and reboots only when justified. / CRD/RDP/ağ/saat/güç kontrollerini yapar, sorunları aşamalı onarır, servisleri ayarlar, heartbeat ve Telegram uyarıları gönderir, gerekliyse yeniden başlatır. |
+| `host/Protect-OpenDocuments.ps1` | Auto-saves open Word/Excel documents and prevents a reboot from trampling unsaved work. / Açık Word/Excel belgelerini otomatik kaydeder ve yeniden başlatmanın kaydedilmemiş çalışma kaybına neden olmasını engeller. |
+| `host/Collect-Diagnostics.ps1` | Collects logs and network diagnostics, without modifying the system. / Sistemi değiştirmeden günlük ve ağ teşhis verilerini toplar. |
+| `client/RemoteClientWatchdog.ps1` | Tests reachability to the target, alerts on disconnect, and can open RDP/browser. / Hedefe erişimi test eder, kopma halinde uyarır ve RDP/tarayıcı açabilir. |
+| `ui/RemoteWatchdogPanel.ps1` | Tray app with status, logs, settings, pending work, and network repair actions. / Durum, günlük, ayarlar, bekleyen işler ve ağ onarımı işlemlerini içeren tepsi uygulaması. |
+| `lib/` | Shared helpers, JSON handling, TCP checks, settings contract, and normalization helpers. / Paylaşılan yardımcılar, JSON işlemleri, TCP kontrolleri, ayar sözleşmesi ve normalizasyon yardımcıları. |
+| `install/` | Host/client installers with hash verification and task registration. / Hash doğrulaması ve görev kaydı içeren kurulum betikleri. |
+| `tests/` | Regression tests to validate watchdog behavior and UI flows. / Watchdog davranışını ve arayüz akışını doğrulayan regresyon testleri. |
 
-Security: verify hashes before running anything. The install scripts check every file's SHA256 themselves and abort if anything fails. You can also run it manually:
+## Installation / Kurulum
 
-```
+### English
+
+Copy or clone the repository to the target machine, then verify the files before running anything:
+
+```powershell
 .\tools\Verify-Hashes.ps1
+```
+
+Then install the host or client:
+
+```powershell
+# Remote PC (host, Administrator required)
 powershell -ExecutionPolicy Bypass -File .\install\Install-Host.ps1 -TelegramToken '123:ABC' -TelegramChatId '456'
-```
 
-Remote PC (host, needs Administrator)
-
-It produces a read-only diagnostics report first, installs the watchdog and document-saver tasks, registers the tray panel at logon, and finally tells you to re-register Google Chrome Remote Desktop at `https://remotedesktop.google.com/headless` (the one step a script cannot do). It re-launches itself as administrator when needed. Useful switches: `-DryRun`, `-KeepSleep` (laptop profile), `-SkipTray`.
-
-Your own PC (client, no admin needed)
-
-```
+# Your own PC (client, no admin required)
 powershell -ExecutionPolicy Bypass -File .\install\Install-Client.ps1 -Target '100.64.1.5:3389' -RdpFile 'C:\rdp\office.rdp' -TelegramToken '123:ABC' -TelegramChatId '456'
 ```
 
-`Target` must be an address reachable from that machine (a Tailscale IP, for example - a public IP without port forwarding is not reachable). Without `Target`, only the Google/CRD signal path is tested.
+### Türkçe
 
-Panel
+Depoyu hedef makinaya kopyala veya klonla, ardından hiçbir şeyi çalıştırmadan önce dosyaları doğrula:
 
-```
-.\ui\RemoteWatchdogPanel.ps1                 # starts in the tray (double-click the icon = panel)
-.\ui\RemoteWatchdogPanel.ps1 -Install        # start automatically at logon
-.\ui\RemoteWatchdogPanel.ps1 -SelfTest       # build the UI, produce a PNG, exit (for testing)
+```powershell
+.\tools\Verify-Hashes.ps1
 ```
 
-The tray icon is colour-coded: green (healthy), red (problem), grey (no data). Four tabs: Status, Pending work, Settings, Log. The header shows the next automatic check as a live countdown and a "Repair network / internet" button.
+Sonra host veya client kurulumunu çalıştır:
 
-Repairing the network from the panel
+```powershell
+# Uzak PC (host, Yönetici gerekli)
+powershell -ExecutionPolicy Bypass -File .\install\Install-Host.ps1 -TelegramToken '123:ABC' -TelegramChatId '456'
 
-The button first tests network health (IP, DNS, HTTPS, Google signal). If everything is fine, no rung is applied at all. If not, it walks the rungs in order:
-
-1. flush DNS cache + restart Dnscache
-2. renew the DHCP lease
-3. reconnect Wi-Fi / bounce the network adapter
-4. restart Dhcp + NlaSvc and the adapter driver
-5. winsock + IPv4 reset (needs a reboot to take effect)
-
-A separate "Repair network / internet" window opens and streams the log lines live while the repair runs. The repair runs as SYSTEM, so a normal user in the panel still gets it without a UAC prompt: the panel writes `C:\ProgramData\RemoteWatchdog\repair-request.json` and one of two tasks picks it up.
-
-Restart policy
-
-Behaviour depends on blackout settings; by default restarts happen during blackout hours and are avoided during daytime. See the full project docs for details.
-
-Signals that the machine is still alive
-
-- Telegram - one message on state change, repeated every AlertRepeatHours while a problem lasts.
-- healthchecks.io - pass `-HeartbeatUrl https://hc-ping.com/<uuid>` and you get e-mail/call when the ping stops.
-- GitHub Actions - `.github/workflows/machine-health.yml` pings from the outside and alerts via Telegram when the machine does not answer.
-
-Audible alerts (voice + film effects)
-
-Every important event is announced in two layers: a ready-made effect first, then a short Turkish sentence (voice). The voice engine is tried in this order: edge-tts (cloud), Piper TTS (local), Windows SAPI voice.
-
-What a human must do (no script can)
-
-- BIOS: Restore on AC Power Loss = Power On and Wake on LAN = Enabled.
-- Re-register Google CRD if host.json is gone.
-- RDP over the internet needs port forwarding or VPN.
-
-Data contract
-
-`last-run.json` is written only through `lib/Contract.ps1` and read only through `Read-Status`. The reader normalises older or unversioned files so old and new versions stay compatible.
-
-Tests
-
-```
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-All.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\tests\Test-UI.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\ui\RemoteWatchdogPanel.ps1 -SelfTest -PreviewPath out.png
+# Kendi bilgisayarın (client, yönetici gerektirmez)
+powershell -ExecutionPolicy Bypass -File .\install\Install-Client.ps1 -Target '100.64.1.5:3389' -RdpFile 'C:\rdp\office.rdp' -TelegramToken '123:ABC' -TelegramChatId '456'
 ```
 
----
+> Security note / Güvenlik notu: the installer validates SHA256 values and aborts on mismatch. / kurulum betiği SHA256 doğrulamasını yapar ve uyumsuzlukta işlemi durdurur.
 
-Türkçe
+## Panel / Tray panel
 
-Uzaktaki bilgisayarı server gibi çalıştıran, bağlantı koparsa kendini onaran (gerekirse yeniden başlatan) iki parçalı PowerShell watchdog projesidir.
+### English
 
-Bağlantı sorunlarının çoğu "makine açık ama erişilemiyor" şeklindedir ve iki ayrı katmanda çözülür:
+Start the tray panel directly:
 
-1. Yerinde (host): bağlantıyı bozan şeyi sıfırdan tespit edip onarır ve dışarıya "nabız" gönderir.
-2. Uzaktan (istemci): bağlantı gerçekten düşmüşse uyarır ve istemciyi otomatik açar.
+```powershell
+.\ui\RemoteWatchdogPanel.ps1
+```
 
-Her şey stok Windows ve Windows PowerShell 5.1 üzerinde çalışır. Modul yok, ajanın kurulması yok, derleme adımı yok.
+Useful options:
 
-Klasör yapısı
+```powershell
+.\ui\RemoteWatchdogPanel.ps1 -Install
+.\ui\RemoteWatchdogPanel.ps1 -SelfTest
+```
 
-| Dosya | Nerede çalışır | Görev |
-|---|---|---|
-| `host/RemoteHostWatchdog.ps1` | Uzak bilgisayar (SYSTEM) | CRD/RDP/uyku/saat/ağ testi, kademeli ağ onarımı, otomatik servis ayarları, heartbeat, Telegram uyarısı, gerekirse reboot |
-| `host/Protect-OpenDocuments.ps1` | Uzak bilgisayar (kullanıcı oturumu) | Kaydedilmemiş Word/Excel belgelerini periyodik kaydeder, AutoRecover'ı kısaltır, reboot öncesi kaydedip kapatır |
-| `host/Collect-Diagnostics.ps1` | Uzak bilgisayar | 14 günlük olay günlüğü + ağ/DHCP/uyku analizi, puanlı şüpheli listesi (hiçbir şeyi değiştirmez) |
-| `host/Enable-ConsoleAutoLogon.ps1` | Uzak bilgisayar (admin) | Reboot sonrası konsola otomatik giriş (opt-in, riskli) |
-| `client/RemoteClientWatchdog.ps1` | Kendi bilgisayarın | Uzak hedefe TCP erişim testi, kopma uyarısı, RDP/tarayıcı otomatik açma |
-| `ui/RemoteWatchdogPanel.ps1` | Her iki makinede (kullanıcı oturumu) | Sistem tepsisi kontrol paneli: durum, bekleyen işler, tüm ayarlar, daima zorla kapatma anahtarı, loglar, teşhis raporu |
+The tray icon changes color based on status: green = healthy, red = problem, gray = no data. It includes status, pending work, settings, and log tabs.
 
-Kurulum
+### Türkçe
 
-Klasörün tamamını hedef makineye kopyala (veya `git clone`), sonra kurulum betiklerini çalıştır. Güvenlik için SHA256 doğrulaması yapmayı unutmayın (`.\tools\Verify-Hashes.ps1`). Host için `Install-Host.ps1`, client için `Install-Client.ps1` kullanılır.
+Tepsi panelini doğrudan başlat:
 
-Daha fazla ayrıntı için README.en.md ve orijinal README.md dosyalarındaki tam açıklamalara bakabilirsiniz.
+```powershell
+.\ui\RemoteWatchdogPanel.ps1
+```
+
+İşe yarar seçenekler:
+
+```powershell
+.\ui\RemoteWatchdogPanel.ps1 -Install
+.\ui\RemoteWatchdogPanel.ps1 -SelfTest
+```
+
+Tepsi simgesi duruma göre renk değiştirir: yeşil = sağlıklı, kırmızı = sorun, gri = veri yok. Durum, bekleyen işler, ayarlar ve günlük sekmeleri bulunur.
+
+## Repair flow / Onarım akışı
+
+### English
+
+When the panel triggers a repair, the remote machine tries the network recovery ladder in order:
+
+1. Flush DNS cache
+2. Renew DHCP lease
+3. Reconnect the adapter / network stack
+4. Restart critical services and driver path
+5. Reset Winsock / IPv4
+6. Reboot only if the failure is still present and policy allows it
+
+The repair runs as SYSTEM, so a user session can request it without a UAC prompt. The system writes a repair request to a file and a scheduled watcher task applies it.
+
+### Türkçe
+
+Panel bir onarım tetiklediğinde uzak makine ağ kurtarma basamaklarını sırayla dener:
+
+1. DNS önbelleğini temizle
+2. DHCP sözleşmesini yenile
+3. Ağ bağdaştırıcısını / ağ yığınını yeniden bağlat
+4. Kritik servisleri ve sürücü yolunu yeniden başlat
+5. Winsock / IPv4 sıfırla
+6. Hala sorun varsa ve politika izin veriyorsa sadece o zaman yeniden başlat
+
+Onarım SYSTEM hesabı ile çalışır; böylece kullanıcı oturumu UAC penceresi açmadan onarım isteyebilir. Sistem bir onarım isteğini dosyaya yazar ve zamanlanmış izleyici görevi bunu uygular.
+
+## Security / Güvenlik
+
+### English
+
+- Verify the repository files with `Verify-Hashes.ps1` before use.
+- Telegram token is stored in `config.json` securely when possible (DPAPI-backed handling for the Windows local machine scope).
+- Do not pass secrets directly on a command line where possible.
+- Keep the Windows host machine patched and the network path validated.
+
+### Türkçe
+
+- Kullanımdan önce dosyaları `Verify-Hashes.ps1` ile doğrula.
+- Telegram token, mümkün olduğunda `config.json` içinde güvenli şekilde tutulur (Windows yerel makine kapsamı için DPAPI destekli kullanım).
+- Gizli bilgileri mümkün olduğunca komut satırına doğrudan geçirme.
+- Windows host makinesini güncel tut ve ağ yolunu doğrula.
+
+## Health checks / Sağlık kontrolleri
+
+### English
+
+The watchdog can report health through Telegram and healthchecks.io, and the repo also includes a GitHub Actions workflow to ping the machine externally.
+
+### Türkçe
+
+Watchdog, Telegram ve healthchecks.io üzerinden sağlık bildirimi yapabilir; ayrıca repo içinde makinayı harici olarak yoklayan bir GitHub Actions akışı da bulunur.
+
+## Contributing / Katkı
+
+- See [CONTRIBUTING.md](CONTRIBUTING.md) for project rules and pull-request flow.
+- [CONTRIBUTING.en.md](CONTRIBUTING.en.md) is the English version.
+- Gelişime katkıda bulunmak için [CONTRIBUTING.md](CONTRIBUTING.md) dosyasına bak.
+
+## License / Lisans
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
+
+Bu proje MIT Lisansı altında lisanslanmıştır. [LICENSE](LICENSE) dosyasına bakın.
+
+## Quick start / Hızlı başlangıç
+
+### English
+
+```powershell
+.\tools\Verify-Hashes.ps1
+powershell -ExecutionPolicy Bypass -File .\install\Install-Host.ps1 -TelegramToken '123:ABC' -TelegramChatId '456'
+.\ui\RemoteWatchdogPanel.ps1
+```
+
+### Türkçe
+
+```powershell
+.\tools\Verify-Hashes.ps1
+powershell -ExecutionPolicy Bypass -File .\install\Install-Host.ps1 -TelegramToken '123:ABC' -TelegramChatId '456'
+.\ui\RemoteWatchdogPanel.ps1
+```
+
+This README is intentionally bilingual so both English and Turkish readers have the same operational guidance. / Bu README kasıtlı olarak çift dillidir; böylece hem İngilizce hem Türkçe okuyucular aynı operasyonel rehbere sahip olur.
