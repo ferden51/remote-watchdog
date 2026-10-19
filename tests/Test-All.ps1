@@ -686,6 +686,19 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'günlük rapor upstream teşhisini ve ICMP belirsizliğini insan dilinde yazar' (($dailyTest.Markdown -match 'Ağ geçidi yanıt veriyordu') -and ($dailyTest.Markdown -match 'ICMP engeli'))
     $emptyDaily = Get-DailyDigest -LogLines @() -OutageReports @() -PeriodStart ([datetime]'2026-10-16T08:00:00') -PeriodEnd ([datetime]'2026-10-17T08:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
     Ok 'günlük rapor reboot yoksa bunu açıkça söyler' ($emptyDaily.Markdown -match 'gerçek reboot olmadı')
+    <#
+        18 Eki gecesi: NIC kapali, watchdog 12 saat boyunca "SONUC: 1 sorun -> Internet"
+        yazdi ama rapor 0 olay cikardi (yalniz "ANLIK AG SORUNU" sayiliyordu).
+        Artik basarisiz kontrol dongusu de olay baslangici sayilir.
+    #>
+    $sonucLogs = @(
+        '2026-10-18 22:49:40 [WARN] SONUC: 1 sorun -> Internet',
+        '2026-10-18 22:54:40 [WARN] SONUC: 1 sorun -> Internet',
+        '2026-10-19 10:27:42 [ALERT] [DUZELDI] DESKTOP-TEST | Internet=OK'
+    )
+    $sonucDaily = Get-DailyDigest -LogLines $sonucLogs -OutageReports @() -PeriodStart ([datetime]'2026-10-18T00:00:00') -PeriodEnd ([datetime]'2026-10-19T11:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
+    Ok 'günlük rapor sadece "SONUC: N sorun" ile yazan uzun kesintiyi de sayiyor' (($sonucDaily.IncidentCount -eq 1) -and [bool]$sonucDaily.Incidents[0].recovered)
+    Ok 'günlük rapor dönemini gün başından alıyor (reboot dilimlemesin)' ($hostText -match '\$periodStart = \$At\.Date')
     $flapLogs = @(
         '2026-10-16 09:19:12 [ALERT] ANLIK AG SORUNU: Ağ sorunu. Eksik: IP. Onarım başlatılıyor.',
         '2026-10-16 09:20:02 [INFO] SONUC: tum kontroller tamam.',
@@ -747,7 +760,16 @@ if ($Section -eq 0 -or $Section -eq 1) {
     $rungCode = if ($rungFn.Success) { Strip-CodeComments $rungFn.Value } else { '' }
     $routeFn = [regex]::Match($hostText, '(?s)function Get-DefaultRouteIfIndex\s*\{.*?\r?\n\}')
     Ok 'host varsayilan route adapterini yalniz fiziksel NIC listesinden seciyor' ($routeFn.Success -and ($routeFn.Value -match 'Get-NetAdapter -Physical') -and ($routeFn.Value -match 'physicalIndices'))
-    Ok 'host NIC PnP yenilemesi varsayilan fiziksel adapterle sinirli' ($rungCode -match 'Get-DefaultRouteIfIndex' -and $rungCode -match 'Get-NetAdapter -Physical' -and $rungCode -match 'Disable-PnpDevice' -and $rungCode -match 'Enable-PnpDevice')
+    $physFn = [regex]::Match($hostText, '(?s)function Get-DefaultPhysicalAdapter\s*\{.*?\r?\n\}')
+    Ok 'host kapali NIC iyen de bulabilmek icin fiziksel adaptor yardimcisi var' ($physFn.Success -and ($physFn.Value -match 'Get-DefaultPhysicalAdapter'))
+    <#
+        18 Eki 22:24: Disable-PnpDevice NIC'i kapatti ve Enable-PnpDevice basarisiz
+        veya kalici olarak devre disi birakti -> gece NIC kapis kaldi, 5 ardisik reboot.
+        Disabled durum reboot'ta da geri gelmedigi icin PnP DISABLE YASAK.
+    #>
+    Ok 'host onarimda PnP DISABLE kullanmiyor (NIC kapis kalmasin)' ($rungCode -notmatch 'Disable-PnpDevice')
+    Ok 'host kapali adaptoru yeniden ACAR ve miniportu yeniler' (($rungCode -match 'Enable-NetAdapter') -and ($rungCode -match 'Enable-PnpDevice') -and ($rungCode -match 'Restart-NetAdapter'))
+    Ok 'host disabled NIC varken reboot baslatmiyor (bos reboot dongusu olmamali)' ($rbnFn2.Success -and ($rbnFn2.Value -match 'Get-DefaultPhysicalAdapter') -and ($rbnFn2.Value -match "yeniden başlatma BASLATILMADI") -and ($rbnFn2.Value -match "'Disabled'"))
     Ok 'host NIC yenilemesi tum NetEnabled aygitlari / VPNleri dolasmiyor' (($rungCode -notmatch 'Win32_NetworkAdapter -Filter') -and ($rungCode -notmatch 'pnputil /restart-device'))
     Ok 'host reboot-siz kademede DNS/ARP, servisler ve fiziksel NIC DHCP sirali' (($rungCode -match 'ipconfig /flushdns') -and ($rungCode -match 'arp -d \*') -and ($rungCode -match "'Dhcp', 'Dnscache', 'NlaSvc', 'WlanSvc', 'dot3svc'") -and ($rungCode -match 'ipconfig /release') -and ($rungCode -match 'ipconfig /renew'))
     Ok 'host reboot-siz onarimda Winsock/IP reset calistirmiyor' (($rungCode -notmatch 'netsh winsock reset') -and ($rungCode -notmatch 'netsh int ipv4 reset'))

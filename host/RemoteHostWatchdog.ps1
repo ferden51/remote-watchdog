@@ -524,6 +524,26 @@ function Get-DefaultRouteIfIndex {
     return 0
 }
 
+function Get-DefaultPhysicalAdapter {
+    <#
+        Varsayilan FIZIKSEL adaptör (basitçe yenilenecek olan). Önce default route'a
+        sahip 'Up' adaptörü döner. Yoksa — NIC disabled/down iken ag var ama route
+        yoktur — herhangi bir fiziksel adaptörü döner ki böylece onu YENIDEN ACABILIRIZ.
+        Sanal/VPN adaptorleri asla hedeflenmez. Bulunamazsa $null.
+    #>
+    try {
+        $physical = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.HardwareInterface })
+        if ($physical.Count -eq 0) { return $null }
+        $up = @($physical | Where-Object { $_.Status -eq 'Up' })
+        if ($up.Count -gt 0) {
+            $idx = Get-DefaultRouteIfIndex
+            if ($idx -gt 0) { $hit = @($up | Where-Object { [int]$_.ifIndex -eq $idx } | Select-Object -First 1); if ($hit) { return ($hit | Select-Object -First 1) } }
+            return ($up | Select-Object -First 1)
+        }
+        return ($physical | Select-Object -First 1)
+    } catch { return $null }
+}
+
 function Test-FastPing {
     <#  Tek paket, sert zaman asimli ping (kurumsal gateway'ler ICMP kapatabilir; yokluk tek basina hukumsuzdur, ARP ile birlikte okunur). #>
     param([string]$Ip, [int]$TimeoutMs = 1000)
@@ -834,6 +854,21 @@ function Get-DailyDigest {
             } elseif ($missing -and $active.missing -notmatch [regex]::Escape($missing)) {
                 $active.missing = (@(@($active.missing -split ',') + @($missing -split ',')) | Where-Object { $_ } | Select-Object -Unique) -join ','
             }
+        } elseif (-not $active -and $text -match 'SONUC:\s*[1-9]\d*\s*sorun') {
+            <#
+                BAŞLANGIÇ SINIRI GENİŞLETİLDİ. Rapor daha önce yalnız "ANLIK AG SORUNU"
+                satırlarını sayıyordu; uzun bir kesinti boyunca "ANLIK AG SORUNU" yazılmayıp
+                her 5 dk'da "SONUC: N sorun" yazıldığı için rapor 0 olay gösteriyordu
+                (18 Eki gecesi: NIC kapalı, 12 saate yakın 0 olay). Artık başarısız kontrol
+                döngüsü de olay başlangıcı sayılır.
+            #>
+            $missing = 'Internet'
+            if ($text -match 'SONUC:\s*\d+\s*sorun\s*->\s*(.+)$') { $missing = ([string]$Matches[1]).Trim() }
+            $active = [pscustomobject]@{
+                startedAt = $entry.At.ToString('o'); endedAt = ''; missing = $missing
+                recovered = $false; rebooted = $false; rebootAt = ''; diagnosis = ''; class = ''; reportOutcome = ''
+            }
+            [void]$incidents.Add($active)
         }
         if ($text -match 'makine yeniden acildi; restart butceye yazildi') {
             [void]$reboots.Add([pscustomobject]@{ at = $entry.At.ToString('o'); text = $text })
@@ -993,33 +1028,35 @@ function Write-DailyReport {
     $base = Join-Path $dir ('daily-' + $day)
     $jsonPath = $base + '.json'
     $mdPath = $base + '.md'
-    if (Test-Path -LiteralPath $jsonPath) {
-        # If a prior cycle wrote the report files but died before state/last-run.json,
-        # restore the panel pointer from the committed JSON instead of leaving it hidden.
-        try {
-            $existing = Get-Content -LiteralPath $jsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $existingPath = if ($existing.markdownPath) { [string]$existing.markdownPath } else { $mdPath }
-            if (-not (Test-Path -LiteralPath $existingPath) -and $existing.markdown) {
-                [System.IO.File]::WriteAllText($existingPath, [string]$existing.markdown, (New-Object System.Text.UTF8Encoding($true)))
-            }
-            $null = Invoke-StateUpdate {
-                param($st)
-                $st.LastDailyReport = $existingPath
-                $st.LastDailyReportAt = $existing.generated
-                $st.LastDailyReportEnd = $existing.periodEnd
-                $st.LastDailySummary = [string]$existing.summary
-            }
-            return $existingPath
-        } catch { return $mdPath }
-    }
-
     $state = Get-State
-    $periodStart = $At.AddDays(-1)
-    if ($state.LastDailyReportEnd) {
-        try {
-            $last = ConvertTo-DailyLocalDateTime $state.LastDailyReportEnd
-            if ($last -lt $At) { $periodStart = $last }
-        } catch { }
+    <#
+        DÖNEM = BUGÜNÜN BAŞINDAN ŞİMDİKİ ZAMANA KADAR (00:00 -> simdi).
+        Eski "son rapordan bu ana" dönemi, reboot nedeniyle rapor silinip yeniden
+        üretildiğinde her üretimde daralıyor ve geç reboot'ları kaçırıyordu
+        (18 Eki: 5 reboot'un çoğu raporda görünmedi). Start-of-day dönemi tüm günü kapsar.
+        Aynı günün raporu varsa ve 1 saatten taze ise yeniden üretme (reboot silinmesi durumunda
+        60 dk beklenmez; dosya zaten silinmiştir).
+    #>
+    $periodStart = $At.Date
+    if (Test-Path -LiteralPath $jsonPath) {
+        $fresh = $false
+        try { $ageMin = ((Get-Date) - (Get-Item -LiteralPath $jsonPath).LastWriteTime).TotalMinutes; $fresh = ($ageMin -le 60) } catch { }
+        if ($fresh) {
+            try {
+                $existing = Get-Content -LiteralPath $jsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                if (-not (Test-Path -LiteralPath $mdPath) -and $existing.markdown) {
+                    [System.IO.File]::WriteAllText($mdPath, [string]$existing.markdown, (New-Object System.Text.UTF8Encoding($true)))
+                }
+                $null = Invoke-StateUpdate {
+                    param($st)
+                    $st.LastDailyReport = $mdPath
+                    $st.LastDailyReportAt = $existing.generated
+                    $st.LastDailyReportEnd = $existing.periodEnd
+                    $st.LastDailySummary = [string]$existing.summary
+                }
+                return $mdPath
+            } catch { }
+        }
     }
     $logLines = @()
     try { if (Test-Path -LiteralPath $LogFile) { $logLines = @(Get-Content -LiteralPath $LogFile -Encoding UTF8 -ErrorAction SilentlyContinue) } } catch { }
@@ -1121,7 +1158,7 @@ function Get-RepairRungName {
     param([int]$Rung)
     switch ($Rung) {
         1 { return 'DNS ve ARP/neighbor onbellegini temizleme' }
-        2 { return 'yalnizca varsayilan fiziksel adaptoru PnP stop/start' }
+        2 { return 'varsayilan fiziksel adaptoru AC (kapalıysa) ve miniportu yeniden baslat' }
         3 { return 'DHCP/DNS/NLA/WLAN/802.1X servislerini tazeleme' }
         4 { return 'yalnizca varsayilan fiziksel adaptorde DHCP adresini yenileme' }
         5 { return 'Winsock/IP catalog reseti (reboot gerektirir; reboot-siz onarim disinda)' }
@@ -1142,43 +1179,40 @@ function Invoke-NetworkRepair {
             } catch { }
         }
         2 {
-            # PnP stop/start yalnizca etkin varsayilan FIZIKSEL NIC'e uygulanir.
-            # Sanal, VPN ve Hyper-V adaptorlari asla fallback/hedef yapilmaz.
+            <#
+                ADAPTOR YENILEME — GÜVENLI. KESINLIKLE PnP DISABLE KULLANMAZ: 18 Eki
+                22:24'te Disable-PnpDevice adaptörü kapatti, Enable-PnpDevice ya
+                gerceklesmedi ya da adaptör tekrar 'Disabled' olarak kaldi (18 Eki gecesi
+                NIC kapis kald; sabah elle acildi, 5 ardisik reboot dongusu). Disabled
+                durum bir acilis sürücüsü değildir, dolayisiyla REBOOT'TA BILE GERI GELMEZ.
+                Yeni kural:
+                  1) Fiziksel adaptörü bul (Up değilse bile — kapalı adaptörü bulabilmek gerekir).
+                  2) Up değilse önce AC (Enable-NetAdapter, yedek Enable-PnpDevice).
+                  3) Up ise miniport'u yeniden baslat (Restart-NetAdapter). Bu kismi
+                     DISABLE ETMEZ, kalici devre disi birakmaz.
+            #>
             try {
-                $ifIdx = Get-DefaultRouteIfIndex
-                $a = $null
-                if ($ifIdx -gt 0) { $a = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.ifIndex -eq $ifIdx -and $_.HardwareInterface -and $_.Status -eq 'Up' } | Select-Object -First 1 }
+                $a = Get-DefaultPhysicalAdapter
                 if (-not $a) {
-                    $done += 'varsayilan fiziksel adaptor saptanamadi; sanal/VPN adaptorlerine dokunulmadan atlandi'
+                    $done += 'fiziksel adaptor bulunamadi; adaptor islemi atlandi'
                 } else {
-                    $pnpId = [string]$a.PnPDeviceID
-                    $disabled = $false
-                    $restarted = $false
-                    if ($pnpId -and (Get-Command Disable-PnpDevice -ErrorAction SilentlyContinue) -and (Get-Command Enable-PnpDevice -ErrorAction SilentlyContinue)) {
-                        try {
-                            Disable-PnpDevice -InstanceId $pnpId -Confirm:$false -ErrorAction Stop | Out-Null
-                            $disabled = $true
-                            Start-Sleep -Seconds 2
-                            Enable-PnpDevice -InstanceId $pnpId -Confirm:$false -ErrorAction Stop | Out-Null
-                            $disabled = $false
-                            $restarted = $true
-                            $done += ($a.Name + ' varsayilan fiziksel adaptor PnP stop/start yapildi')
-                        } catch {
-                            if ($disabled) { try { Enable-PnpDevice -InstanceId $pnpId -Confirm:$false -ErrorAction Stop | Out-Null; $disabled = $false } catch { } }
-                            Write-Log 'WARN' ('PnP adaptor yenileme basarisiz (' + $a.Name + '): ' + $_.Exception.Message)
-                        } finally {
-                            if ($disabled) {
-                                try { Enable-PnpDevice -InstanceId $pnpId -Confirm:$false -ErrorAction Stop | Out-Null; $disabled = $false }
-                                catch {
-                                    try { Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction Stop; $disabled = $false; $done += ($a.Name + ' Enable-NetAdapter yedegiyle yeniden acildi') }
-                                    catch { Write-Log 'ERR' ('devre disi kalan adaptoru yeniden acma basarisiz (' + $a.Name + ')') }
-                                }
-                            }
+                    if ([string]$a.Status -ne 'Up') {
+                        $pnpId = [string]$a.PnPDeviceID
+                        $opened = $false
+                        try { Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction Stop; $opened = $true; $done += ($a.Name + ' özellikle yeniden açıldı (Up değildi)') }
+                        catch {
+                            if ($pnpId) { try { Enable-PnpDevice -InstanceId $pnpId -Confirm:$false -ErrorAction Stop | Out-Null; $opened = $true; $done += ($a.Name + ' PnP enable ile yeniden açıldı') } catch { } }
                         }
+                        if ($opened) { Write-Log 'INFO' ('fiziksel adaptor yeniden açıldı: ' + $a.Name) }
+                        else { $done += ($a.Name + ' açılamadı; miniport restart atlandı') }
+                        Start-Sleep -Seconds 3
                     }
-                    if (-not $restarted) {
-                        try { Restart-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction Stop; $done += ($a.Name + ' varsayilan fiziksel adaptor miniport yenilendi') }
-                        catch { $done += ($a.Name + ' fiziksel adaptor yenilenemedi: ' + $_.Exception.Message) }
+                    $a2 = Get-NetAdapter -Name $a.Name -ErrorAction SilentlyContinue
+                    if ($a2 -and [string]$a2.Status -eq 'Up') {
+                        try { Restart-NetAdapter -Name $a2.Name -Confirm:$false -ErrorAction Stop; $done += ($a2.Name + ' miniport yenilendi (güvenli)') }
+                        catch { $done += ($a2.Name + ' miniport yenilenemedi: ' + $_.Exception.Message) }
+                    } else {
+                        $done += ($(if ($a2) { $a2.Name } else { '?' }) + ' hala Up değil; miniport restart atlandı')
                     }
                 }
             } catch { }
@@ -2674,6 +2708,21 @@ function Invoke-RebootIfNeeded {
         Butce kaydi ancak makine gercekten yeniden acildiginda (Sync-RebootAccounting) yazilir.
         Boylece "24 saatte 3 restart" iddiasi, olmayan restart'lar icin butce yakmaz.
     #>
+    <#
+        DISABLED ADAPTOR KORUMASI. 18 Eki: PnP disable NIC'i kapatti ve NIC reboot'ta da
+        geri gelmeyerek acik kaldi (5 ardisik reboot dongusu). Disabled/NotPresent durum
+        bir acilis sürücüsü olmadigi icin REBOOT BU DURUMU DÜZELTMEZ; reboot bosuna
+        atar ve agi kapali birakir. Bu yuzden fiziksel adaptör devre disi ise restart
+        BASLATILMAZ — elle acilmasi (veya onarimda tekrar denenmesi) gerekir.
+    #>
+    $phys = Get-DefaultPhysicalAdapter
+    if ($phys) {
+        $st = [string]$phys.Status
+        if ($st -eq 'Disabled' -or $st -eq 'NotPresent' -or $st -eq 'LowerLayerDown') {
+            Write-Log 'ALERT' ('yeniden başlatma BASLATILMADI: fiziksel adaptör ' + $phys.Name + ' durumda (' + $st + '). Reboot bu durumu düzeltmez (devre dışı kalıcıdır); adaptörü elle açın ya da onarımı tekrar deneyin.')
+            return
+        }
+    }
     $null = Invoke-StateUpdate { param($st) $st.PendingRebootUtc = (Get-Date).ToString('o') }
     Write-Log 'ALERT' ('yeniden başlatma istendi: ' + [int]$cfg.RebootDelaySeconds + ' sn sonra (onaylanan restart ' + $kept.Count + '/' + [int]$cfg.MaxRestartsPerDay + '; bu restart gerçekten olunca sayılacak)')
     $null = Start-CountdownReboot -Reason 'onarilamayan baglanti sorunu' -Problems $badNames -CancelOnRecovery

@@ -1617,7 +1617,7 @@ function Show-RepairWindow {
     [void]$sp.Children.Add($row)
 
     $hint = New-Object System.Windows.Controls.TextBlock
-    $hint.Text = 'Yeniden başlatmasız adımlar sistem günlüğünden izlenir: DNS/ARP → varsayılan fiziksel adaptör PnP yenileme → DHCP/DNS/NLA/WLAN/802.1X servisleri → fiziksel adaptörde DHCP renew. Sanal/VPN adaptörlerine dokunulmaz. Winsock/IP reseti bu akışta yapılmaz; reboot son çaredir.'
+    $hint.Text = 'Yeniden başlatmasız adımlar sistem günlüğünden izlenir: DNS/ARP → varsayılan fiziksel adaptörün miniport yenilemesi (kapalıysa önce açılır, devre dışı bırakılmaz) → DHCP/DNS/NLA/WLAN/802.1X servisleri → fiziksel adaptörde DHCP renew. Sanal/VPN adaptörlerine dokunulmaz. Winsock/IP reseti bu akışta yapılmaz; reboot son çaredir.'
     $hint.Foreground = Bx 'Muted'
     $hint.FontSize = 11
     $hint.TextWrapping = 'Wrap'

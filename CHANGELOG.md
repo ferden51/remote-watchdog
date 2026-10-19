@@ -4,6 +4,40 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.14] - 2026-10-19
+
+**Kritik güvenlik düzeltmesi:** 18 Eki gecesi ağ kartı kapalı kaldı ve sabah elle
+açıldı; 5 ardışık reboot döngüsü yaşandı.
+
+### 🐞 Düzeltilen
+
+- **NIC PnP kapat/aç kaldırıldı.** Kademe 2, `Disable-PnpDevice` ile fiziksel adaptörü
+  kapatıp `Enable-PnpDevice` ile açıyordu. 18 Eki 22:24'te adaptör kapandı ama
+  `Enable-PnpDevice` ya gerçekleşmedi ya da adaptör kalıcı olarak "Disabled" kaldı.
+  Disabled durum bir açılış sürücüsü olmadığı için **reboot'ta bile geri gelmiyor**;
+  bu yüzden NIC gece boyunca kapalı kaldı ve 5 ardışık reboot boşuna atıldı.
+  Yeni kural: adaptörü **asla PnP ile kapatma**; kapalıysa önce **aç** (`Enable-NetAdapter`,
+  yedek `Enable-PnpDevice`), sonra **miniport'u yeniden başlat** (`Restart-NetAdapter`,
+  kalıcı devre dışı bırakmaz).
+- **Kapalı NIC artık bulunup açılıyor.** `Get-DefaultPhysicalAdapter` yardımcısı,
+  default route yoksa bile fiziksel adaptörü bulur (Up değilse bile) ki onu yeniden
+  açabilsin. Sanal/VPN adaptörleri asla hedeflenmez.
+- **Disabled adaptörde reboot başlatılmıyor.** Fiziksel adaptör `Disabled`/`NotPresent`
+  iken otomatik restart artık **başlatılmıyor** — reboot bu durumu düzeltmez ve ağı
+  kapalı bırakır; elle açılması beklenir.
+- **Günlük rapor dilimlemesi giderildi.** Rapor dönemi artık gün başından (00:00)
+  simdiki zamana kadar; reboot nedeniyle yeniden üretildiğinde önceki olaylar kaybolmuyor.
+  Ayrıca 1 saatten eskiyse otomatik yenileniyor.
+- **Uzun kesinti artık sayılıyor.** Rapor önceden yalnız "ANLIK AG SORUNU" satırlarını
+  sayıyordu; uzun bir kesintide bu satır yazılmayıp her 5 dk'da "SONUC: N sorun"
+  yazıldığı için 12 saatlik kesinti 0 olay olarak görünüyordu. Artık başarısız kontrol
+  döngüsü de olay başlangıcı sayılıyor.
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **422 kontrol** (0 hata); `Test-UI` 54/0;
+  `Verify-OutageLogic` 34/0.
+
 ## [1.3.13] - 2026-10-17
 
 Reboot öncesi ağ kurtarma adımları reboot’siz, fiziksel adaptörle sınırlı ve son-çare
