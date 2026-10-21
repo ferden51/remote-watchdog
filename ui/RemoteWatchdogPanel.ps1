@@ -855,20 +855,19 @@ $Xaml = @'
     <!-- UST BAR -->
     <Border Grid.Row="0" Background="{StaticResource Side}" BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Padding="16,10">
       <Grid>
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/>
-        </Grid.ColumnDefinitions>
-        <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
           <Border Width="28" Height="28" CornerRadius="8" Background="#1D2733" Margin="0,0,10,0">
             <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="#98A0AA" HorizontalAlignment="Center" VerticalAlignment="Center"/>
           </Border>
           <StackPanel VerticalAlignment="Center">
             <TextBlock Text="RemoteWatchdog" Style="{StaticResource H1}" FontSize="15"/>
-            <TextBlock x:Name="TxtSubtitle" Text=" kontrol yukleniyor..." Style="{StaticResource Small}"/>
+            <TextBlock x:Name="TxtSubtitle" Text=" kontrol yükleniyor…" Style="{StaticResource Small}" TextTrimming="CharacterEllipsis"/>
           </StackPanel>
         </StackPanel>
 
-        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+        <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="8,0,0,0">
           <Border x:Name="RoleBadge" Background="#1D2733" CornerRadius="12" Padding="10,3" Margin="0,0,8,0">
             <TextBlock x:Name="TxtRole" Text="" Foreground="{StaticResource Ok}" FontWeight="SemiBold" FontSize="11"/>
           </Border>
@@ -879,11 +878,11 @@ $Xaml = @'
             <TextBlock x:Name="TxtNext" Text="Otomatik: -" Foreground="{StaticResource Mut}" FontWeight="SemiBold" FontSize="11"/>
           </Border>
         </StackPanel>
-        <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
+        <WrapPanel Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
           <Button x:Name="BtnCheck" Content="Şimdi denetle" Style="{StaticResource BtnAccent}" Margin="0,0,6,0"/>
-          <Button x:Name="BtnRepairNet" Content="Ağı onar" Style="{StaticResource Btn}" Margin="0,0,6,0" ToolTip="Yeniden başlatmasız kademeler: DNS/ARP önbelleği → yalnızca varsayılan fiziksel adaptör → ağ servisleri → o adaptörde DHCP yenileme. Düzelince durur. Winsock/IP reseti bu akışta yapılmaz; reboot son çaredir."/>
-          <Button x:Name="BtnReboot" Content="Yeniden başlat" Style="{StaticResource BtnDanger}"/>
-        </StackPanel>
+          <Button x:Name="BtnRepairNet" Content="Ağı onar" Style="{StaticResource Btn}" Margin="0,0,6,0" ToolTip="Ağı yeniden başlatmadan sırayla onarır: DNS/ARP önbelleği → varsayılan fiziksel bağdaştırıcı → ağ hizmetleri → DHCP yenileme. Sorun çözülünce durur; IP yapılandırmasını sıfırlamaz. Yeniden başlatma son çaredir."/>
+          <Button x:Name="BtnReboot" Content="Bu bilgisayarı yeniden başlat" Style="{StaticResource BtnDanger}" ToolTip="Bu makineyi yeniden başlatır. Açık belgeler önce kaydedilmeye çalışılır."/>
+        </WrapPanel>
       </Grid>
     </Border>
 
@@ -896,18 +895,36 @@ $Xaml = @'
         <Grid>
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <StackPanel Grid.Row="0">
-            <Button x:Name="NavConn" Content="Bağlantılar" Style="{StaticResource Nav}" Tag="conn" Margin="0,0,0,4"/>
             <Button x:Name="NavOverview" Content="Genel durum" Style="{StaticResource Nav}" Tag="overview" Margin="0,0,0,4"/>
+            <Button x:Name="NavConn" Content="Bağlantılar" Style="{StaticResource Nav}" Tag="conn" Margin="0,0,0,4"/>
             <Button x:Name="NavActions" Content="Bekleyen işler" Style="{StaticResource Nav}" Tag="actions" Margin="0,0,0,4"/>
             <Button x:Name="NavSettings" Content="Ayarlar" Style="{StaticResource Nav}" Tag="settings" Margin="0,0,0,4"/>
             <Button x:Name="NavLog" Content="Günlük" Style="{StaticResource Nav}" Tag="log" Margin="0,0,0,4"/>
           </StackPanel>
           <StackPanel Grid.Row="2">
+            <Border Style="{StaticResource CardStyle}" Padding="8,8" Margin="0,0,0,8" ToolTip="Sayaçlar son günlük rapordaki bağlantı kesintisi olaylarını ve doğrulanmış gerçek yeniden başlatmaları gösterir.">
+              <StackPanel>
+                <TextBlock Text="GÜNLÜK ÖZET" Foreground="{StaticResource Mut}" FontSize="10" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                <Grid>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                  <StackPanel Grid.Column="0" Margin="0,0,4,0">
+                    <TextBlock x:Name="TxtDailyIncidentCount" Text="—" Foreground="{StaticResource Bad}" FontSize="22" FontWeight="Bold" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Kesinti" Style="{StaticResource Small}" FontSize="10" TextAlignment="Center" TextWrapping="Wrap"/>
+                  </StackPanel>
+                  <StackPanel Grid.Column="1" Margin="4,0,0,0">
+                    <TextBlock x:Name="TxtDailyRebootCount" Text="—" Foreground="{StaticResource Warn}" FontSize="22" FontWeight="Bold" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Gerçek yeniden başlatma" Style="{StaticResource Small}" FontSize="10" TextAlignment="Center" TextWrapping="Wrap"/>
+                  </StackPanel>
+                </Grid>
+                <TextBlock x:Name="TxtDailyStatsPeriod" Text="Rapor dönemi: —" Foreground="{StaticResource Mut}" FontSize="10" TextWrapping="Wrap" Margin="0,5,0,0" TextAlignment="Center"/>
+                <TextBlock x:Name="TxtDailyStatsUpdated" Text="Güncelleme: —" Foreground="{StaticResource Mut}" FontSize="10" TextWrapping="Wrap" Margin="0,2,0,0" TextAlignment="Center"/>
+              </StackPanel>
+            </Border>
             <Border Style="{StaticResource CardStyle}" Padding="12,10">
               <StackPanel>
-                <TextBlock x:Name="TxtBlackout" Text="Blackout: -" Style="{StaticResource Small}"/>
-                <TextBlock x:Name="TxtTaskState" Text="Gorev: -" Style="{StaticResource Small}" Margin="0,4,0,0"/>
-                <TextBlock x:Name="TxtUptime" Text="Uptime: -" Style="{StaticResource Small}" Margin="0,4,0,0"/>
+                <TextBlock x:Name="TxtBlackout" Text="Zorla kapatma aralığı: —" Style="{StaticResource Small}" TextWrapping="Wrap"/>
+                <TextBlock x:Name="TxtTaskState" Text="Görev: —" Style="{StaticResource Small}" Margin="0,4,0,0"/>
+                <TextBlock x:Name="TxtUptime" Text="Çalışma süresi: —" Style="{StaticResource Small}" Margin="0,4,0,0"/>
               </StackPanel>
             </Border>
             <Button x:Name="BtnDiag" Content="Teşhis raporu üret" Style="{StaticResource Btn}" Margin="0,10,0,0"/>
@@ -967,8 +984,8 @@ $Xaml = @'
               <StackPanel>
                 <TextBlock Text="Zorla kapatma" Style="{StaticResource H2}" Foreground="{StaticResource Warn}" Margin="0,0,0,6"/>
                 <TextBlock Style="{StaticResource Small}" TextWrapping="Wrap"
-                           Text="Blackout saatlerinde (varsayilan 18:00-08:00 ve Cumartesi-Pazar) Word/Excel/PPT zorla kapatilip makine yeniden baslatilir. Diger saatlerde yalnizca bilgilendirilir ve karar size kalir."/>
-                <Button x:Name="BtnForceNow" Content="Simdi zorla kapat ve yeniden baslat" Style="{StaticResource BtnDanger}" HorizontalAlignment="Left" Margin="0,12,0,0"/>
+                           Text="Zorla kapatma aralığında (varsayılan 18:00–08:00 ve hafta sonu) Word, Excel ve PowerPoint zorla kapatılıp bilgisayar yeniden başlatılır. Diğer saatlerde yalnızca bilgilendirilir ve karar size kalır."/>
+                <Button x:Name="BtnForceNow" Content="Daima zorla kapatmayı aç ve yeniden başlat" Style="{StaticResource BtnDanger}" HorizontalAlignment="Left" Margin="0,12,0,0" ToolTip="Kalıcı zorla kapatma ayarını açar ve bu bilgisayarı geri sayımlı yeniden başlatmaya alır."/>
               </StackPanel>
             </Border>
           </StackPanel>
@@ -1295,21 +1312,66 @@ function Show-RebootModal {
     $cancel.Margin = New-Object System.Windows.Thickness(0, 0, 10, 0)
     $cancel.Background = Bx '#21252B'
     $cancel.Foreground = Bx 'Text'
-    $cancel.BorderThickness = New-Object System.Windows.Thickness(0)
+    $cancel.BorderBrush = Bx 'Line'
+    $cancel.BorderThickness = New-Object System.Windows.Thickness(1)
     $cancel.Cursor = [System.Windows.Input.Cursors]::Hand
     $cancel.ToolTip = 'Yeniden başlatmayı iptal eder. Bağlantı sorunu düzelmezse bir sonraki denemede tekrar sorulur.'
     [void]$row.Children.Add($cancel)
 
     $soon = New-Object System.Windows.Controls.Button
     $soon.Name = 'BtnRebootSoon'
-    $soon.Content = 'Şimdi yeniden başlat'
+    $soon.Content = 'Devam et'
     $soon.FontSize = 13
     $soon.Padding = New-Object System.Windows.Thickness(18, 9, 18, 9)
     $soon.Background = Bx '#5A2020'
     $soon.Foreground = Bx 'Text'
-    $soon.BorderThickness = New-Object System.Windows.Thickness(0)
+    $soon.BorderBrush = Bx '#5A2020'
+    $soon.BorderThickness = New-Object System.Windows.Thickness(1)
     $soon.Cursor = [System.Windows.Input.Cursors]::Hand
+    $soon.ToolTip = 'Modalı kapatır; sistemin geri sayımı sürer ve süre sonunda yeniden başlatılır.'
     [void]$row.Children.Add($soon)
+
+    # Dinamik pencerede ana panelin Btn stili kapsam disinda kalir. Varsayilan
+    # WPF Button sablonu tiklama/odak durumunda acik renkli chrome cizebildigi
+    # icin modal dugmelerine koyu temali, durumlari acikca tanimlanmis sablon ver.
+    $modalButtonStyle = [System.Windows.Markup.XamlReader]::Parse(@'
+<Style xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+       TargetType="{x:Type Button}">
+  <Setter Property="OverridesDefaultStyle" Value="True"/>
+  <Setter Property="Template">
+    <Setter.Value>
+      <ControlTemplate TargetType="{x:Type Button}">
+        <Border x:Name="Chrome" Background="{TemplateBinding Background}"
+                BorderBrush="{TemplateBinding BorderBrush}"
+                BorderThickness="{TemplateBinding BorderThickness}"
+                CornerRadius="6" Padding="{TemplateBinding Padding}">
+          <ContentPresenter Content="{TemplateBinding Content}"
+                            ContentTemplate="{TemplateBinding ContentTemplate}"
+                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </Border>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True">
+            <Setter TargetName="Chrome" Property="Background" Value="#303640"/>
+          </Trigger>
+          <Trigger Property="IsPressed" Value="True">
+            <Setter TargetName="Chrome" Property="Background" Value="#11151A"/>
+            <Setter TargetName="Chrome" Property="BorderBrush" Value="#6B9FFF"/>
+          </Trigger>
+          <Trigger Property="IsKeyboardFocused" Value="True">
+            <Setter TargetName="Chrome" Property="BorderBrush" Value="#6B9FFF"/>
+          </Trigger>
+          <Trigger Property="IsEnabled" Value="False">
+            <Setter TargetName="Chrome" Property="Opacity" Value="0.55"/>
+          </Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate>
+    </Setter.Value>
+  </Setter>
+</Style>
+'@)
+    $cancel.Style = $modalButtonStyle
+    $soon.Style = $modalButtonStyle
 
     [void]$sp.Children.Add($row)
     $w.Content = $sp
@@ -1333,6 +1395,7 @@ function Show-RebootModal {
                 $script:RebootCancelAt = Get-Date
                 # Yeniden basista zaman asimi bayragi sifirlanir (tekrar deneme calisir).
                 $script:RebootCancelTimeoutFired = $false
+                if ($script:RebootHintBox) { $script:RebootHintBox.Text = 'İptal isteği gönderildi. Host onayı bekleniyor; bu sırada geri sayım durmayabilir.' }
                 # Dosya yazilamazsa (ACL/disk) istek HICbir yere gitmemistir; ama biz
                 # istegi isaretlemis ve butonlari kilitlemis olurduk. O zaman kullanici
                 # onay beklerken "istek iletildi" yalanini gorur ve hicbir sey olmaz.
@@ -1371,17 +1434,10 @@ function Show-RebootModal {
         })
     $soon.add_Click({
             try {
-                Write-Trace 'restart hemen tetiklendi (kullanicidan)'
-                if ($script:RebootSoonBtn) { $script:RebootSoonBtn.IsEnabled = $false }
-                if ($script:RebootCancelBtn) {
-                    $script:RebootCancelBtn.IsEnabled = $false
-                    $script:RebootCancelBtn.Content = 'Kapatılıyor…'
-                }
-                # Geri sayimin kalan kismini beklemeden kapat; watchdog kendi sayacini
-                # bitirince kapanir. Anons once verilir, sonra kapatilir.
-                Speak-Text 'Bilgisayar şimdi yeniden başlatılıyor.' -Sfx 'reboot' -Force
-                if ($script:RebootHintBox) { $script:RebootHintBox.Text = 'Yeniden başlatma onaylandı — bilgisayar kapanıyor.' }
-            } catch { Write-Trace ('hemen baslat isleyici hatasi: ' + $_.Exception.Message) }
+                Write-Trace 'restart modalinde devam secildi; watchdog geri sayimi suruyor'
+                Close-RebootModal
+                try { Show-Balloon -Title 'Yeniden başlatma sürüyor' -Text 'Geri sayım devam ediyor. Süre dolunca bilgisayar yeniden başlatılacak.' -Icon 'Warning' -Always } catch { }
+            } catch { Write-Trace ('restart devam isleyici hatasi: ' + $_.Exception.Message) }
         })
 
     $script:RebootWin = $w
@@ -2198,6 +2254,17 @@ function Update-Overview {
         (El $script:Win 'TxtRole').Text = $role.RoleText
         (El $script:Win 'TxtRole').Foreground = $(switch ($role.Role) { 'host' { Bx 'Ok' } 'client' { Bx 'Info' } 'both' { Bx 'Accent' } default { Bx 'Warn' } })
         (El $script:Win 'RoleBadge').ToolTip = $role.Tip
+        $hostAvailable = Test-Path -LiteralPath $HostScript
+        $rebootButton = El $script:Win 'BtnReboot'
+        if ($rebootButton) {
+            $rebootButton.IsEnabled = $hostAvailable
+            $rebootButton.ToolTip = if ($hostAvailable) { 'Bu bilgisayarı geri sayımlı olarak yeniden başlatır. Açık belgeler önce kaydedilmeye çalışılır.' } else { 'Bu kurulumda host bileşeni yok; bu düğmeyle yeniden başlatma yapılamaz.' }
+        }
+        $forceButton = El $script:Win 'BtnForceNow'
+        if ($forceButton) {
+            $forceButton.IsEnabled = $hostAvailable
+            if (-not $hostAvailable) { $forceButton.ToolTip = 'Bu kurulumda host bileşeni yok; bu düğme kullanılamaz.' }
+        }
         (El $script:Win 'TxtOverviewSub').Text = $(if ($role.ClientTask -and -not $role.HostTask) { 'Izlenen uzak makine: ' + $role.RemoteName + '  (' + (@($role.Targets) -join ', ') + ')' } elseif ($hj) { [string]$hj.summary } else { 'Watchdog hic calismadi. "Watchdog kur" ile baslat.' })
 
         $cards = New-Object System.Collections.ArrayList
@@ -2241,6 +2308,38 @@ function Update-Overview {
             try { $dailyAt = [string]$hj.dailyReportAt } catch { }
             try { $dailyPath = [string]$hj.dailyReportPath } catch { }
         }
+        $incidentCountBox = El $script:Win 'TxtDailyIncidentCount'
+        $rebootCountBox = El $script:Win 'TxtDailyRebootCount'
+        $dailyPeriodBox = El $script:Win 'TxtDailyStatsPeriod'
+        $dailyUpdatedBox = El $script:Win 'TxtDailyStatsUpdated'
+        if ($incidentCountBox) { $incidentCountBox.Text = '—' }
+        if ($rebootCountBox) { $rebootCountBox.Text = '—' }
+        if ($dailyPeriodBox) { $dailyPeriodBox.Text = 'Rapor dönemi: 08:00 sonrasında hazırlanır' }
+        if ($dailyUpdatedBox) { $dailyUpdatedBox.Text = 'Güncelleme: —' }
+        # Günlük rapor JSON'u incidentCount olarak ayrı kesinti olaylarını,
+        # rebootCount olarak da doğrulanmış gerçek restartları tutar.
+        if ($dailyPath) {
+            $dailyJsonPath = [System.IO.Path]::ChangeExtension($dailyPath, '.json')
+            $dailyReport = Get-Json $dailyJsonPath
+            if ($dailyReport) {
+                if ($incidentCountBox -and $dailyReport.PSObject.Properties['incidentCount']) { $incidentCountBox.Text = [string][int]$dailyReport.incidentCount }
+                if ($rebootCountBox -and $dailyReport.PSObject.Properties['rebootCount']) { $rebootCountBox.Text = [string][int]$dailyReport.rebootCount }
+                if ($dailyPeriodBox -and $dailyReport.periodStart -and $dailyReport.periodEnd) {
+                    try {
+                        $periodStart = [datetime]::Parse([string]$dailyReport.periodStart, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime()
+                        $periodEnd = [datetime]::Parse([string]$dailyReport.periodEnd, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime()
+                        $dailyPeriodBox.Text = 'Dönem: ' + $periodStart.ToString('dd.MM HH:mm') + ' – ' + $periodEnd.ToString('dd.MM HH:mm')
+                    } catch { $dailyPeriodBox.Text = 'Son günlük rapor' }
+                } elseif ($dailyPeriodBox) { $dailyPeriodBox.Text = 'Son günlük rapor' }
+                if ($dailyUpdatedBox) {
+                    if ($dailyAt) { $dailyUpdatedBox.Text = 'Güncelleme: ' + $dailyAt }
+                    elseif ($dailyReport.generated) {
+                        try { $dailyUpdatedBox.Text = 'Güncelleme: ' + ([datetime]::Parse([string]$dailyReport.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime().ToString('dd.MM HH:mm')) }
+                        catch { $dailyUpdatedBox.Text = 'Son günlük rapor' }
+                    }
+                }
+            }
+        }
         $dailyBox = El $script:Win 'TxtDailySummary'
         if ($dailyBox) {
             $dailyBox.Text = $(if ($dailySummary) { $dailySummary } else { 'İlk günlük özet, her gün saat 08:00 sonrasında otomatik hazırlanır.' })
@@ -2258,20 +2357,20 @@ function Update-Overview {
 
         $env = New-Object System.Collections.ArrayList
         if ($hj) {
-            [void]$env.Add('son kontrol    : ' + $hj.generated)
-            [void]$env.Add('uptime         : ' + [math]::Round([double]$hj.uptimeMinutes / 60, 1) + ' saat')
-            [void]$env.Add('kamu IP        : ' + $(if ($hj.publicIp) { $hj.publicIp } else { '?' }))
-            [void]$env.Add('gorev           : ' + $hj.taskState + $(if ($hj.taskInstalled) { '' } else { '  (kurulu degil)' }))
-            [void]$env.Add('blackout        : ' + $(if ($hj.inBlackout) { 'AKTIF - zorla kapatma izinli' } else { 'kapali - sadece bilgilendirme' }))
-            [void]$env.Add('tatil           : ' + $(if ($hj.isHoliday) { 'evet' } else { 'hayir' }) + '  (mod: ' + $hj.config.holidayMode + ')')
-            [void]$env.Add('restart         : ' + $hj.config.restartPolicy + '  |  blackout ' + $hj.config.blackoutStart + ':00-' + $hj.config.blackoutEnd + ':00  |  tam gun: ' + ((@($hj.config.blackoutFullDays)) -join ','))
-            [void]$env.Add('daima zorla     : ' + $(if ($hj.config.forceRestartAlways) { 'ACIK' } else { 'kapali' }) + $(if ($hj.config.forceRestartUntil) { '  (' + $hj.config.forceRestartUntil + ')' } else { '' }))
-            [void]$env.Add('ardisik hata    : ' + $hj.state.consecutiveFailures + '  |  ag onarim kademesi: ' + $hj.state.netRepairRung)
-            [void]$env.Add('tatil listesi   : ' + ((@($hj.config.holidays)) -join ', '))
+            [void]$env.Add('Son kontrol                 : ' + $hj.generated)
+            [void]$env.Add('Çalışma süresi              : ' + [math]::Round([double]$hj.uptimeMinutes / 60, 1) + ' saat')
+            [void]$env.Add('Genel IP adresi             : ' + $(if ($hj.publicIp) { $hj.publicIp } else { '?' }))
+            [void]$env.Add('Görev                       : ' + $hj.taskState + $(if ($hj.taskInstalled) { '' } else { '  (kurulu değil)' }))
+            [void]$env.Add('Zorla kapatma aralığı       : ' + $(if ($hj.inBlackout) { 'AKTİF - zorla kapatma uygulanabilir' } else { 'etkin değil - yalnızca bilgilendirme' }))
+            [void]$env.Add('Tatil                       : ' + $(if ($hj.isHoliday) { 'evet' } else { 'hayır' }) + '  (mod: ' + $hj.config.holidayMode + ')')
+            [void]$env.Add('Yeniden başlatma politikası : ' + $hj.config.restartPolicy + '  |  zorla kapatma ' + $hj.config.blackoutStart + ':00-' + $hj.config.blackoutEnd + ':00  |  tam gün: ' + ((@($hj.config.blackoutFullDays)) -join ','))
+            [void]$env.Add('Daima zorla kapatma        : ' + $(if ($hj.config.forceRestartAlways) { 'AÇIK' } else { 'kapalı' }) + $(if ($hj.config.forceRestartUntil) { '  (' + $hj.config.forceRestartUntil + ')' } else { '' }))
+            [void]$env.Add('Ardışık hata               : ' + $hj.state.consecutiveFailures + '  |  ağ onarım kademesi: ' + $hj.state.netRepairRung)
+            [void]$env.Add('Tatil listesi               : ' + ((@($hj.config.holidays)) -join ', '))
             $nx = Get-NextCheck
-            if ($nx.Known) { [void]$env.Add('sonraki kontrol : ' + $nx.Next.ToString('HH:mm:ss') + '  (kalan ' + [int][math]::Ceiling($nx.RemainingSeconds) + ' sn, aralik ' + ([math]::Round([double]$nx.IntervalMinutes, 1)) + ' dk - ' + $nx.IntervalSource + ')') }
-            else { [void]$env.Add('sonraki kontrol : bilinmiyor (last-run.json yok)') }
-        } else { [void]$env.Add('last-run.json bulunamadi: ' + $HostJson) }
+            if ($nx.Known) { [void]$env.Add('Sonraki denetim             : ' + $nx.Next.ToString('HH:mm:ss') + '  (kalan ' + [int][math]::Ceiling($nx.RemainingSeconds) + ' sn, aralık ' + ([math]::Round([double]$nx.IntervalMinutes, 1)) + ' dk - ' + $nx.IntervalSource + ')') }
+            else { [void]$env.Add('Sonraki denetim             : bilinmiyor (son çalışma verisi yok)') }
+        } else { [void]$env.Add('Son çalışma verisi bulunamadı: ' + $HostJson) }
         (El $script:Win 'TxtEnv').Text = ($env -join "`n")
 
         # Blackout: ayar acik mi + su an aktif mi ayri gosterilir ("kapali" belirsizligi olmasin)
@@ -2285,11 +2384,11 @@ function Update-Overview {
         }
         $haftaSonu = ''
         if ($hj -and $hj.config -and @($hj.config.blackoutFullDays).Count) { $haftaSonu = ' · hafta sonu tam gün' }
-        $boTxt = if (-not $boOn) { 'Blackout: devre dışı' }
-        elseif ($hj -and $hj.inBlackout) { 'Blackout: etkin · şu an AKTİF (' + $bs + ':00→' + $be + ':00)' }
-        else { 'Blackout: etkin · şu an yok (' + $bs + ':00→' + $be + ':00)' + $haftaSonu + ')' }
+        $boTxt = if (-not $boOn) { 'Zorla kapatma aralığı: devre dışı' }
+        elseif ($hj -and $hj.inBlackout) { 'Zorla kapatma aralığı: etkin · şu an AKTİF (' + $bs + ':00→' + $be + ':00)' }
+        else { 'Zorla kapatma aralığı: etkin · şu an yok (' + $bs + ':00→' + $be + ':00)' + $haftaSonu + ')' }
         (El $script:Win 'TxtBlackout').Text = $boTxt
-        (El $script:Win 'TxtBlackout').ToolTip = 'Blackout = zorla kapatma + restart penceresi. Etkin/kapali ayarı, "şu an AKTİF/yok" ise içinde bulunulan zamanı gösterir. Ayarlar: BlackoutStart/BlackoutEnd, BlackoutFullDays.'
+        (El $script:Win 'TxtBlackout').ToolTip = 'Bu aralıkta zorla kapatma ve yeniden başlatma uygulanabilir. "Şu an AKTİF/yok" bilgisi geçerli zamanı gösterir.'
         $stSide = Get-WatchdogTaskState
         (El $script:Win 'TxtTaskState').Text = [string]$stSide.Short
         (El $script:Win 'TxtTaskState').ToolTip = [string]$stSide.Text
@@ -2300,7 +2399,7 @@ function Update-Overview {
             try { $bootTxt = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToString('dd.MM HH:mm') } catch { }
             if ($bootTxt) { $up += ' (açılış ' + $bootTxt + ')' }
         }
-        (El $script:Win 'TxtUptime').Text = 'Uptime: ' + $up
+        (El $script:Win 'TxtUptime').Text = 'Çalışma süresi: ' + $up
 
         try { Update-ActionBarColors } catch { Write-Trace ('genel durum renk guncelleme hatasi: ' + $_.Exception.Message) }
     } catch { Write-Trace ('genel durum yenileme hatasi: ' + $_.Exception.Message) }
@@ -3817,7 +3916,7 @@ function Set-SfxMode {
 function Invoke-TrayAction {
     param([string]$Key)
     switch ($Key) {
-        'panel' { if (Show-PanelWindow) { Show-Page 'conn'; Update-Connections } }
+        'panel' { if (Show-PanelWindow) { Show-Page 'overview'; Update-Overview } }
         'panelstart' {
             # Konsol penceresi acilmasin: Normal yerine Hidden (acik konsol kapatilinca program da kapaniyordu)
             Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-STA', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ScriptPath + '"')) -WindowStyle Hidden | Out-Null
@@ -3968,11 +4067,16 @@ function Wire-UI {
         })
     (El $script:Win 'BtnInstall').Add_Click({ Invoke-Script -Path $HostScript -Args @('-Install'); [System.Windows.MessageBox]::Show('Kurulum baslatildi (yonetici onayi gerekebilir).', 'RemoteWatchdog') | Out-Null })
     (El $script:Win 'BtnReboot').Add_Click({
-            $r = [System.Windows.MessageBox]::Show('Makine yeniden baslatilsin mi? Kaydedilmemis belge varsa once kaydedilir.', 'RemoteWatchdog', 'YesNo', 'Question')
+            $st = Get-StatusInfo
+            $delay = 30
+            if ($st.Host -and $st.Host.config -and $st.Host.config.rebootDelaySeconds) { $delay = [int]$st.Host.config.rebootDelaySeconds }
+            $prompt = 'Bu bilgisayar (' + $env:COMPUTERNAME + ') yaklaşık ' + $delay + ' saniyelik geri sayımdan sonra yeniden başlatılacak.' + "`n`n" +
+                'Açık belgeler önce kaydedilmeye çalışılır. Devam edilsin mi?'
+            $r = [System.Windows.MessageBox]::Show($prompt, 'Yeniden başlatma onayı', 'YesNo', 'Warning')
             if ($r -eq 'Yes') { Announce-Reboot; Invoke-Script -Path $HostScript -Args @('-ForceReboot') -Wait }
         })
     (El $script:Win 'BtnForceNow').Add_Click({
-            $r = [System.Windows.MessageBox]::Show('Daima zorla kapatma ACILIR ve makine yeniden baslatilir. Kaydedilmemis belge varsa once kaydedilir. Devam edilsin mi?', 'RemoteWatchdog', 'YesNo', 'Warning')
+            $r = [System.Windows.MessageBox]::Show('Bu bilgisayarda "Daima zorla kapatma" ayarı kalıcı olarak AÇILACAK ve bilgisayar geri sayımlı olarak yeniden başlatılacak.' + "`n`n" + 'Açık belgeler önce kaydedilmeye çalışılır. Devam edilsin mi?', 'Zorla kapatma ve yeniden başlatma', 'YesNo', 'Warning')
             if ($r -ne 'Yes') { return }
             Save-HostConfig @{ ForceRestartAlways = $true }
             Announce-Reboot
@@ -4229,7 +4333,7 @@ Set-WindowIcon
 Wire-UI
 $vt = El $script:Win 'TxtVersion'
 if ($vt) { $vt.Text = ('RemoteWatchdog ' + $script:AppVersion + '  -  panel/host surumu ayni olmali; guncellemede kurulumu da yenileyin') }
-Show-Page 'conn'
+Show-Page 'overview'
 Update-Connections
 Update-Overview
 Update-Actions

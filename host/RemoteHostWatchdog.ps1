@@ -505,6 +505,90 @@ function Get-DefaultGatewayIp {
     return ''
 }
 
+function Get-NetworkInfoSnapshot {
+    <#
+        Gunluk raporun "Ag bilgileri" bolumu icin ANLIK ag envanteri.
+        Yalnizca YEREL ve UCUZ sorgular yapar (internet probe YOK); dis hat
+        durumu zaten kontrol dongusunde olculuyor.
+        Amac: raporun "bu makine hangi agda?" sorusunu tek bakista cevaplamak.
+    #>
+    $snap = [ordered]@{
+        collectedAt = (Get-Date).ToString('o')
+        publicIp = ''; localIp = ''; localAlias = ''; localMac = ''; linkSpeed = ''
+        gateway = ''; dnsServers = @(); adapters = @(); activeAdapter = ''
+        dhcpEnabled = $false; dhcpServer = ''; leaseObtained = ''; leaseExpires = ''
+    }
+    try { if ($script:PublicIp) { $snap.publicIp = [string]$script:PublicIp } } catch { }
+    try { $snap.gateway = [string](Get-DefaultGatewayIp) } catch { }
+    $adapters = @()
+    try {
+        foreach ($a in @(Get-NetAdapter -ErrorAction SilentlyContinue)) {
+            $adapters += [ordered]@{
+                name = [string]$a.Name; status = [string]$a.Status; speed = [string]$a.LinkSpeed
+                mac = [string]$a.MacAddress; ifIndex = [int]$a.ifIndex; physical = [bool]$a.HardwareInterface
+            }
+        }
+    } catch { }
+    $snap.adapters = @($adapters)
+    # Varsayilan rotanin arayuzu: once fiziksel default route, yoksa ilk "Up" adaptor.
+    $ifIndex = 0
+    try { $ifIndex = [int](Get-DefaultRouteIfIndex) } catch { }
+    if ($ifIndex -le 0) {
+        try {
+            $up = @($adapters | Where-Object { $_.status -eq 'Up' -and $_.ifIndex -gt 0 })
+            if ($up.Count) { $ifIndex = [int]$up[0].ifIndex }
+        } catch { }
+    }
+    $local = $null
+    try {
+        $ips = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -and $_.IPAddress -notlike '169.254.*' })
+        if ($ifIndex -gt 0) {
+            $hit = @($ips | Where-Object { [int]$_.InterfaceIndex -eq $ifIndex })
+            if ($hit.Count) { $local = $hit[0] }
+        }
+        if (-not $local -and $ips.Count) { $local = $ips[0] }
+    } catch { }
+    if ($local) {
+        try { $snap.localIp = [string]$local.IPAddress } catch { }
+        try { $snap.localAlias = [string]$local.InterfaceAlias } catch { }
+        try { $snap.localMac = [string]$local.LinkLayerAddress } catch { }
+    }
+    try {
+        $act = @($adapters | Where-Object { [int]$_.ifIndex -eq $ifIndex -and $_.status -eq 'Up' })
+        if ($act.Count) {
+            $snap.activeAdapter = [string]$act[0].name
+            $snap.linkSpeed = [string]$act[0].speed
+            if (-not $snap.localMac) { $snap.localMac = [string]$act[0].mac }
+        }
+    } catch { }
+    try {
+        $snap.dnsServers = @((Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.ServerAddresses } | Where-Object { $_ }) | Select-Object -Unique)
+    } catch { }
+    try {
+        $snap.dhcpEnabled = @((Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ConnectionState -eq 'Connected' -and $_.Dhcp -eq 'Enabled' })).Count -gt 0
+    } catch { }
+    try {
+        $nc = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True and DHCPEnabled=True' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($nc) {
+            $snap.dhcpServer = [string]$nc.DHCPServer
+            $snap.leaseObtained = [string]$nc.DHCPLeaseObtained
+            $snap.leaseExpires = [string]$nc.DHCPLeaseExpires
+        }
+    } catch { }
+    # WMI tarihleri yerel/ABD biciminde gelir; raporda dd.MM.yyyy HH:mm gorunmesi icin duzelt.
+    foreach ($k in @('leaseObtained', 'leaseExpires')) {
+        $raw = [string]$snap[$k]
+        if (-not $raw) { continue }
+        try {
+            $parsed = [datetime]::Parse($raw, [Globalization.CultureInfo]::InvariantCulture)
+            $snap[$k] = $parsed.ToString('dd.MM.yyyy HH:mm')
+        } catch { }
+    }
+    return [pscustomobject]$snap
+}
+
 function Get-DefaultRouteIfIndex {
     <#
         Varsayilan rotanin FIZIKSEL arayuz indexi. Sanal/VPN adaptoru default route
@@ -822,7 +906,8 @@ function Get-DailyDigest {
         [bool]$CurrentOk = $true,
         [string]$CurrentSummary = '',
         [string]$HostName = $env:COMPUTERNAME,
-        [string]$Version = $script:AppVersion
+        [string]$Version = $script:AppVersion,
+        [object]$NetworkInfo = $null
     )
     $entries = New-Object System.Collections.ArrayList
     $lineSequence = 0
@@ -848,7 +933,7 @@ function Get-DailyDigest {
             if (-not $active) {
                 $active = [pscustomobject]@{
                     startedAt = $entry.At.ToString('o'); endedAt = ''; missing = $missing
-                    recovered = $false; rebooted = $false; rebootAt = ''; diagnosis = ''; class = ''; reportOutcome = ''
+                    recovered = $false; rebooted = $false; rebootAt = ''; diagnosis = ''; class = ''; reportOutcome = ''; net = $null
                 }
                 [void]$incidents.Add($active)
             } elseif ($missing -and $active.missing -notmatch [regex]::Escape($missing)) {
@@ -866,7 +951,7 @@ function Get-DailyDigest {
             if ($text -match 'SONUC:\s*\d+\s*sorun\s*->\s*(.+)$') { $missing = ([string]$Matches[1]).Trim() }
             $active = [pscustomobject]@{
                 startedAt = $entry.At.ToString('o'); endedAt = ''; missing = $missing
-                recovered = $false; rebooted = $false; rebootAt = ''; diagnosis = ''; class = ''; reportOutcome = ''
+                recovered = $false; rebooted = $false; rebootAt = ''; diagnosis = ''; class = ''; reportOutcome = ''; net = $null
             }
             [void]$incidents.Add($active)
         }
@@ -911,12 +996,28 @@ function Get-DailyDigest {
             $startAt = if ($anchor -lt $PeriodStart) { $PeriodStart } else { $anchor }
             $match = [pscustomobject]@{
                 startedAt = $startAt.ToString('o'); endedAt = ''; missing = ''
-                recovered = $false; rebooted = $false; rebootAt = ''; diagnosis = ''; class = ''; reportOutcome = ''
+                recovered = $false; rebooted = $false; rebootAt = ''; diagnosis = ''; class = ''; reportOutcome = ''; net = $null
             }
             [void]$incidents.Add($match)
         }
         $match.class = [string]$report.class
         $match.reportOutcome = [string]$report.outcome
+        <#
+            Kesinti ANINDA olculen ag bilgileri; gunluk raporun "Ag bilgileri" bolumunde
+            "Kesinti anindaki ag olcumleri" altinda gosterilir.
+        #>
+        $extMs = -1
+        try { if ($null -ne $report.externalConfirmMs) { $extMs = [int]$report.externalConfirmMs } } catch { }
+        $match | Add-Member -NotePropertyName 'net' -Force -NotePropertyValue ([ordered]@{
+                class = [string]$report.class; classDetail = [string]$report.classDetail
+                gateway = [string]$report.gateway
+                dnsServers = @(@($report.dnsServers) | Where-Object { $_ })
+                dhcpServer = [string]$report.dhcpServer
+                dhcpServerAlive = [bool]$report.dhcpServerAlive
+                corpDns = [string]$report.corpDns
+                corpDnsAlive = [bool]$report.corpDnsAlive
+                externalMs = $extMs
+            })
         switch ([string]$report.class) {
             'upstream' {
                 $match.diagnosis = 'Ağ geçidi yanıt veriyordu, ancak dış bağlantı başarısızdı. Olası yön üst ağ/firewall veya ISS. DHCP/DNS ping ve traceroute yanıt vermemiş; ICMP engeli olabileceği için tek başına kesin cihaz teşhisi sayılmaz.'
@@ -952,14 +1053,36 @@ function Get-DailyDigest {
 
     $incidents = @($incidents | Sort-Object { try { [datetime]::Parse([string]$_.startedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) } catch { [datetime]::MaxValue } })
     $reboots = @($reboots | Sort-Object { [datetime]::Parse([string]$_.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) })
+    <#
+        KESINTI SURE ETIKETI: "Ag bilgileri" ve "Onemli olaylar" bolumleri ayni
+        etiketi kullanir; bir kez hesaplanip olaya yazilir.
+    #>
+    foreach ($i in $incidents) {
+        $startAt = ConvertTo-DailyLocalDateTime $i.startedAt
+        $endAt = ConvertTo-DailyLocalDateTime $i.endedAt
+        $span = if ($startAt) { $startAt.ToString('dd.MM HH:mm') } else { 'saat bilinmiyor' }
+        if ($endAt) {
+            $endLabel = if ($startAt -and $startAt.Date -eq $endAt.Date) { $endAt.ToString('HH:mm') } else { $endAt.ToString('dd.MM HH:mm') }
+            $minutes = [Math]::Max(1, [int][Math]::Ceiling(($endAt - $startAt).TotalMinutes))
+            $span += '–' + $endLabel + ' (yaklaşık ' + $minutes + ' dk)'
+        } else { $span += '–devam ediyor' }
+        $i | Add-Member -NotePropertyName 'span' -NotePropertyValue $span -Force
+    }
     $incidentCount = $incidents.Count
     $rebootCount = $reboots.Count
+    <#
+        KAPSAM NOTU: Rapor dun 00:00'ten baslar; ozet metni (paneldeki "Gunluk
+        ozet" karti bunu gosterir) hangi pencerenin sayildigini belirtmeli,
+        yoksa "gece olaylari yok" izlenimi olusur.
+    #>
+    $scopeNote = ''
+    try { if ($PeriodStart.Date -ne $PeriodEnd.Date) { $scopeNote = " (" + $PeriodStart.ToString('dd.MM HH:mm') + "'ten beri)" } } catch { }
     if ($incidentCount -eq 0 -and $rebootCount -eq 0) {
-        $headline = 'Rapor döneminde kayda değer ağ kesintisi veya gerçek yeniden başlatma görülmedi.'
+        $headline = 'Rapor döneminde kayda değer ağ kesintisi veya gerçek yeniden başlatma görülmedi.' + $scopeNote
     } elseif ($CurrentOk -and @($incidents | Where-Object { -not $_.recovered }).Count -eq 0) {
-        $headline = "$incidentCount ağ olayı görüldü; $rebootCount gerçek yeniden başlatma oldu. Rapor hazırlanırken bağlantı ve kontroller sağlıklı."
+        $headline = "$incidentCount ağ olayı görüldü; $rebootCount gerçek yeniden başlatma oldu.$scopeNote Rapor hazırlanırken bağlantı ve kontroller sağlıklı."
     } else {
-        $headline = "$incidentCount ağ olayı ve $rebootCount gerçek yeniden başlatma kaydedildi. Rapor hazırlanırken sistemde hâlâ kontrol edilmesi gereken durum var."
+        $headline = "$incidentCount ağ olayı ve $rebootCount gerçek yeniden başlatma kaydedildi.$scopeNote Rapor hazırlanırken sistemde hâlâ kontrol edilmesi gereken durum var."
     }
 
     $md = New-Object System.Collections.ArrayList
@@ -973,18 +1096,83 @@ function Get-DailyDigest {
     [void]$md.Add($headline)
     if ($CurrentSummary) { [void]$md.Add(('Son kontrol: ' + $CurrentSummary)) }
     [void]$md.Add('')
+    <#
+        AG BILGILERI BOLUMU: "bu makine hangi agda?" sorusunu tek bakista cevaplar.
+        Anlik envanter (ag gecidi/DNS/adaptor/DHC) + kesinti aninda olculen degerler.
+    #>
+    [void]$md.Add('## Ağ bilgileri')
+    [void]$md.Add('')
+    $netMd = New-Object System.Collections.ArrayList
+    if ($NetworkInfo) {
+        $pubIp = [string]$NetworkInfo.publicIp
+        if ($pubIp) { [void]$netMd.Add('- Genel (dış) IP: ' + $pubIp) }
+        $localIp = [string]$NetworkInfo.localIp
+        if ($localIp) {
+            $localLine = '- Yerel IPv4: ' + $localIp
+            if ([string]$NetworkInfo.localAlias) { $localLine += ' (' + $NetworkInfo.localAlias + ')' }
+            [void]$netMd.Add($localLine)
+        }
+        $gw = [string]$NetworkInfo.gateway
+        [void]$netMd.Add('- Varsayılan ağ geçidi: ' + $(if ($gw) { $gw } else { 'yok' }))
+        $dnsList = @(@($NetworkInfo.dnsServers) | Where-Object { $_ })
+        [void]$netMd.Add('- DNS sunucuları: ' + $(if ($dnsList.Count) { ($dnsList -join ', ') } else { 'yok' }))
+        $dhcpLine = '- DHCP: ' + $(if ([bool]$NetworkInfo.dhcpEnabled) { 'etkin' } else { 'kapalı (sabit IP)' })
+        if ([string]$NetworkInfo.dhcpServer) { $dhcpLine += ' — sunucu ' + $NetworkInfo.dhcpServer }
+        if ([string]$NetworkInfo.leaseExpires) { $dhcpLine += ', kiralama bitiş ' + $NetworkInfo.leaseExpires }
+        [void]$netMd.Add($dhcpLine)
+        $activeAdapter = [string]$NetworkInfo.activeAdapter
+        if ($activeAdapter) {
+            $activeLine = '- Aktif bağlantı: ' + $activeAdapter
+            if ([string]$NetworkInfo.linkSpeed) { $activeLine += ' (' + $NetworkInfo.linkSpeed + ')' }
+            [void]$netMd.Add($activeLine)
+        }
+        $adapterList = @(@($NetworkInfo.adapters) | Where-Object { $_ })
+        if ($adapterList.Count) {
+            $parts = @()
+            foreach ($ad in $adapterList) {
+                $t = [string]$ad.name + '=' + [string]$ad.status
+                if ([string]$ad.speed -and [string]$ad.status -eq 'Up') { $t += ' (' + $ad.speed + ')' }
+                $parts += $t
+            }
+            [void]$netMd.Add('- Adaptörler: ' + ($parts -join ', '))
+        }
+        $collectedAt = ConvertTo-DailyLocalDateTime $NetworkInfo.collectedAt
+        if ($collectedAt) { [void]$netMd.Add('- Ölçüm zamanı: ' + $collectedAt.ToString('dd.MM.yyyy HH:mm')) }
+    } else {
+        [void]$netMd.Add('- Rapor anında ağ bilgisi toplanamadı.')
+    }
+    $netIncidents = @($incidents | Where-Object { $_.net })
+    if ($netIncidents.Count -gt 0) {
+        [void]$netMd.Add('')
+        [void]$netMd.Add('### Kesinti anındaki ağ ölçümleri')
+        [void]$netMd.Add('')
+        foreach ($i in $netIncidents) {
+            $n = $i.net
+            $parts = @()
+            if ([string]$n.gateway) { $parts += 'ağ geçidi ' + $n.gateway }
+            $dnsList = @(@($n.dnsServers) | Where-Object { $_ })
+            if ($dnsList.Count) { $parts += 'DNS ' + ($dnsList -join ', ') }
+            if ([string]$n.dhcpServer) {
+                $parts += 'DHCP sunucusu ' + $n.dhcpServer + ' (' + $(if ([bool]$n.dhcpServerAlive) { 'erişilebilir' } else { 'ERİŞİLEMEZ' }) + ')'
+            }
+            if ([string]$n.corpDns) {
+                $parts += 'kurum DNS ' + $n.corpDns + ' (' + $(if ([bool]$n.corpDnsAlive) { 'erişilebilir' } else { 'ERİŞİLEMEZ' }) + ')'
+            }
+            $extMs = -1
+            try { $extMs = [int]$n.externalMs } catch { }
+            $parts += 'dış hat (1.1.1.1:443) ' + $(if ($extMs -ge 0) { 'açık (' + $extMs + ' ms)' } else { 'kapalı' })
+            $head = '- ' + [string]$i.span
+            if ([string]$n.class) { $head += ' — sınıf ' + [string]$n.class }
+            [void]$netMd.Add($head + ': ' + ($parts -join '; ') + '.')
+        }
+    }
+    foreach ($netLine in @($netMd)) { [void]$md.Add($netLine) }
+    [void]$md.Add('')
     [void]$md.Add('## Önemli olaylar')
     [void]$md.Add('')
     if ($incidentCount -eq 0) { [void]$md.Add('- Ağ kesintisi kaydı yok.') }
     foreach ($i in $incidents) {
-        $startAt = ConvertTo-DailyLocalDateTime $i.startedAt
-        $endAt = ConvertTo-DailyLocalDateTime $i.endedAt
-        $span = if ($startAt) { $startAt.ToString('dd.MM HH:mm') } else { 'saat bilinmiyor' }
-        if ($endAt) {
-            $endLabel = if ($startAt -and $startAt.Date -eq $endAt.Date) { $endAt.ToString('HH:mm') } else { $endAt.ToString('dd.MM HH:mm') }
-            $minutes = [Math]::Max(1, [int][Math]::Ceiling(($endAt - $startAt).TotalMinutes))
-            $span += '–' + $endLabel + ' (yaklaşık ' + $minutes + ' dk)'
-        } else { $span += '–devam ediyor' }
+        $span = [string]$i.span
         $line = '- **' + $span + '** — Ağ erişim sorunu'
         if ($i.missing) { $line += ' (başarısız kontroller: ' + $i.missing + ')' }
         $line += '.'
@@ -1018,8 +1206,90 @@ function Get-DailyDigest {
     return [pscustomobject]@{ Summary = $headline; Incidents = @($incidents); Reboots = @($reboots); Markdown = ($md -join "`r`n"); IncidentCount = $incidentCount; RebootCount = $rebootCount }
 }
 
+function Get-DailyLogLines {
+    <#
+        Gunluk rapor icin gunluk satirlari: AKTIF LOG + ARSIVLER.
+
+        NEDEN ARSIV DE OKUNUR: Aktif gunluk 2 MB'yi asinca log/host-watchdog-<damga>.log
+        arsivine TASINIR. Bu rotasyon makine bos oldugunda, yani GECE olur. Rapor
+        yalnizca aktif logu okudugu icin rotasyondan sonraki gecenin olaylari
+        (kesinti, reboot) HICBIR raporda gorunmezdi: 17.10 06:39 "Ag katmani FAIL"
+        ve 17.10 20:24 / 21:14 olaylari arsivde kaldi, raporlarda hic yoktu.
+        Arsivler yalnizca aktif log donemin basindan eskiye geliyorsa okunur
+        (rotasyon olmadiysa hic okunmaz).
+    #>
+    param([datetime]$PeriodStart = (Get-Date).Date)
+    $lines = New-Object System.Collections.ArrayList
+    try {
+        if (Test-Path -LiteralPath $LogFile) {
+            foreach ($l in @(Get-Content -LiteralPath $LogFile -Encoding UTF8 -ErrorAction SilentlyContinue)) { [void]$lines.Add($l) }
+        }
+    } catch { }
+    $firstActive = $null
+    foreach ($l in @($lines)) {
+        if ([string]$l -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') {
+            try { $firstActive = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture); break } catch { }
+        }
+    }
+    if ($firstActive -and $firstActive -le $PeriodStart) { return @($lines) }
+    # Arsivler: en eskiden yeniye (ayni saniye siralamasi bozulmasin).
+    $arch = New-Object System.Collections.ArrayList
+    try {
+        foreach ($f in @(Get-ChildItem -LiteralPath $LogDir -Filter 'host-watchdog-*.log' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $stamp = $null
+            if ($f.Name -match 'host-watchdog-(\d{8})-(\d{6})\.log$') {
+                try { $stamp = [datetime]::ParseExact($Matches[1] + $Matches[2], 'yyyyMMddHHmmss', [Globalization.CultureInfo]::InvariantCulture) } catch { }
+            }
+            # Arsin icindeki satirlar rotasyon damgasindan eskidir; donemden cok
+            # eski arsivler ilgisizdir (okunmaz).
+            if ($stamp -and $stamp -lt $PeriodStart.AddDays(-1)) { continue }
+            try { foreach ($l in @(Get-Content -LiteralPath $f.FullName -Encoding UTF8 -ErrorAction SilentlyContinue)) { [void]$arch.Add($l) } } catch { }
+        }
+    } catch { }
+    foreach ($l in @($arch)) { [void]$lines.Add($l) }
+    return @($lines)
+}
+
+function Write-DailyReportFile {
+    <#  Bir gunun gunluk rapor dosyalarini (md + json) yazar; olay/kesinti sayimini
+        JSON'a da koyar. Write-DailyReport bunu hem bugunun hem de onceki gunun
+        raporu icin cagirir. #>
+    param(
+        [datetime]$Day = (Get-Date),
+        [datetime]$PeriodStart = (Get-Date).Date,
+        [datetime]$PeriodEnd = (Get-Date),
+        [bool]$CurrentOk = $true,
+        [string]$CurrentSummary = '',
+        [string[]]$LogLines = @(),
+        [object[]]$OutageReports = @(),
+        [object]$NetworkInfo = $null
+    )
+    $dir = Join-Path $BaseDir 'diag'
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $base = Join-Path $dir ('daily-' + $Day.ToString('yyyy-MM-dd'))
+    $jsonPath = $base + '.json'
+    $mdPath = $base + '.md'
+    $digest = Get-DailyDigest -LogLines $LogLines -OutageReports $OutageReports -PeriodStart $PeriodStart -PeriodEnd $PeriodEnd -CurrentOk $CurrentOk -CurrentSummary $CurrentSummary -HostName $env:COMPUTERNAME -Version $script:AppVersion -NetworkInfo $NetworkInfo
+    $report = [ordered]@{
+        generated = $PeriodEnd.ToString('o'); periodStart = $PeriodStart.ToString('o'); periodEnd = $PeriodEnd.ToString('o')
+        host = $env:COMPUTERNAME; version = $script:AppVersion; summary = $digest.Summary
+        currentOk = $CurrentOk; currentSummary = $CurrentSummary
+        incidentCount = $digest.IncidentCount; rebootCount = $digest.RebootCount
+        incidents = @($digest.Incidents); reboots = @($digest.Reboots); networkInfo = $NetworkInfo
+        markdownPath = $mdPath; markdown = $digest.Markdown
+    }
+    $json = $report | ConvertTo-Json -Depth 8
+    foreach ($item in @(@{ Path = $jsonPath; Content = $json }, @{ Path = $mdPath; Content = $digest.Markdown })) {
+        $tmp = $item.Path + '.tmp.' + [guid]::NewGuid().ToString('N')
+        [System.IO.File]::WriteAllText($tmp, [string]$item.Content, (New-Object System.Text.UTF8Encoding($true)))
+        try { if (Test-Path -LiteralPath $item.Path) { [System.IO.File]::Replace($tmp, $item.Path, $null) } else { [System.IO.File]::Move($tmp, $item.Path) } }
+        catch { try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }; [System.IO.File]::WriteAllText($item.Path, [string]$item.Content, (New-Object System.Text.UTF8Encoding($true))) }
+    }
+    return $mdPath
+}
+
 function Write-DailyReport {
-    <# Her gün yerel saatle 08:00 sonrasında, son rapordan bu ana kadarki insan-dili özeti bir kez üretir. #>
+    <# Her gün yerel saatle 08:00 sonrasında, günün insan-dili özetini üretir. #>
     param([datetime]$At = (Get-Date), [bool]$CurrentOk = $true, [string]$CurrentSummary = '')
     if ($At.TimeOfDay -lt [TimeSpan]::FromHours(8)) { return '' }
     $dir = Join-Path $BaseDir 'diag'
@@ -1030,14 +1300,19 @@ function Write-DailyReport {
     $mdPath = $base + '.md'
     $state = Get-State
     <#
-        DÖNEM = BUGÜNÜN BAŞINDAN ŞİMDİKİ ZAMANA KADAR (00:00 -> simdi).
+        DÖNEM = DÜN 00:00 -> ŞİMDİ (yaklaşık 32-40 saat).
+        ÖNEMLİ: PENCERE DÜN 00:00'DAN BAŞLAR. Takvim günü (bugün 00:00) idi;
+        o zaman sabah açılan rapor ve paneldeki "Günlük özet" SADECE bugünkü
+        08:00'i kapsiyordu, dün geceki (21:48, 22:00, 00:06) kesintiler
+        HİÇBİR YERDE görünmüyordu ("gece kesintileri raporda yok" şikayeti).
+        Artık akşamın ve gecenin olayları hem raporda hem özette görünür.
         Eski "son rapordan bu ana" dönemi, reboot nedeniyle rapor silinip yeniden
         üretildiğinde her üretimde daralıyor ve geç reboot'ları kaçırıyordu
-        (18 Eki: 5 reboot'un çoğu raporda görünmedi). Start-of-day dönemi tüm günü kapsar.
+        (18 Eki: 5 reboot'un çoğu raporda görünmedi).
         Aynı günün raporu varsa ve 1 saatten taze ise yeniden üretme (reboot silinmesi durumunda
         60 dk beklenmez; dosya zaten silinmiştir).
     #>
-    $periodStart = $At.Date
+    $periodStart = $At.Date.AddDays(-1)
     if (Test-Path -LiteralPath $jsonPath) {
         $fresh = $false
         try { $ageMin = ((Get-Date) - (Get-Item -LiteralPath $jsonPath).LastWriteTime).TotalMinutes; $fresh = ($ageMin -le 60) } catch { }
@@ -1058,28 +1333,48 @@ function Write-DailyReport {
             } catch { }
         }
     }
-    $logLines = @()
-    try { if (Test-Path -LiteralPath $LogFile) { $logLines = @(Get-Content -LiteralPath $LogFile -Encoding UTF8 -ErrorAction SilentlyContinue) } } catch { }
+    <#  Onceki gunun raporu da bu satirlardan beslendigi icin en eski donem
+        (dun 00:00) esas alinir; boylece gece rotasyonunda arsive tasinan
+        satirlar da rapora girer. #>
+    $logLines = @(Get-DailyLogLines -PeriodStart $periodStart)
     $reports = @()
     try {
         foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter 'outage-*.json' -File -ErrorAction SilentlyContinue)) {
             try { $reports += (Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { }
         }
     } catch { }
-    $digest = Get-DailyDigest -LogLines $logLines -OutageReports $reports -PeriodStart $periodStart -PeriodEnd $At -CurrentOk $CurrentOk -CurrentSummary $CurrentSummary -HostName $env:COMPUTERNAME -Version $script:AppVersion
-    $report = [ordered]@{
-        generated = $At.ToString('o'); periodStart = $periodStart.ToString('o'); periodEnd = $At.ToString('o')
-        host = $env:COMPUTERNAME; version = $script:AppVersion; summary = $digest.Summary
-        currentOk = $CurrentOk; incidentCount = $digest.IncidentCount; rebootCount = $digest.RebootCount
-        incidents = @($digest.Incidents); reboots = @($digest.Reboots); markdownPath = $mdPath; markdown = $digest.Markdown
+    <#  Anlik ag envanteri: raporun "Ag bilgileri" bolumu icin. Olcum basarisiz olsa
+        bile raporun geri kalani uretilir (netInfo null kalir). #>
+    $netInfo = $null
+    try { $netInfo = Get-NetworkInfoSnapshot } catch { $netInfo = $null }
+    <#
+        ONCEKI GUNUN RAPORUNU TAMAMLA. Gunun raporu 00:00'da degil 08:00'da
+        yazildigi icin, bir gunun raporu gun bitimine kadar tamamlanmazsa o
+        gunun sonundaki olaylar hicbir rapora girmiyordu: 19.10 23:36-24:00 ve
+        20.10 23:06-24:00 araligi hicbir raporda yoktu. Gece yarisi sonrasi ilk
+        dongude (08:00) onceki gun kendi takvim gunuyle (00:00-24:00) kapatilir.
+    #>
+    $yesterday = $periodStart.Date
+    $yJson = (Join-Path $dir ('daily-' + $yesterday.ToString('yyyy-MM-dd'))) + '.json'
+    if (Test-Path -LiteralPath $yJson) {
+        try {
+            $yOld = Get-Content -LiteralPath $yJson -Raw -Encoding UTF8 | ConvertFrom-Json
+            $yEnd = ConvertTo-DailyLocalDateTime $yOld.periodEnd
+            if (-not $yEnd -or $yEnd -lt $At.Date) {
+                $ySummary = ''
+                try { $ySummary = [string]$yOld.currentSummary } catch { }
+                $yOk = $true
+                try { $yOk = [bool]$yOld.currentOk } catch { }
+                $yNet = $null
+                try { if ($yOld.PSObject.Properties.Name -contains 'networkInfo') { $yNet = $yOld.networkInfo } } catch { }
+                $null = Write-DailyReportFile -Day $yesterday -PeriodStart $yesterday -PeriodEnd $At.Date -CurrentOk $yOk -CurrentSummary $ySummary -LogLines $logLines -OutageReports $reports -NetworkInfo $yNet
+                Write-Log 'INFO' ('onceki gunun raporu tamamlandi: ' + (Join-Path $dir ('daily-' + $yesterday.ToString('yyyy-MM-dd') + '.md')))
+            }
+        } catch { }
     }
-    $json = $report | ConvertTo-Json -Depth 8
-    foreach ($item in @(@{ Path = $jsonPath; Content = $json }, @{ Path = $mdPath; Content = $digest.Markdown })) {
-        $tmp = $item.Path + '.tmp.' + [guid]::NewGuid().ToString('N')
-        [System.IO.File]::WriteAllText($tmp, [string]$item.Content, (New-Object System.Text.UTF8Encoding($true)))
-        try { if (Test-Path -LiteralPath $item.Path) { [System.IO.File]::Replace($tmp, $item.Path, $null) } else { [System.IO.File]::Move($tmp, $item.Path) } }
-        catch { try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }; [System.IO.File]::WriteAllText($item.Path, [string]$item.Content, (New-Object System.Text.UTF8Encoding($true))) }
-    }
+    <#  Dosya adi BUGUNUN gunu (pencere dundan baslar ama dosya her gun bir tane). #>
+    $mdPath = Write-DailyReportFile -Day $At.Date -PeriodStart $periodStart -PeriodEnd $At -CurrentOk $CurrentOk -CurrentSummary $CurrentSummary -LogLines $logLines -OutageReports $reports -NetworkInfo $netInfo
+    $digest = Get-DailyDigest -LogLines $logLines -OutageReports $reports -PeriodStart $periodStart -PeriodEnd $At -CurrentOk $CurrentOk -CurrentSummary $CurrentSummary -HostName $env:COMPUTERNAME -Version $script:AppVersion -NetworkInfo $netInfo
     try {
         $null = Invoke-StateUpdate {
             param($st)
@@ -1198,6 +1493,11 @@ function Invoke-NetworkRepair {
                 } else {
                     if ([string]$a.Status -ne 'Up') {
                         $pnpId = [string]$a.PnPDeviceID
+                        # PnP Device ID validasyonu - sadece bilinen prefix'ler kabul et
+                        if ($pnpId -and $pnpId -notmatch '^(PCI|USB|ROOT|ACPI)\\') {
+                            Write-Log 'WARN' ("Geçersiz PnP Device ID: $pnpId — Enable-PnpDevice atlanıyor")
+                            $pnpId = $null
+                        }
                         $opened = $false
                         try { Enable-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction Stop; $opened = $true; $done += ($a.Name + ' özellikle yeniden açıldı (Up değildi)') }
                         catch {
@@ -1208,11 +1508,20 @@ function Invoke-NetworkRepair {
                         Start-Sleep -Seconds 3
                     }
                     $a2 = Get-NetAdapter -Name $a.Name -ErrorAction SilentlyContinue
-                    if ($a2 -and [string]$a2.Status -eq 'Up') {
+                    if (-not $a2) {
+                        Write-Log 'ALERT' ($a.Name + ' adaptör bulunamadı (NotPresent?). Kablo/Donanım kontrolü gerekir.')
+                        $done += ($a.Name + ' NotPresent — miniport restart atlandı, manuel müdahale gerekir')
+                    } elseif ([string]$a2.Status -eq 'NotPresent') {
+                        Write-Log 'ALERT' ($a.Name + ' fiziksel olarak mevcut değil (NotPresent). Kablo/Donanım kontrolü gerekir.')
+                        $done += ($a.Name + ' NotPresent — miniport restart atlandı, manuel müdahale gerekir')
+                    } elseif ([string]$a2.Status -eq 'Disabled' -or [string]$a2.Status -eq 'LowerLayerDown') {
+                        Write-Log 'ALERT' ($a.Name + ' hala devre dışı (' + $a2.Status + '). Reboot bu durumu düzeltmez; elle açın.')
+                        $done += ($a.Name + ' ' + $a2.Status + ' — miniport restart atlandı, manuel müdahale gerekir')
+                    } elseif ([string]$a2.Status -eq 'Up') {
                         try { Restart-NetAdapter -Name $a2.Name -Confirm:$false -ErrorAction Stop; $done += ($a2.Name + ' miniport yenilendi (güvenli)') }
                         catch { $done += ($a2.Name + ' miniport yenilenemedi: ' + $_.Exception.Message) }
                     } else {
-                        $done += ($(if ($a2) { $a2.Name } else { '?' }) + ' hala Up değil; miniport restart atlandı')
+                        $done += ($a2.Name + ' hala Up değil (' + $a2.Status + '); miniport restart atlandı')
                     }
                 }
             } catch { }

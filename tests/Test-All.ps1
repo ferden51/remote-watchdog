@@ -699,6 +699,19 @@ if ($Section -eq 0 -or $Section -eq 1) {
     $sonucDaily = Get-DailyDigest -LogLines $sonucLogs -OutageReports @() -PeriodStart ([datetime]'2026-10-18T00:00:00') -PeriodEnd ([datetime]'2026-10-19T11:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
     Ok 'günlük rapor sadece "SONUC: N sorun" ile yazan uzun kesintiyi de sayiyor' (($sonucDaily.IncidentCount -eq 1) -and [bool]$sonucDaily.Incidents[0].recovered)
     Ok 'günlük rapor dönemini gün başından alıyor (reboot dilimlemesin)' ($hostText -match '\$periodStart = \$At\.Date')
+    <#
+        GECE OLAYLARI: Rapor penceresi onceki gunun 00:00'undan baslamali.
+        Takvim gunu penceresinde sabah acilan rapor sadece 00:00-08:00'i
+        kapsiyordu; dun geceki (21:48, 22:00, 00:06) kesintiler paneldeki
+        "Gunluk ozet"te hic gorunmuyordu.
+    #>
+    $scopeLogs = @(
+        '2026-10-15 23:50:00 [ALERT] ANLIK AG SORUNU: Ağ sorunu algılandı. Eksik: IP,DNS. Onarım başlatılıyor.',
+        '2026-10-15 23:58:00 [ALERT] [DUZELDI] DESKTOP-TEST | Internet=OK'
+    )
+    $scopeDaily = Get-DailyDigest -LogLines $scopeLogs -OutageReports @() -PeriodStart ([datetime]'2026-10-15T00:00:00') -PeriodEnd ([datetime]'2026-10-16T08:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
+    Ok 'günlük rapor dünkü 00:00''dan itibaren gece olaylarını kapsıyor' (($scopeDaily.IncidentCount -eq 1) -and ($scopeDaily.Markdown -match '15\.10 23:50'))
+    Ok 'günlük özet hangi pencerenin sayıldığını söylüyor' ($scopeDaily.Summary -match "15\.10 00:00'ten beri")
     $flapLogs = @(
         '2026-10-16 09:19:12 [ALERT] ANLIK AG SORUNU: Ağ sorunu. Eksik: IP. Onarım başlatılıyor.',
         '2026-10-16 09:20:02 [INFO] SONUC: tum kontroller tamam.',
@@ -707,14 +720,60 @@ if ($Section -eq 0 -or $Section -eq 1) {
     )
     $flapDaily = Get-DailyDigest -LogLines $flapLogs -OutageReports @() -PeriodStart ([datetime]'2026-10-16T08:00:00') -PeriodEnd ([datetime]'2026-10-17T08:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
     Ok 'günlük rapor sağlıklı döngüyle ayrılan kesintileri birleştirmiyor' (($flapDaily.IncidentCount -eq 2) -and ($flapDaily.Incidents[0].missing -eq 'IP') -and ($flapDaily.Incidents[1].missing -eq 'IP,DNS,HTTPS,sinyal'))
-    <# Writer regresyonu: 08:00 öncesi çalışmaz, ilk uygun çevrimde iki dosya üretir,
+    <#
+        GUNLUK RAPOR "AG BILGILERI" BOLUMU: canli envanter (ag gecidi/DNS/adaptor/DHCP)
+        ve kesinti aninda olculen degerler AYRI bir bolum olarak yazilir.
+    #>
+    $netSnapshot = [pscustomobject]@{
+        collectedAt = '2026-10-16T08:00:00'
+        publicIp = '203.0.113.9'; localIp = '192.168.1.35'; localAlias = 'Ethernet'; localMac = 'AA-BB-CC-DD-EE-FF'
+        linkSpeed = '1 Gbps'; gateway = '192.168.1.1'; dnsServers = @('192.168.1.1', '10.0.0.5')
+        activeAdapter = 'Ethernet'
+        adapters = @(
+            [pscustomobject]@{ name = 'Ethernet'; status = 'Up'; speed = '1 Gbps'; mac = 'AA-BB-CC-DD-EE-FF'; ifIndex = 12; physical = $true }
+            [pscustomobject]@{ name = 'Wi-Fi'; status = 'Disconnected'; speed = ''; mac = ''; ifIndex = 9; physical = $true }
+        )
+        dhcpEnabled = $true; dhcpServer = '192.168.1.1'; leaseObtained = '16.10.2026 08:00'; leaseExpires = '17.10.2026 08:00'
+    }
+    $netOutage = [pscustomobject]@{
+        generated = [datetime]::SpecifyKind([datetime]'2026-10-16T21:44:32', [DateTimeKind]::Local)
+        outageStartUtc = [datetime]::SpecifyKind([datetime]'2026-10-16T21:33:54', [DateTimeKind]::Local)
+        recoveredAt = [datetime]::SpecifyKind([datetime]'2026-10-16T21:46:22', [DateTimeKind]::Local)
+        class = 'upstream'; outcome = 'recovered'; classDetail = 'gateway canli ama dis hat kopuk'
+        gateway = '192.168.1.1'; dnsServers = @('192.168.1.1'); externalConfirmMs = -1
+        dhcpServer = '192.168.1.1'; dhcpServerAlive = $true; corpDns = '10.0.0.5'; corpDnsAlive = $false
+    }
+    $netDaily = Get-DailyDigest -LogLines $sampleLogs -OutageReports @($netOutage) -PeriodStart ([datetime]'2026-10-16T08:00:00') -PeriodEnd ([datetime]'2026-10-17T08:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test' -NetworkInfo $netSnapshot
+    Ok 'günlük rapor ayrı bir ağ bilgileri bölümü içeriyor' (($netDaily.Markdown -match '## Ağ bilgileri') -and ($netDaily.Markdown -match 'Yerel IPv4: 192\.168\.1\.35') -and ($netDaily.Markdown -match 'Varsayılan ağ geçidi: 192\.168\.1\.1') -and ($netDaily.Markdown -match 'DNS sunucuları: 192\.168\.1\.1, 10\.0\.0\.5'))
+    Ok 'günlük rapor DHCP/adaptör durumunu ağ bilgilerinde gösteriyor' (($netDaily.Markdown -match 'DHCP: etkin') -and ($netDaily.Markdown -match 'Adaptörler: Ethernet=Up \(1 Gbps\), Wi-Fi=Disconnected'))
+    Ok 'günlük rapor kesinti anındaki ağ ölçümlerini ayrı başlıkta veriyor' (($netDaily.Markdown -match '### Kesinti anındaki ağ ölçümleri') -and ($netDaily.Markdown -match 'DHCP sunucusu 192\.168\.1\.1 \(erişilebilir\)') -and ($netDaily.Markdown -match 'kurum DNS 10\.0\.0\.5 \(ERİŞİLEMEZ\)'))
+    Ok 'günlük rapor ağ bilgisi toplanamazsa bunu açıkça söyler' (($emptyDaily.Markdown -match '## Ağ bilgileri') -and ($emptyDaily.Markdown -match 'Rapor anında ağ bilgisi toplanamadı'))
+    <#  "SONUC: N sorun" ile acilan olaya kesinti raporu eslendiginde olay nesnesi
+        'net' alanini almaliydi; almayan olayda ag olcumleri atilip hata veriyordu. #>
+    $sonucOutage = [pscustomobject]@{
+        generated = [datetime]::SpecifyKind([datetime]'2026-10-18T23:00:00', [DateTimeKind]::Local)
+        outageStartUtc = [datetime]::SpecifyKind([datetime]'2026-10-18T22:49:40', [DateTimeKind]::Local)
+        recoveredAt = [datetime]::SpecifyKind([datetime]'2026-10-18T23:05:00', [DateTimeKind]::Local)
+        class = 'upstream'; outcome = 'recovered'; classDetail = 'gateway canli ama dis hat kopuk'
+        gateway = '192.168.12.254'; dnsServers = @('192.168.10.3'); externalConfirmMs = -1
+        dhcpServer = '192.168.10.50'; dhcpServerAlive = $false; corpDns = '192.168.10.3'; corpDnsAlive = $false
+    }
+    $sonucNetDaily = $null
+    $sonucNetHata = ''
+    try {
+        $sonucNetDaily = Get-DailyDigest -LogLines $sonucLogs -OutageReports @($sonucOutage) -PeriodStart ([datetime]'2026-10-18T00:00:00') -PeriodEnd ([datetime]'2026-10-19T11:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
+    } catch { $sonucNetHata = $_.Exception.Message }
+    Ok 'günlük rapor "SONUC" ile açılan olaya kesinti ölçümünü de ekliyor' (($null -ne $sonucNetDaily) -and ($sonucNetHata -eq '') -and ($sonucNetDaily.IncidentCount -eq 1) -and ($null -ne $sonucNetDaily.Incidents[0].net) -and ([string]$sonucNetDaily.Incidents[0].net.gateway -eq '192.168.12.254'))
+    Ok 'host canlı ağ envanteri topluyor ve rapora geçiriyor' (($hostText -match 'function Get-NetworkInfoSnapshot') -and ($hostText -match '-NetworkInfo \$netInfo'))
+    <#  Writer regresyonu: 08:00 öncesi çalışmaz, ilk uygun çevrimde iki dosya üretir,
        aynı gün ikinci çağrı kopya rapor yaratmaz. #>
-    $dailyOldBase = $script:BaseDir; $dailyOldState = $script:StateFile; $dailyOldLog = $script:LogFile; $dailyOldVersion = $script:AppVersion
+    $dailyOldBase = $script:BaseDir; $dailyOldState = $script:StateFile; $dailyOldLog = $script:LogFile; $dailyOldVersion = $script:AppVersion; $dailyOldLogDir = $script:LogDir
     $dailyTestRoot = Join-Path $env:TEMP ('rw-daily-report-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $dailyTestRoot | Out-Null
     $script:BaseDir = $dailyTestRoot
     $script:StateFile = Join-Path $dailyTestRoot 'host-state.json'
     $script:LogFile = Join-Path $dailyTestRoot 'host-watchdog.log'
+    $script:LogDir = Join-Path $dailyTestRoot 'log'
     $script:AppVersion = 'test'
     function Invoke-StateUpdate {
         param([scriptblock]$Mutate)
@@ -723,15 +782,41 @@ if ($Section -eq 0 -or $Section -eq 1) {
         Save-State $s
         return $s
     }
-    foreach ($code in (Get-FnCode $Host_ @('Write-DailyReport'))) { Invoke-Expression $code }
+    foreach ($code in (Get-FnCode $Host_ @('Write-DailyReport', 'Write-DailyReportFile', 'Get-DailyLogLines', 'Get-NetworkInfoSnapshot', 'Get-DefaultGatewayIp', 'Get-DefaultRouteIfIndex'))) { Invoke-Expression $code }
+    <#
+        LOG ROTASYONU GECE OLAYLARINI SILIYORDU: aktif log 2 MB'yi asinca arsive
+        tasinir (rotasyon geceleri olur) ve rapor yalnizca aktif logu okudugu icin
+        o gecenin kesintileri hicbir rapora girmiyordu.
+    #>
+    New-Item -ItemType Directory -Force -Path $script:LogDir | Out-Null
+    Set-Content -LiteralPath $script:LogFile -Value '2026-10-17 02:05:00 [INFO] dongu basladi' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $script:LogDir 'host-watchdog-20261017-020523.log') -Value @(
+        '2026-10-17 01:05:00 [ALERT] ANLIK AG SORUNU: Ağ sorunu algılandı. Eksik: IP. Onarım başlatılıyor.',
+        '2026-10-17 01:09:00 [ALERT] [DUZELDI] DESKTOP-TEST | Internet=OK'
+    ) -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $script:LogDir 'host-watchdog-20261001-023620.log') -Value '2026-10-01 00:05:00 [ALERT] ANLIK AG SORUNU: eski arsiv' -Encoding UTF8
+    $rotLines = @(Get-DailyLogLines -PeriodStart ([datetime]'2026-10-17T00:00:00'))
+    $rotText = ($rotLines -join "`n")
+    Ok 'günlük rapor log rotasyonunda arşive taşınan GECE olaylarını da görüyor' (($rotText -match '2026-10-17 01:05:00') -and ($rotText -match '2026-10-17 02:05:00'))
+    Ok 'günlük rapor çok eski log arşivlerini okumuyor (yük değil)' ($rotText -notmatch '2026-10-01 00:05:00')
     $beforeDaily = Write-DailyReport -At ([datetime]'2026-10-16T07:59:00') -CurrentOk $true -CurrentSummary 'Internet=OK'
     Ok 'günlük rapor 08:00 öncesi oluşmuyor' ([string]::IsNullOrEmpty([string]$beforeDaily))
     $dailyPath = Write-DailyReport -At ([datetime]'2026-10-16T08:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK'
     $dailyAgain = Write-DailyReport -At ([datetime]'2026-10-16T08:05:00') -CurrentOk $true -CurrentSummary 'Internet=OK'
     $dailyFiles = @(Get-ChildItem (Join-Path $dailyTestRoot 'diag') -Filter 'daily-2026-10-16.*' -File -ErrorAction SilentlyContinue)
     Ok 'günlük rapor MD+JSON yazar ve aynı gün bir kez üretir' (($dailyPath -eq $dailyAgain) -and (Test-Path -LiteralPath $dailyPath) -and (Test-Path -LiteralPath ([System.IO.Path]::ChangeExtension($dailyPath, '.json'))) -and ($dailyFiles.Count -eq 2))
+    $dailyJson = $null
+    try { $dailyJson = Get-Content -LiteralPath ([System.IO.Path]::ChangeExtension($dailyPath, '.json')) -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+    Ok 'günlük rapor JSON una ağ bilgileri de yazılıyor' (($null -ne $dailyJson) -and ($dailyJson.PSObject.Properties.Name -contains 'networkInfo') -and ([string]$dailyJson.markdown -match '## Ağ bilgileri'))
+    Ok 'günlük rapor dosyası bugüne ait ama dün 00:00''dan itibaren kapsıyor' (($null -ne $dailyJson) -and (([datetime]$dailyJson.periodStart).Date -eq ([datetime]'2026-10-15')) -and (([datetime]$dailyJson.periodEnd).Date -eq ([datetime]'2026-10-16')))
+    <#  Gece yarisi: bir gunun raporu gun bitimine kadar tamamlanmazsa o gunun son
+        saatlerindeki olaylar hicbir rapora giriyordu. #>
+    $null = Write-DailyReport -At ([datetime]'2026-10-17T08:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK'
+    $jPrev = $null
+    try { $jPrev = Get-Content -LiteralPath (Join-Path $dailyTestRoot 'diag\daily-2026-10-16.json') -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+    Ok 'gece yarısından sonra önceki günün raporu tam güne tamamlanıyor' (($null -ne $jPrev) -and ((([datetime]$jPrev.periodEnd) -ge ([datetime]'2026-10-17T00:00:00'))))
     Remove-Item -LiteralPath $dailyTestRoot -Recurse -Force -ErrorAction SilentlyContinue
-    $script:BaseDir = $dailyOldBase; $script:StateFile = $dailyOldState; $script:LogFile = $dailyOldLog; $script:AppVersion = $dailyOldVersion
+    $script:BaseDir = $dailyOldBase; $script:StateFile = $dailyOldState; $script:LogFile = $dailyOldLog; $script:AppVersion = $dailyOldVersion; $script:LogDir = $dailyOldLogDir
     Ok 'panel iptal istegini zaman asiminda dusurmuyor' (($panelText -match 'RebootCancelTimeoutFired') -and ($panelText -notmatch "iptali onaylanmadi; geri sayim suruyor olabilir"))
     Ok 'panel iptal dosyasi yazilamazsa durumu geri aliyor' (($panelText -match 'iptal dosyasi yazilamadi') -and ($panelText -match 'iptal dosyasi yazilamadi') -and ($panelText -match '\$yazildi = \$true'))
     Ok 'panel bayat reboot-ack.json ile yalan onay vermiyor (tazelik kontrolu)' (($panelText -match '\$ackFresh') -and ($panelText -match 'RebootCancelAt.AddSeconds\(-5\)'))
@@ -772,6 +857,9 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host disabled NIC varken reboot baslatmiyor (bos reboot dongusu olmamali)' ($rbnFn2.Success -and ($rbnFn2.Value -match 'Get-DefaultPhysicalAdapter') -and ($rbnFn2.Value -match "yeniden başlatma BASLATILMADI") -and ($rbnFn2.Value -match "'Disabled'"))
     Ok 'host NIC yenilemesi tum NetEnabled aygitlari / VPNleri dolasmiyor' (($rungCode -notmatch 'Win32_NetworkAdapter -Filter') -and ($rungCode -notmatch 'pnputil /restart-device'))
     Ok 'host reboot-siz kademede DNS/ARP, servisler ve fiziksel NIC DHCP sirali' (($rungCode -match 'ipconfig /flushdns') -and ($rungCode -match 'arp -d \*') -and ($rungCode -match "'Dhcp', 'Dnscache', 'NlaSvc', 'WlanSvc', 'dot3svc'") -and ($rungCode -match 'ipconfig /release') -and ($rungCode -match 'ipconfig /renew'))
+    Ok 'host onarimda PnP Device ID validasyonu yapiyor' (($rungCode -match 'PnPDeviceID') -and ($rungCode -match "pnpId.*-notmatch.*PCI.*USB.*ROOT.*ACPI"))
+    Ok 'host onarimda NotPresent icin ALERT + erken donus var' ($rungCode -match 'NotPresent' -and $rungCode -match 'Write-Log.*ALERT' -and $rungCode -match 'miniport restart atlandı')
+    Ok 'host onarimda Disabled/LowerLayerDown icin ALERT + erken donus var' ($rungCode -match "Disabled.*LowerLayerDown" -and $rungCode -match 'Write-Log.*ALERT' -and $rungCode -match 'manuel müdahale gerekir')
     Ok 'host reboot-siz onarimda Winsock/IP reset calistirmiyor' (($rungCode -notmatch 'netsh winsock reset') -and ($rungCode -notmatch 'netsh int ipv4 reset'))
     Ok 'host reboot-siz onarim akisini en fazla 4 kademeyle sinirliyor' (($hostText -match 'reboot-siz onarim en fazla 4 kademe') -and ($hostText -match '\[math\]::Min\(4, \[math\]::Max\(1, \[int\]\$cfg\.NetMaxRepairRung\)\)'))
     <# Gercek reboot sonrasi gunluk rapor yenilenir; yoksa eski rapor "gecici kesinti"

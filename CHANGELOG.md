@@ -4,6 +4,97 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.18] - 2026-10-21
+
+Panel etkileşimi ve günlük özet görünümü iyileştirildi.
+
+### ✨ Yeni ve iyileştirilen
+
+- **Günlük özet kartı:** Sağ menüdeki kart günlük kesinti ve doğrulanmış yeniden
+  başlatma sayılarını, rapor dönemini ve son güncelleme zamanını gösterir.
+- **Yeniden başlatma penceresi:** Devam et ve iptal eylemleri net geri bildirim verir;
+  butonların basılı/odaklı görünümü düzeltildi ve yeniden başlatmanın bu makineye
+  etkisi ile zamanlaması açıkça belirtilir.
+- **Ana görünüm ve gezinme:** Panel Genel Durum sayfasında açılır; tepsi menüsü de
+  buraya yönlendirir. Dar pencerelerde başlık eylemleri satıra sarılır.
+- **Eylem ve durum metinleri:** Kalıcı zorla yeniden başlatma ayarı, çevrim dışı
+  kullanılabilirlik ve bazı Türkçe arayüz etiketleri daha açık hale getirildi.
+
+## [1.3.17] - 2026-10-21
+
+Günlük özet ve rapor **gece kesintilerini artık her zaman içeriyor**. Rapor penceresi
+takvim günü (bugün 00:00) iken sabah açılan rapor sadece 00:00-08:00'i kapsıyordu;
+dün akşam ve gecenin kesintileri (21:48, 22:00, 00:06) paneldeki "Günlük özet"
+kartında **hiç görünmüyordu**.
+
+### 🐞 Düzeltilen
+
+- **Rapor penceresi dün 00:00'dan başlıyor.** Rapor dosyası hâlâ bugüne ait
+  (`daily-YYYY-MM-DD`), ama kapsamı "dün 00:00 → şimdi". Böylece akşamın ve gecenin
+  olayları hem raporda hem paneldeki özette görünür; sabah 08:00'de açılan rapor
+  "kesinti yok" demez.
+- **Özet hangi pencerenin sayıldığını söylüyor.** Özet metni artık
+  "(20.10 00:00'ten beri)" ibaresiyle birlikte verilir; paneldeki "Günlük özet"
+  kartında kapsam net görünür.
+- **Gece yarısı sonrası önceki gün kapatılıyor.** Önceki gün kendi takvim günüyle
+  (00:00-24:00) kapatılır; gün sonundaki olaylar hiçbir rapora girmiyordu.
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **438 kontrol** (0 hata); `Test-UI` 54/0;
+  `Verify-OutageLogic` 34/0.
+
+## [1.3.16] - 2026-10-21
+
+Günlük raporda **geceye ait olaylar kayboluyordu**. İki ayrı mekanizma düzeltildi: log
+rotasyonu gece olaylarını arşive taşıyordu, rapor o arşivi okumuyordu; gün bitimine
+kadar yazılmayan son saatler de hiçbir rapora girmiyordu.
+
+### 🐞 Düzeltilen
+
+- **Gece olayları log rotasyonuyla kayboluyordu.** Aktif günlük 2 MB'yi aşınca
+  `log/host-watchdog-<damga>.log` arşivine taşınıyor; bu rotasyon makine boş olduğunda,
+  yani **gece** oluyor. Rapor yalnızca aktif günlüğü okuduğu için rotasyondan sonraki
+  gecenin kesintileri **hiçbir raporda görünmüyordu**. 17.10 gecesi 06:39'daki
+  "Ag katmani FAIL", 20:24 ve 21:14 olayları arşivde kalmış, raporlarda hiç yoktu.
+  Artık `Get-DailyLogLines` arşivleri de okuyor (yalnızca dönem başından eskiye
+  geldiklerinde; çok eski arşivler okunmuyor, yük artmıyor).
+- **Gün sonundaki olaylar rapora girmiyordu.** Rapor saatte bir yenileniyor; gece
+  yarısından sonra dosya yeni güne geçtiği için bir günün son saati (19.10 23:36-24:00,
+  20.10 23:06-24:00) **hiçbir rapora girmiyordu**. Artık gece yarısı sonrası ilk
+  döngüde (08:00) önceki gün 00:00-24:00 olarak kapatılıyor; o günün ağ ölçümleri
+  kendi anlık envanteri olarak korunuyor.
+- **"SONUC: N sorun" ile açılan olaya kesinti ölçümü eklenemiyordu.** Olay nesnesinde
+  `net` alanı eksik olduğu için atama hata veriyordu; bu olayların ağ ölçümleri
+  rapora girmiyordu.
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **435 kontrol** (0 hata); `Test-UI` 54/0;
+  `Verify-OutageLogic` 34/0.
+
+## [1.3.15] - 2026-10-21
+
+Günlük durum özetine ayrı bir **ağ bilgileri** bölümü eklendi. Rapor artık "bu makine
+hangi ağda?" ve "kesinti anında ağ geçidi/DNS/DHCP ne durumdaydı?" sorularını tek
+bakışta yanıtlıyor; sınıflandırmanın dayandığı ham ölçümler kaybolmuyor.
+
+### ✨ Yeni
+
+- **Günlük raporda "Ağ bilgileri" bölümü.** Genel (dış) IP, yerel IPv4 ve adaptör adı,
+  varsayılan ağ geçidi, DNS sunucuları, DHCP durumu (sunucu + kiralama bitişi), aktif
+  bağlantı ve hızı, tüm adaptörlerin durumu ve ölçüm zamanı rapora yazılır.
+- **"Kesinti anındaki ağ ölçümleri" alt başlığı.** Her kesinti için o an ölçülen ağ
+  geçidi, DNS sunucuları, DHCP sunucusu (erişilebilir/ERİŞİLEMEZ), kurum DNS erişimi
+  ve dış hat (1.1.1.1:443) doğrulaması listelenir; BT ile paylaşılacak kanıt raporda kalır.
+- **Ağ bilgileri JSON'a da yazılır** (`networkInfo` alanı) — panel/panoda otomatik
+  kullanılabilir; ölçüm alınamazsa rapor yine de üretilir ("toplanamadı" notuyla).
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **431 kontrol** (0 hata); `Test-UI` 54/0;
+  `Verify-OutageLogic` 34/0.
+
 ## [1.3.14] - 2026-10-19
 
 **Kritik güvenlik düzeltmesi:** 18 Eki gecesi ağ kartı kapalı kaldı ve sabah elle
