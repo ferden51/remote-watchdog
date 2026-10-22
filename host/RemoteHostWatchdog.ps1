@@ -334,6 +334,91 @@ function Invoke-StateUpdate {
     return $s
 }
 
+$script:HostLockDepth = @{}
+$script:HostLockStream = @{}
+
+function Open-HostLock {
+    <#
+        Kilit dosyasini PAYLASIMSIZ acar: ayni anda sadece bir surec yazabilir.
+        Neden mutex degil: 'Global\' adli mutex'i acmak yetkiye baglidir ve acilamazsa
+        hata yutulur; o durumda iki dongu AYNI ANDA calisir. 21.10 21:43'te uc dongu
+        ayni anda kostu: ayni acilis iki kez "makine yeniden acildi" olarak yazildi
+        (gunluk raporda tek restart iki gorunuyordu), durum sayaci iki kez artti ve
+        onarim kademeleri iki kez uygulandi. Dosya kilidi (FileShare.None) yetkiden
+        bagimsizdir ve oturumlar arasi gecerlidir.
+        Doner: @{ Locked=<bool>; Held=<bool>; Stream=<FileStream> }
+          Locked  -> kilit alindi (Stream'i kapatmak borcunuz)
+          Held   -> baska bir surec kilidi tutuyor
+          Locked=false, Held=false -> kilit acilamadi (izin vb.): kilitsiz devam et
+    #>
+    param([string]$Name = 'host')
+    $path = Join-Path $BaseDir ('.lock-' + $Name)
+    $fs = $null
+    try {
+        if (-not (Test-Path -LiteralPath $BaseDir)) { New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null }
+        $fs = New-Object System.IO.FileStream($path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        return [pscustomobject]@{ Locked = $true; Held = $false; Stream = $fs }
+    } catch {
+        if ($fs) { try { $fs.Dispose() } catch { } }
+        # Paylasim ihlali (ERROR_SHARING_VIOLATION = 32) -> baska bir surec tutuyor.
+        # New-Object ctor hatasini MethodInvocationException'a sarar; gercek Win32
+        # kodu ic hatanin HResult'inde durur.
+        $code = 0
+        $ex = $_.Exception
+        while ($ex -and $code -ne 32) {
+            try { $code = ([int]$ex.HResult) -band 0xFFFF } catch { $code = 0 }
+            $ex = $ex.InnerException
+        }
+        if ($code -eq 32) { return [pscustomobject]@{ Locked = $false; Held = $true; Stream = $null } }
+        return [pscustomobject]@{ Locked = $false; Held = $false; Stream = $null }
+    }
+}
+
+function Enter-HostLock {
+    <#
+        Kilidi al; baska bir surecte tutuluyorsa TimeoutMs kadar bekler.
+        $true donerse kilit sende (Exit-HostLock ile birak), $false ise baska yerde.
+        Ayni surec icinde yeniden girilebilir (her ada ayri sayac).
+    #>
+    param([string]$Name = 'host', [int]$TimeoutMs = 0)
+    if (-not $script:HostLockDepth) { $script:HostLockDepth = @{} }
+    if (-not $script:HostLockStream) { $script:HostLockStream = @{} }
+    if ($script:HostLockDepth.ContainsKey($Name)) {
+        $script:HostLockDepth[$Name] = [int]$script:HostLockDepth[$Name] + 1
+        return $true
+    }
+    $deadline = (Get-Date).AddMilliseconds([Math]::Max(0, $TimeoutMs))
+    while ($true) {
+        $r = Open-HostLock -Name $Name
+        if ($r.Locked) {
+            $script:HostLockDepth[$Name] = 1
+            $script:HostLockStream[$Name] = $r.Stream
+            return $true
+        }
+        # Kilit dosyasi acilamadi ama baskasi de tutmuyor (izin vb.): kilitsiz devam et.
+        # Yoksa watchdog tamamen durur; bu durumda tekillik rapor tarafinda korunur.
+        if (-not $r.Held) { return $true }
+        if ((Get-Date) -ge $deadline) { return $false }
+        Start-Sleep -Milliseconds 100
+    }
+}
+
+function Exit-HostLock {
+    param([string]$Name = 'host')
+    if (-not $script:HostLockDepth) { $script:HostLockDepth = @{} }
+    if (-not $script:HostLockStream) { $script:HostLockStream = @{} }
+    if ($script:HostLockDepth.ContainsKey($Name)) {
+        $d = [int]$script:HostLockDepth[$Name]
+        if ($d -gt 1) { $script:HostLockDepth[$Name] = $d - 1; return }
+        $script:HostLockDepth.Remove($Name)
+    }
+    if ($script:HostLockStream.ContainsKey($Name)) {
+        $s = $script:HostLockStream[$Name]
+        $script:HostLockStream.Remove($Name)
+        try { $s.Dispose() } catch { }
+    }
+}
+
 function Add-Result {
     param([string]$Name, [bool]$Ok, [string]$Detail = '', [string]$Repair = '', [bool]$Skipped = $false, [hashtable]$Metrics = @{})
     [void]$script:Results.Add([pscustomobject]@{ Name = $Name; Ok = $Ok; Skipped = $Skipped; Detail = $Detail; Repair = $Repair; Metrics = $Metrics })
@@ -923,6 +1008,7 @@ function Get-DailyDigest {
     $incidents = New-Object System.Collections.ArrayList
     $active = $null
     $reboots = New-Object System.Collections.ArrayList
+    $rebootKeys = @{}
     # Ayni saniyedeki reboot ve [DUZELDI] satirlarinda dosya sirasini koru;
     # aksi halde PS 5 Sort-Object onlari ters cevirip reboot'u olaya baglamayabilir.
     foreach ($entry in @($entries | Sort-Object At, Sequence)) {
@@ -956,8 +1042,21 @@ function Get-DailyDigest {
             [void]$incidents.Add($active)
         }
         if ($text -match 'makine yeniden acildi; restart butceye yazildi') {
-            [void]$reboots.Add([pscustomobject]@{ at = $entry.At.ToString('o'); text = $text })
-            if ($active) { $active.rebooted = $true; $active.rebootAt = $entry.At.ToString('o') }
+            <#
+                AYNI ACILIS BIR KEZ SAYILIR. Es zamanli iki dongu ayni acilisi iki kez
+                "makine yeniden acildi" diye yazabiliyor (21.10 21:43) ve rapor tek
+                restart'i "2 gercek yeniden baslatma" olarak sayiyordu. Anahtar: log
+                satırındaki acilis damgası (acilis=...); damga yoksa tam zaman damgasi.
+            #>
+            $bootKey = ''
+            if ($text -match 'acilis=([^\s|]+)') { $bootKey = [string]$Matches[1] }
+            if (-not $bootKey) { $bootKey = $entry.At.ToString('yyyy-MM-dd HH:mm:ss') }
+            $yeni = $true
+            if ($rebootKeys.ContainsKey($bootKey)) { $yeni = $false } else { $rebootKeys[$bootKey] = $true }
+            if ($yeni) {
+                [void]$reboots.Add([pscustomobject]@{ at = $entry.At.ToString('o'); text = $text })
+                if ($active) { $active.rebooted = $true; $active.rebootAt = $entry.At.ToString('o') }
+            }
         }
         if ($text -match '\[DUZELDI\]') {
             if ($active) {
@@ -1837,7 +1936,26 @@ function Test-Panel {
             }
         } else { $repair += 'panel calismiyor' }
     }
-    Add-Result 'Kontrol paneli' $ok ('surec=' + $procs.Count + ', gorev=' + $m.taskState) ($repair -join '; ') $true $m
+    <#
+        "Kontrol paneli" kontrolu bir KULLANICI oturumu uygulamasini olcer.
+        Once her zaman ATLANDI (SKIP) isaretleniyordu; bu hem raporda
+        "Kontrol paneli=SKIP" (gorunurde sorun) hem panel arayuzunde
+        "KAPALI" yaziyordu, oysa panel calisiyordu. Kural:
+          - etkilesimli oturum yoksa      -> ATLANDI (kullanici giris yapmamis, hata degil)
+          - panel ayaktaysa              -> TAMAM (OK)
+          - panel yoksa ve yeni baslatildiysa -> ATLANDI (onarim tetiklendi, bekleniyor)
+          - panel yoksa                  -> SORUN (FAIL), onarim panel gorevini tetikler
+    #>
+    $interactive = $false
+    try { $interactive = (@(Get-Process -Name 'explorer' -ErrorAction SilentlyContinue).Count -gt 0) } catch { }
+    $m.interactiveSession = $interactive
+    $skipped = (-not $interactive)
+    if ($interactive -and -not $ok) {
+        $startedRecently = $false
+        try { if ($task -and $task.LastRunTime) { $startedRecently = (((Get-Date) - $task.LastRunTime).TotalMinutes -lt 3) } } catch { }
+        if ($startedRecently) { $skipped = $true; $repair += 'panel yeni baslatildi (bekleniyor)' }
+    }
+    Add-Result 'Kontrol paneli' $ok ('surec=' + $procs.Count + ', gorev=' + $m.taskState) ($repair -join '; ') $skipped $m
 }
 
 function Test-CrdService {
@@ -2578,68 +2696,82 @@ function Sync-RebootAccounting {
     #>
     $boot = Get-BootStamp
     if (-not $boot) { return (Get-State) }
-    return Invoke-StateUpdate {
-        param($st)
-        if (-not $st.LastBootUtc) { $st.LastBootUtc = $boot; return }
-        if ($st.LastBootUtc -ne $boot) {
-            $gercek = [string]$st.PendingRebootUtc
-            $liste = @(@($st.RebootsUtc) | Where-Object { $_ })
-            if ($gercek -and ($liste -notcontains $gercek)) { $liste += $gercek }
-            $st.RebootsUtc = @($liste)
-            $st.PendingRebootUtc = ''
-            $st.LastBootUtc = $boot
-            $st.ConsecutiveFailures = 0
-            $st.BreakerKey = ''
-            <#
-                Saglikli seri REBOOT ILE yeniden baslar. Aksi halde LastHealthyUtc eski
-                kalir ve sonraki saglikli dongu, reboot'tan hemen sonra butceyi ANINDA
-                sifirlar. (AllOk'daki $oncekiSagliksiz kontrolu tek basina yetmedi:
-                Sync once ConsecutiveFailures/PendingRebootUtc'yi temizliyor ve OutageStartUtc
-                bir iptal/onay yolunda bosaltilmissa dort sinyal de temiz gorunuyordu -
-                14 Eki gecesi LastHealthyUtc 13 Ekim'de kaldi.)
-            #>
-            $st.LastHealthyUtc = (Get-Date).ToString('o')
-            Write-Log 'INFO' ('makine yeniden acildi; restart butceye yazildi (' + $liste.Count + '/' + $cfg.MaxRestartsPerDay + ') | acilis=' + $boot)
-            <#
-                GUNLUK RAPORU YENILE. Rapor gun basina bir kez uretilir (08:00 sonrasi ilk
-                dongude) ve reboot'tan SONRAKIN olaylari icermez; kullanici eski raporda
-                "gecici kesinti" gorur cunku yeni reboot henuz eklenmemis. Kullanici "her
-                gun sormak istemiyor" dedigi icin gercek reboot olunca bugunun raporu
-                silinir; ayni dongunun Write-DailyReport'i onu yeniden uretir.
-            #>
-            try {
-                $diagDir = Join-Path $BaseDir 'diag'
-                $todayStamp = (Get-Date).ToString('yyyy-MM-dd')
-                foreach ($ext in @('.json', '.md')) {
-                    $oldReport = Join-Path $diagDir ('daily-' + $todayStamp + $ext)
-                    if (Test-Path -LiteralPath $oldReport) { Remove-Item -LiteralPath $oldReport -Force -ErrorAction SilentlyContinue }
-                }
-            } catch { }
-            return
-        }
-        if ($st.PendingRebootUtc) {
-            <#
-                ERKEN HUKUM VERME. Bekleyen reboot henuz suruyor olabilir (geri sayim +
-                nobetci + kapanma + acilis). Acilis degismedi diye ANINDA "olmadi" deyip
-                damgayi silmek, gerceklesen reboot'un butceye YAZILMAMASINA yol acar
-                (14 Eki 21:59:56'da, 30 sn'lik sayacin 6. saniyesinde yapildi).
-                Kural: damga, reboot penceresinden (gecikme + 180 sn, en az 120 sn) eskiyse
-                sahte sayilir; daha gencse "hala suruyor olabilir" denip birakilir.
-            #>
-            $bekleyenYasSn = -1
-            try { $bekleyenYasSn = [int](((Get-Date) - [datetime]::Parse([string]$st.PendingRebootUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalSeconds) } catch { }
-            $pencere = ([int]$global:cfg.RebootDelaySeconds + 180)
-            if ($pencere -lt 120) { $pencere = 120 }
-            if ($pencere -gt 900) { $pencere = 900 }
-            if ($bekleyenYasSn -ge 0 -and $bekleyenYasSn -lt $pencere) {
-                Write-Log 'INFO' ('bekleyen restart henuz suruyor olabilir (' + $bekleyenYasSn + ' sn, pencere ' + $pencere + ' sn); sahte kayit temizlenmedi')
-            } else {
-                $sahte = [string]$st.PendingRebootUtc
-                $st.RebootsUtc = @(@($st.RebootsUtc) | Where-Object { $_ -and ([string]$_ -ne $sahte) })
+    <#
+        TEKIL MUHASEBE. Ayni anda iki dongu calisirsa ikisi de "acilis zamani
+        degisti" gorur ve ayni satiri iki kez yazar: gunluk raporda tek restart
+        iki gorunuyordu (21.10 21:43) ve butce iki kez islenirdi. Dosya kilidi
+        (yetkiden bagimsiz) ile tekil hale getirilir.
+    #>
+    if (-not (Enter-HostLock -Name 'boot' -TimeoutMs 5000)) {
+        Write-Log 'INFO' 'boot muhasebesi baska bir dongude yapiliyor; bu calisma atlandi'
+        return (Get-State)
+    }
+    try {
+        return Invoke-StateUpdate {
+            param($st)
+            if (-not $st.LastBootUtc) { $st.LastBootUtc = $boot; return }
+            if ($st.LastBootUtc -ne $boot) {
+                $gercek = [string]$st.PendingRebootUtc
+                $liste = @(@($st.RebootsUtc) | Where-Object { $_ })
+                if ($gercek -and ($liste -notcontains $gercek)) { $liste += $gercek }
+                $st.RebootsUtc = @($liste)
                 $st.PendingRebootUtc = ''
-                Write-Log 'WARN' ('restart GERCEKLESMEDI (acilis zamani degismedi, shutdown reddedilmis olabilir); sahte butce kaydi temizlendi')
+                $st.LastBootUtc = $boot
+                $st.ConsecutiveFailures = 0
+                $st.BreakerKey = ''
+                <#
+                    Saglikli seri REBOOT ILE yeniden baslar. Aksi halde LastHealthyUtc eski
+                    kalir ve sonraki saglikli dongu, reboot'tan hemen sonra butceyi ANINDA
+                    sifirlar. (AllOk'daki $oncekiSagliksiz kontrolu tek basina yetmedi:
+                    Sync once ConsecutiveFailures/PendingRebootUtc'yi temizliyor ve OutageStartUtc
+                    bir iptal/onay yolunda bosaltilmissa dort sinyal de temiz gorunuyordu -
+                    14 Eki gecesi LastHealthyUtc 13 Ekim'de kaldi.)
+                #>
+                $st.LastHealthyUtc = (Get-Date).ToString('o')
+                Write-Log 'INFO' ('makine yeniden acildi; restart butceye yazildi (' + $liste.Count + '/' + $cfg.MaxRestartsPerDay + ') | acilis=' + $boot)
+                <#
+                    GUNLUK RAPORU YENILE. Rapor gun basina bir kez uretilir (08:00 sonrasi ilk
+                    dongude) ve reboot'tan SONRAKIN olaylari icermez; kullanici eski raporda
+                    "gecici kesinti" gorur cunku yeni reboot henuz eklenmemis. Kullanici "her
+                    gun sormak istemiyor" dedigi icin gercek reboot olunca bugunun raporu
+                    silinir; ayni dongunun Write-DailyReport'i onu yeniden uretir.
+                #>
+                try {
+                    $diagDir = Join-Path $BaseDir 'diag'
+                    $todayStamp = (Get-Date).ToString('yyyy-MM-dd')
+                    foreach ($ext in @('.json', '.md')) {
+                        $oldReport = Join-Path $diagDir ('daily-' + $todayStamp + $ext)
+                        if (Test-Path -LiteralPath $oldReport) { Remove-Item -LiteralPath $oldReport -Force -ErrorAction SilentlyContinue }
+                    }
+                } catch { }
+                return
+            }
+            if ($st.PendingRebootUtc) {
+                <#
+                    ERKEN HUKUM VERME. Bekleyen reboot henuz suruyor olabilir (geri sayim +
+                    nobetci + kapanma + acilis). Acilis degismedi diye ANINDA "olmadi" deyip
+                    damgayi silmek, gerceklesen reboot'un butceye YAZILMAMASINA yol acar
+                    (14 Eki 21:59:56'da, 30 sn'lik sayacin 6. saniyesinde yapildi).
+                    Kural: damga, reboot penceresinden (gecikme + 180 sn, en az 120 sn) eskiyse
+                    sahte sayilir; daha gencse "hala suruyor olabilir" denip birakilir.
+                #>
+                $bekleyenYasSn = -1
+                try { $bekleyenYasSn = [int](((Get-Date) - [datetime]::Parse([string]$st.PendingRebootUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalSeconds) } catch { }
+                $pencere = ([int]$global:cfg.RebootDelaySeconds + 180)
+                if ($pencere -lt 120) { $pencere = 120 }
+                if ($pencere -gt 900) { $pencere = 900 }
+                if ($bekleyenYasSn -ge 0 -and $bekleyenYasSn -lt $pencere) {
+                    Write-Log 'INFO' ('bekleyen restart henuz suruyor olabilir (' + $bekleyenYasSn + ' sn, pencere ' + $pencere + ' sn); sahte kayit temizlenmedi')
+                } else {
+                    $sahte = [string]$st.PendingRebootUtc
+                    $st.RebootsUtc = @(@($st.RebootsUtc) | Where-Object { $_ -and ([string]$_ -ne $sahte) })
+                    $st.PendingRebootUtc = ''
+                    Write-Log 'WARN' ('restart GERCEKLESMEDI (acilis zamani degismedi, shutdown reddedilmis olabilir); sahte butce kaydi temizlendi')
+                }
             }
         }
+    } finally {
+        Exit-HostLock -Name 'boot'
     }
 }
 
@@ -4014,7 +4146,17 @@ function Test-ProbeBeatDue {
 }
 
 function Test-CycleRunning {
-    <#  Su an baska bir tam dongu calisiyor mu? (ayni anda tek dongu kurali) #>
+    <#
+        Su an baska bir tam dongu calisiyor mu? (ayni anda tek dongu kurali)
+        Kilit iki katmandir: dosya kilidi (yetkiden bagimsiz) ve Global\ mutex.
+        Dosya kilidi tutuluyorsa ya da mutex baska bir surecte kilitliyse "calisiyor".
+    #>
+    $r = Open-HostLock -Name 'cycle'
+    if ($r.Locked) {
+        try { $r.Stream.Dispose() } catch { }
+    } elseif ($r.Held) {
+        return $true
+    }
     try {
         $m = New-Object System.Threading.Mutex($false, 'Global\RemoteWatchdogCycle')
         $got = $m.WaitOne(0)
@@ -4026,28 +4168,40 @@ function Test-CycleRunning {
 
 function Invoke-CycleLocked {
     <#
-        Tam donguyu Global\RemoteWatchdogCycle kilidiyle sarar: ayni anda ikinci bir dongu
-        CALISMAZ.
+        Tam donguyu kilitle sarar: ayni anda ikinci bir dongu CALISMAZ.
         Neden sart: -UserFallback yolu (canli yoklamanin tetikledigi yol) onceki surumde
         kilidi hic almadan Invoke-Watchdog cagiriyordu. Bu yuzden Test-CycleRunning her
         zaman "calismiyor" diyor ve 1 dakikalik FastProbe her seferinde YENI bir dongu
         baslatiyordu. Sonuc: saniyede bir tam dongu, cift sayimlar, restart butcesinin
         sahte kayitlarla dolmasi ve msg.exe kutu birikimi.
+        Kilit iki katmanli: (1) dosya kilidi - yetkiden bagimsiz, oturumlar arasi;
+        (2) Global\RemoteWatchdogCycle mutex - dosya kilidinin acilamadigi durumda yedek.
+        21.10 21:43'te uc dongu ayni anda kostu: ayni acilis iki kez "makine yeniden
+        acildi" olarak yazildi (raporda tek restart iki gorunuyordu) ve durum sayaci
+        iki kez artti. Dosya kilidi bu yaris durumu yetkiden bagimsiz olarak bitirir.
         Döner: $true ise iş yapıldı, $false ise başka bir döngü çalışıyordu (atlandı).
     #>
     param([scriptblock]$Action)
+    $dosyaKilidi = Enter-HostLock -Name 'cycle' -TimeoutMs 0
     $m = $null
-    $owns = $true
+    $owns = $false
+    $mutexOk = $true
     try {
-        $m = New-Object System.Threading.Mutex($false, 'Global\RemoteWatchdogCycle')
-        $owns = $m.WaitOne(0)
-    } catch { $owns = $true }
-    if ($owns) {
-        try { $null = & $Action } finally { if ($m) { try { $m.ReleaseMutex() } catch { }; try { $m.Dispose() } catch { } } }
+        try {
+            $m = New-Object System.Threading.Mutex($false, 'Global\RemoteWatchdogCycle')
+            $owns = $m.WaitOne(0)
+        } catch {
+            # Mutex acilamadi (yetki/oturum): dosya kilidi tek basina yeter.
+            $mutexOk = $false
+            $m = $null
+        }
+        if (-not $dosyaKilidi -or ($mutexOk -and -not $owns)) { return $false }
+        $null = & $Action
         return $true
+    } finally {
+        if ($m) { try { if ($owns) { $m.ReleaseMutex() } } catch { }; try { $m.Dispose() } catch { } }
+        Exit-HostLock -Name 'cycle'
     }
-    if ($m) { try { $m.Dispose() } catch { } }
-    return $false
 }
 
 function Start-FullCycle {

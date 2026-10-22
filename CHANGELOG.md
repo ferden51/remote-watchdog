@@ -4,6 +4,40 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.19] - 2026-10-22
+
+İki hata düzeltildi: panel kendi durumunu "KAPALI" diye gösteriyordu ve günlük
+raporda **tek bir yeniden başlatma iki kez sayılıyordu**.
+
+### 🐞 Düzeltilen
+
+- **Günlük rapor aynı yeniden başlatmayı iki kez saymıyor.** 21.10 21:43'te tek bir
+  restart gerçekleşmişti ama rapor "2 gerçek yeniden başlatma" diyordu. Sebep:
+  reboot sonrası **eş zamanlı üç döngü** aynı anda çalışıyordu ve hepsi aynı
+  açılışı "makine yeniden açıldı" diye loglayıp bütçeye yazıyordu. Artık:
+  - Raporda aynı **açılış damgası** (`acilis=...`) bir kez sayılır; özet satırı da
+    "1 gerçek yeniden başlatma" der.
+  - Boot muhasebesi **tekil**tir: dosya tabanlı kilit (FileShare.None) ile aynı anda
+    yalnız bir döngü açılışı işler.
+  - Tam döngü kilidi **yetkiden bağımsız**dır: `Global\` mutex'i açılamayan bir
+    süreç artık kilitsiz çalışmaz; dosya kilidi devreye girer. Aynı anda çalışan
+    döngülerin durum sayacını iki kez artırması ve onarım kademelerini iki kez
+    uygulaması da böylece engellenir.
+- **"Kontrol paneli" artık etkileşimli oturumda SKIP sayılmıyor.** Kullanıcı oturumu
+  varken panel çalışıyorsa **TAMAM (OK)**; çalışmıyorsa **SORUN (FAIL)** ve onarım
+  panel görevini tetikler. Oturum yoksa (reboot sonrası kullanıcı giriş yapmamış)
+  hâlâ ATLANDI'dır — bu bir hata değildir.
+- **Panel yeniden başlatılırken "KAPALI" uyarısı çıkmıyor.** Görev birkaç saniye
+  önce tetiklendiyse kontrol "yeni başlatıldı (bekleniyor)" notuyla ATLANDI sayılır.
+- **Arayüz kendi durumunu doğru gösteriyor.** Panel kendisi ayaktaysa, watchdog'in
+  5 dakika eski anlık görüntüsü "surec=0" dese bile **ÇALIŞIYOR** yazar; oturum
+  yoksa **İZLENMİYOR** (nötr), gerçekten kapalıysa **KAPALI** (uyarı).
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **447 kontrol** (0 hata); `Test-UI` 54/0;
+  `Verify-OutageLogic` 34/0.
+
 ## [1.3.18] - 2026-10-21
 
 Panel etkileşimi ve günlük özet görünümü iyileştirildi.

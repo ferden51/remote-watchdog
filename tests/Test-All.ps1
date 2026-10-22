@@ -257,6 +257,25 @@ if ($Section -eq 0 -or $Section -eq 1) {
         her dakika yeni dongu acilir (gunluk yazma yarisi, cift sayim, sahte restart butcesi). #>
     Ok 'host kilit paylasimi (Invoke-CycleLocked) var' ($hostText -match 'function Invoke-CycleLocked')
     Ok 'host UserFallback yolu kilitli' ($hostText -match '(?s)if \(\$UserFallback\).{0,900}Invoke-CycleLocked')
+    <#
+        ES ZAMANLI DONGU. 'Global\' adli mutex'i acmak yetkiye baglidir; acilamadiginda
+        hata yutulur ve iki dongu AYNI ANDA calisir. 21.10 21:43'te uc dongu ayni anda
+        kostu: ayni acilis iki kez "makine yeniden acildi" olarak yazildi -> gunluk raporda
+        tek restart iki gorunuyordu, durum sayaci iki kez artti, onarim kademeleri iki kez
+        uygulandi. Dosya tabanli kilit (FileShare.None) yetkiden bagimsizdir.
+    #>
+    Ok 'host yetkiden bagimsiz dosya kilidi var (Open/Enter/Exit-HostLock)' (($hostText -match 'function Open-HostLock') -and ($hostText -match 'function Enter-HostLock') -and ($hostText -match 'function Exit-HostLock'))
+    Ok 'host tam dongu kilidi dosya kilidini de kullaniyor' ($hostText -match "(?s)function Invoke-CycleLocked.{0,1500}Enter-HostLock -Name 'cycle'")
+    Ok 'host boot muhasebesi kilitli (ayni acilis iki kez yazilmaz)' ($hostText -match "(?s)function Sync-RebootAccounting.{0,1500}Enter-HostLock -Name 'boot'")
+    foreach ($code in (Get-FnCode $Host_ @('Open-HostLock', 'Enter-HostLock', 'Exit-HostLock'))) { Invoke-Expression $code }
+    $lk1 = Enter-HostLock -Name 'test' -TimeoutMs 0
+    $lk2 = Enter-HostLock -Name 'test' -TimeoutMs 0
+    Exit-HostLock -Name 'test'
+    Exit-HostLock -Name 'test'
+    $lkR = Open-HostLock -Name 'test'
+    $lkSerbest = [bool]$lkR.Locked
+    if ($lkR.Locked) { try { $lkR.Stream.Dispose() } catch { } }
+    Ok 'host dosya kilidi alinip birakiliyor (yeniden giris destekli)' (([bool]$lk1) -and ([bool]$lk2) -and $lkSerbest)
     Ok 'host probe geri sayimi (Test-FullCycleDue) var' ($hostText -match 'function Test-FullCycleDue')
     <#  Restart butcesi yalnizca DOGRULANMIS (makine yeniden acilmis) restartlari saymali. #>
     Ok 'host restart butcesi dogrulamasi (Sync-RebootAccounting) var' ($hostText -match 'function Sync-RebootAccounting')
@@ -663,6 +682,13 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'host günlük raporu 08:00 sonrası üretir ve gün başına bir kez yazar' (($hostText -match 'function Write-DailyReport') -and ($hostText -match 'TimeOfDay -lt \[TimeSpan\]::FromHours\(8\)') -and ($hostText -match 'daily-') -and ($hostText -match '\$day'))
     Ok 'host günlük raporu normal watchdog çevriminde çağrılır, -Check kirletmez' ($hostText -match '(?s)if \(-not \$Check\) \{\s*try \{ \$null = Write-DailyReport')
     Ok 'host günlük rapor özetini last-run.json içine koyar' (($hostText -match 'dailyReportPath = \[string\]\$state\.LastDailyReport') -and ($hostText -match 'dailySummary = \[string\]\$state\.LastDailySummary'))
+    <#
+        "Kontrol paneli" kontrolu her zaman ATLANDI (SKIP) isaretleniyordu: raporda
+        "Kontrol paneli=SKIP" gorunuyor, panel arayuzunde de surec=0 anlik
+        goruntusunda "KAPALI" yaziyordu - oysa panel calisiyordu.
+    #>
+    Ok 'host kontrol paneli kontrolunu etkileşimli oturumda SKIP saymıyor' (($hostText -match 'interactiveSession') -and ($hostText -match 'panel yeni baslatildi \(bekleniyor\)'))
+    Ok 'panel kontrol paneli satırında yerel süreci de hesaba katıyor' (($panelText -match 'selfAlive') -and ($panelText -match "İZLENMİYOR"))
     Ok 'panel genel durumda günlük özeti ve raporu aç düğmesini gösterir' (($panelText -match 'x:Name="TxtDailySummary"') -and ($panelText -match 'x:Name="BtnOpenDailyReport"') -and ($panelText -match "BtnOpenDailyReport'\)\.Add_Click"))
     $digestFns = Get-FnCode $Host_ @('ConvertTo-DailyLocalDateTime', 'Get-DailyDigest')
     foreach ($code in $digestFns) { Invoke-Expression $code }
@@ -682,6 +708,26 @@ if ($Section -eq 0 -or $Section -eq 1) {
     $dailyTest = Get-DailyDigest -LogLines $sampleLogs -OutageReports @($sampleOutage) -PeriodStart ([datetime]'2026-10-16T08:00:00') -PeriodEnd ([datetime]'2026-10-17T08:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
     $dailyIncident = @($dailyTest.Incidents)[0]
     Ok 'günlük rapor kesinti ve gerçek reboot sayısını doğru çıkarıyor' (($dailyTest.IncidentCount -eq 1) -and ($dailyTest.RebootCount -eq 1) -and [bool]$dailyIncident.recovered -and [bool]$dailyIncident.rebooted)
+    <#
+        21.10 21:43: es zamanli iki dongu ayni acilisi iki kez "makine yeniden acildi"
+        diye yazdi; rapor tek restart'i "2 gercek yeniden baslatma" olarak sayiyordu.
+        Ayni acilis damgasi tekilleştirilir.
+    #>
+    $dupRebootLogs = @(
+        '2026-10-21 21:38:04 [ALERT] ANLIK AG SORUNU: Ağ sorunu algılandı. Eksik: IP,DNS,HTTPS,sinyal. Onarım başlatılıyor.',
+        '2026-10-21 21:43:35 [INFO] makine yeniden acildi; restart butceye yazildi (0/5) | acilis=2026-10-21T18:42:23.5000000Z',
+        '2026-10-21 21:43:35 [INFO] makine yeniden acildi; restart butceye yazildi (0/5) | acilis=2026-10-21T18:42:23.5000000Z',
+        '2026-10-21 21:43:36 [ALERT] [DUZELDI] DESKTOP-TEST | Internet=OK'
+    )
+    $dupDaily = Get-DailyDigest -LogLines $dupRebootLogs -OutageReports @() -PeriodStart ([datetime]'2026-10-21T00:00:00') -PeriodEnd ([datetime]'2026-10-22T11:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
+    Ok 'günlük rapor aynı açılışı iki kez saymıyor (tek restart)' (($dupDaily.RebootCount -eq 1) -and ([regex]::Matches($dupDaily.Markdown, 'reboot tamamland').Count -eq 1))
+    Ok 'günlük özet tek restart sayısını doğru yazıyor' ($dupDaily.Summary -match '1 gerçek yeniden başlatma')
+    $ikiRebootLogs = @(
+        '2026-10-21 10:00:00 [INFO] makine yeniden acildi; restart butceye yazildi (1/5) | acilis=2026-10-21T07:00:00.0000000Z',
+        '2026-10-21 21:43:35 [INFO] makine yeniden acildi; restart butceye yazildi (2/5) | acilis=2026-10-21T18:42:23.5000000Z'
+    )
+    $ikiRebootDaily = Get-DailyDigest -LogLines $ikiRebootLogs -OutageReports @() -PeriodStart ([datetime]'2026-10-21T00:00:00') -PeriodEnd ([datetime]'2026-10-22T11:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
+    Ok 'günlük rapor farklı açılışları ayrı sayıyor' ($ikiRebootDaily.RebootCount -eq 2)
     Ok 'günlük rapor kesinti başlangıç/bitiş saatini ve süresini gösteriyor' ($dailyTest.Markdown -match '16\.10 21:33–21:46 \(yaklaşık 13 dk\)')
     Ok 'günlük rapor upstream teşhisini ve ICMP belirsizliğini insan dilinde yazar' (($dailyTest.Markdown -match 'Ağ geçidi yanıt veriyordu') -and ($dailyTest.Markdown -match 'ICMP engeli'))
     $emptyDaily = Get-DailyDigest -LogLines @() -OutageReports @() -PeriodStart ([datetime]'2026-10-16T08:00:00') -PeriodEnd ([datetime]'2026-10-17T08:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'

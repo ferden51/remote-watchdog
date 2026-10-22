@@ -2018,7 +2018,23 @@ function Get-Connections {
         $cfg = Get-HostConfig
         $panelChk = $byName['Kontrol paneli']
         if ($panelChk) {
-            Add-Conn 'Kontrol paneli' 'panel süreci (restart sonrası oturumda)' $(if ($panelChk.ok) { 'ok' } else { 'warn' }) $(if ($panelChk.ok) { 'ÇALIŞIYOR' } else { 'KAPALI' }) ([string]$panelChk.detail) 'panelstart' 'Paneli başlat'
+            <#
+                Bu arayuzun KENDISI panel oldugu icin yerel olarak kesin olarak
+                ayaktadir. Watchdog'in anlik goruntusu 5 dakika eski olabilir ve
+                panel yeniden baslatildigi anda "surec=0" yazabilir; o zaman
+                "KAPALI" (uyari) gostermek yanilticiydi. Artik:
+                  - panel yerelde ayaktaysa  -> CALISIYOR
+                  - oturum yoksa (SKIP)      -> IZLENMIYOR (notr)
+                  - panel gercekten yoksa   -> KAPALI (uyari)
+            #>
+            $selfAlive = $true
+            try { $selfAlive = ($null -ne [Diagnostics.Process]::GetCurrentProcess()) } catch { $selfAlive = $true }
+            $panelOk = ([bool]$panelChk.ok -or $selfAlive)
+            $pState = if ($panelOk) { 'ÇALIŞIYOR' } elseif ($panelChk.skipped) { 'İZLENMİYOR' } else { 'KAPALI' }
+            $pLevel = if ($panelOk) { 'ok' } else { 'warn' }
+            $pDetail = [string]$panelChk.detail
+            if ($selfAlive -and -not [bool]$panelChk.ok) { $pDetail = $pDetail + ' | panel ayakta (watchdog anlik görüntüsü eski)' }
+            Add-Conn 'Kontrol paneli' 'panel süreci (restart sonrası oturumda)' $pLevel $pState $pDetail 'panelstart' 'Paneli başlat'
         }
 
         $role = Get-RoleInfo
