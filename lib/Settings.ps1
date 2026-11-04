@@ -6,35 +6,35 @@
 function Get-SettingsDefs { return @(
 
     @{ Sec = 'ZAMANLAMA'; Type = 'section' }
-    @{ Sec = 'Zamanlama'; Key = 'IntervalMinutes'; Title = 'Kontrol aralığı (dakika)'; Type = 'int' }
-    @{ Sec = 'Zamanlama'; Key = 'AlertRepeatHours'; Title = 'Aynı alarm için tekrar aralığı (saat)'; Type = 'int' }
-    @{ Sec = 'Zamanlama'; Key = 'NotifyRepeatHours'; Title = 'Kullanıcı bilgilendirme tekrar aralığı (saat)'; Type = 'int' }
+    @{ Sec = 'Zamanlama'; Key = 'IntervalMinutes'; Title = 'Kontrol aralığı (dakika)'; Type = 'int'; Min = 1; Max = 240 }
+    @{ Sec = 'Zamanlama'; Key = 'AlertRepeatHours'; Title = 'Aynı alarm için tekrar aralığı (saat)'; Type = 'int'; Min = 0; Max = 168 }
+    @{ Sec = 'Zamanlama'; Key = 'NotifyRepeatHours'; Title = 'Kullanıcı bilgilendirme tekrar aralığı (saat)'; Type = 'int'; Min = 0; Max = 168 }
 
     @{ Sec = 'RESTART POLITIKASI'; Type = 'section' }
     @{ Sec = 'Restart'; Key = 'RestartPolicy'; Title = 'Restart politikası'; Type = 'enum'; Options = @('blackout', 'always', 'never') }
     @{ Sec = 'Restart'; Key = 'BlackoutEnabled'; Title = 'Blackout penceresi (dışında sadece bilgilendirilir)'; Type = 'bool' }
-    @{ Sec = 'Restart'; Key = 'BlackoutStart'; Title = 'Blackout başlangıç saati'; Type = 'int' }
-    @{ Sec = 'Restart'; Key = 'BlackoutEnd'; Title = 'Blackout bitiş saati (geceye sarar)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'BlackoutStart'; Title = 'Blackout başlangıç saati'; Type = 'int'; Min = 0; Max = 23 }
+    @{ Sec = 'Restart'; Key = 'BlackoutEnd'; Title = 'Blackout bitiş saati (geceye sarar)'; Type = 'int'; Min = 0; Max = 23 }
     @{ Sec = 'Restart'; Key = 'BlackoutFullDays'; Title = 'Tam gün blackout (hafta sonu)'; Type = 'days' }
     @{ Sec = 'Restart'; Key = 'BlackoutNights'; Title = 'Blackout geceleri'; Type = 'days' }
-    @{ Sec = 'Restart'; Key = 'RebootAfterFailedCycles'; Title = 'Reboot kararı için başarısız döngü sayısı (1 = en hızlı tespit)'; Type = 'int' }
-    @{ Sec = 'Restart'; Key = 'RebootDelaySeconds'; Title = 'Restart geri sayımı (saniye, sesli anons süresi)'; Type = 'int' }
-    @{ Sec = 'Restart'; Key = 'MaxRestartsPerDay'; Title = '24 saatte en fazla restart (0 = sınırsız)'; Type = 'int' }
-    @{ Sec = 'Restart'; Key = 'RebootCooldownMinutes'; Title = 'İki restart arası bekleme (dakika)'; Type = 'int' }
-    @{ Sec = 'Restart'; Key = 'HealthyMinutesToReset'; Title = 'Bu kadar sağlıklı kalınca bütçe sıfırlansın (dk)'; Type = 'int' }
-    @{ Sec = 'Restart'; Key = 'MinUptimeMinutes'; Title = 'Yeniden açılıştan sonra bekleme (dk, restart döngüsünü önler)'; Type = 'int' }
-    @{ Sec = 'Restart'; Key = 'MinOutageMinutes'; Title = 'Minimum kesinti süresi (dk, 0 = bekleme yok; onarım yine önce çalışır)'; Type = 'int' }
+    @{ Sec = 'Restart'; Key = 'RebootAfterFailedCycles'; Title = 'Reboot kararı için başarısız döngü sayısı (1 = en hızlı tespit)'; Type = 'int'; Min = 0; Max = 100 }
+    @{ Sec = 'Restart'; Key = 'RebootDelaySeconds'; Title = 'Restart geri sayımı (saniye, sesli anons süresi)'; Type = 'int'; Min = 30; Max = 600 }
+    @{ Sec = 'Restart'; Key = 'MaxRestartsPerDay'; Title = '24 saatte en fazla restart (0 = sınırsız)'; Type = 'int'; Min = 0 }
+    @{ Sec = 'Restart'; Key = 'RebootCooldownMinutes'; Title = 'İki restart arası bekleme (dakika)'; Type = 'int'; Min = 0; Max = 10080 }
+    @{ Sec = 'Restart'; Key = 'HealthyMinutesToReset'; Title = 'Bu kadar sağlıklı kalınca bütçe sıfırlansın (dk)'; Type = 'int'; Min = 0; Max = 10080 }
+    @{ Sec = 'Restart'; Key = 'MinUptimeMinutes'; Title = 'Yeniden açılıştan sonra bekleme (dk, restart döngüsünü önler)'; Type = 'int'; Min = 0; Max = 10080 }
+    @{ Sec = 'Restart'; Key = 'MinOutageMinutes'; Title = 'Minimum kesinti süresi (dk, 0 = bekleme yok; onarım yine önce çalışır)'; Type = 'int'; Min = 0; Max = 10080 }
     @{ Sec = 'Restart'; Key = 'RebootSkipIfUnregistered'; Title = 'CRD kayıtsızken restart etme'; Type = 'bool' }
     @{ Sec = 'Restart'; Key = 'ForceRestartAlways'; Title = 'DAIMA zorla kapat (saat fark etmez)'; Type = 'bool' }
     @{ Sec = 'Restart'; Key = 'ForceRestartUntil'; Title = 'Daima zorla kapat bitis zamani'; Type = 'datetime' }
 
     @{ Sec = 'OTOMATIK ONARIM'; Type = 'section' }
     @{ Sec = 'Onarim'; Key = 'FixNetwork'; Title = 'Ağ onarımıni uygula'; Type = 'bool' }
-    @{ Sec = 'Onarim'; Key = 'NetMaxRepairRung'; Title = 'Yeniden başlatmasız ağ onarım kademesi (1-4)'; Type = 'int' }
+    @{ Sec = 'Onarim'; Key = 'NetMaxRepairRung'; Title = 'Yeniden başlatmasız ağ onarım kademesi (1-4)'; Type = 'int'; Min = 1; Max = 4 }
     @{ Sec = 'Onarim'; Key = 'FixRdp'; Title = 'RDP ayarlarini onar (firewall + servis)'; Type = 'bool' }
     @{ Sec = 'Onarim'; Key = 'FixCrd'; Title = 'CRD servisini onar'; Type = 'bool' }
-    @{ Sec = 'Onarim'; Key = 'CrdNoConnRestartCycles'; Title = 'CRD baglantisi yoksa kac dongu sonra yeniden baslat'; Type = 'int' }
-    @{ Sec = 'Onarim'; Key = 'CrdRestartAfterHours'; Title = 'CRD onleyici restart (saat, 0 = kapali)'; Type = 'int' }
+    @{ Sec = 'Onarim'; Key = 'CrdNoConnRestartCycles'; Title = 'CRD baglantisi yoksa kac dongu sonra yeniden baslat'; Type = 'int'; Min = 1; Max = 1000 }
+    @{ Sec = 'Onarim'; Key = 'CrdRestartAfterHours'; Title = 'CRD onleyici restart (saat, 0 = kapali)'; Type = 'int'; Min = 0; Max = 8760 }
     @{ Sec = 'Onarim'; Key = 'CrdSignalPorts'; Title = 'CRD sinyal portlari'; Type = 'csv' }
     @{ Sec = 'Onarim'; Key = 'FixClock'; Title = 'Saat senkronunu onar'; Type = 'bool' }
     @{ Sec = 'Onarim'; Key = 'ServiceAutoStart'; Title = 'Servisleri Automatic yap (acilista baslasin)'; Type = 'bool' }
@@ -49,7 +49,7 @@ function Get-SettingsDefs { return @(
     @{ Sec = 'Sistem'; Key = 'DisableFastStartup'; Title = 'Fast Startup kapansın'; Type = 'bool' }
     @{ Sec = 'Sistem'; Key = 'DisableHibernation'; Title = 'Hibernasyonu tamamen kapat (powercfg /h off)'; Type = 'bool' }
     @{ Sec = 'Sistem'; Key = 'OfficeSaveBeforeReboot'; Title = 'Restart oncesi Word/Excel kaydedilsin'; Type = 'bool' }
-    @{ Sec = 'Sistem'; Key = 'OfficeSaveTimeoutSeconds'; Title = 'Belge kaydetme bekleme suresi (sn)'; Type = 'int' }
+    @{ Sec = 'Sistem'; Key = 'OfficeSaveTimeoutSeconds'; Title = 'Belge kaydetme bekleme suresi (sn)'; Type = 'int'; Min = 0; Max = 600 }
     @{ Sec = 'Sistem'; Key = 'OfficeAbortRebootIfStillOpen'; Title = 'Uygulama kapanmazsa restart yapılmasın'; Type = 'bool' }
     @{ Sec = 'Sistem'; Key = 'OfficeAbortRebootIfUnsaved'; Title = 'kaydedilmemiş belge varsa restart yapılmasın'; Type = 'bool' }
 
@@ -61,10 +61,10 @@ function Get-SettingsDefs { return @(
     @{ Sec = 'Bildirim'; Key = 'EkranMesaji'; Title = 'Ekran mesaj kutusu (msg.exe: restart/sorun uyarısı penceresi)'; Type = 'bool' }
     @{ Sec = 'Bildirim'; Key = 'SesliBildirimEdge'; Title = 'Bulut yedeği (edge-tts; Microsoft ucu kapalıysa üretmez)'; Type = 'bool' }
     @{ Sec = 'Bildirim'; Key = 'SesEfektleri'; Title = 'Film efektleri (hazır wav: net, keskin, parlak)'; Type = 'bool' }
-    @{ Sec = 'Bildirim'; Key = 'SesEfektleriVolume'; Title = 'Efekt ses seviyesi (0-100, 0 = efektler kapalı)'; Type = 'int' }
-    @{ Sec = 'Bildirim'; Key = 'LogGunDays'; Title = 'Günlük kaç gün saklansın (0 = sadece mevcut dosya)'; Type = 'int' }
-    @{ Sec = 'Bildirim'; Key = 'LogDosyaMB'; Title = 'Günlük dosyası kaç MB olunca arşivlensin'; Type = 'int' }
-@{ Sec = 'Bildirim'; Key = 'DiskUyariMB'; Title = 'Boş disk alanı bu MB altına düşünce uyarı ver (0 = kapalı)'; Type = 'int' }
+    @{ Sec = 'Bildirim'; Key = 'SesEfektleriVolume'; Title = 'Efekt ses seviyesi (0-100, 0 = efektler kapalı)'; Type = 'int'; Min = 0; Max = 100 }
+    @{ Sec = 'Bildirim'; Key = 'LogGunDays'; Title = 'Günlük kaç gün saklansın (0 = sadece mevcut dosya)'; Type = 'int'; Min = 0; Max = 3650 }
+    @{ Sec = 'Bildirim'; Key = 'LogDosyaMB'; Title = 'Günlük dosyası kaç MB olunca arşivlensin'; Type = 'int'; Min = 1; Max = 10240 }
+    @{ Sec = 'Bildirim'; Key = 'DiskUyariMB'; Title = 'Boş disk alanı bu MB altına düşünce uyarı ver (0 = kapalı)'; Type = 'int'; Min = 0; Max = 102400 }
 
     @{ Sec = 'TATIL'; Type = 'section' }
     @{ Sec = 'Tatil'; Key = 'HolidayMode'; Title = 'Tatil modu (full = tam blackout)'; Type = 'enum'; Options = @('full', 'default', 'none') }
@@ -77,10 +77,12 @@ function Get-SettingsDefs { return @(
     @{ Sec = 'Istemci'; Key = 'RdpFile'; Title = 'RDP dosyası (.rdp)'; Type = 'text'; Target = 'client' }
     @{ Sec = 'Istemci'; Key = 'BrowserUrl'; Title = 'Tarayıcı adresi (CRD)'; Type = 'text'; Target = 'client' }
     @{ Sec = 'Istemci'; Key = 'LaunchOnRecover'; Title = 'Bağlantı düzelince otomatik aç'; Type = 'bool'; Target = 'client' }
-    @{ Sec = 'Istemci'; Key = 'KeepAliveMinutes'; Title = 'Oturumu canlı tutma aralığı (dk, 0 = kapalı)'; Type = 'int'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'KeepAliveMinutes'; Title = 'Oturumu canlı tutma aralığı (dk, 0 = kapalı)'; Type = 'int'; Target = 'client'; Min = 0; Max = 1440 }
     @{ Sec = 'Istemci'; Key = 'TelegramToken'; Title = 'Telegram bot token (istemci)'; Type = 'text'; Target = 'client' }
     @{ Sec = 'Istemci'; Key = 'TelegramChatId'; Title = 'Telegram chat id (istemci)'; Type = 'text'; Target = 'client' }
     @{ Sec = 'Istemci'; Key = 'HeartbeatUrl'; Title = 'Healthchecks ping adresi (istemci için genelde gerekmez: saatlerce kapalıysa yanlış alarm verir)'; Type = 'text'; Target = 'client' }
+    @{ Sec = 'Istemci'; Key = 'LogGunDays'; Title = 'İstemci günlüğü kaç gün saklansın (0 = sadece mevcut dosya)'; Type = 'int'; Target = 'client'; Min = 0; Max = 3650 }
+    @{ Sec = 'Istemci'; Key = 'LogDosyaMB'; Title = 'İstemci günlük dosyası kaç MB olunca arşivlensin'; Type = 'int'; Target = 'client'; Min = 1; Max = 10240 }
 
     @{ Sec = 'PANEL'; Type = 'section' }
     @{ Sec = 'Panel'; Key = 'PanelRepair'; Title = 'Panel kapanırsa watchdog yeniden başlatsın'; Type = 'bool' }

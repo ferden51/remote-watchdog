@@ -1131,6 +1131,24 @@ if ($Section -eq 0 -or $Section -eq 2) {
     $cmissing = @($clientKeys | Where-Object { $panelKeys -notcontains $_ -and $_ -ne 'HeartbeatFailPath' })
     if ($cmissing.Count -eq 0) { Ok ('panel tum istemci anahtarlarini kapsiyor (' + $clientKeys.Count + ')') $true }
     else { Ok ('istemci anahtari eksik: ' + ($cmissing -join ', ')) $false }
+    <#  AYAR DEFAULTS/DAVRANIS: panel varsayilanlari host ile ayni olmali; aksi halde
+        ilk kaydetme, config'te olmayan anahtarlari yanlis degerle eziyordu. #>
+    $hostCode2 = Get-Content -LiteralPath $Host_ -Raw
+    $panelCode2 = Get-Content -LiteralPath $Panel -Raw
+    $settingsCode2 = Get-Content -LiteralPath (Join-Path $LibDir 'Settings.ps1') -Raw
+    Ok 'panel DisableHibernation varsayilani host ile ayni' (($hostCode2 -match '(?m)^\s{8}DisableHibernation = \$true') -and ($panelCode2 -match 'DisableHibernation = \$true'))
+    Ok 'panel PanelRepair/PanelScriptName varsayilanlari host ile ayni' (($hostCode2 -match '(?m)^\s{8}PanelRepair = \$true') -and ($panelCode2 -match "PanelRepair = \`$true; PanelScriptName = 'RemoteWatchdogPanel\.ps1'"))
+    Ok 'panel OfficeSaveTimeoutSeconds varsayilani host ile ayni (60)' (($hostCode2 -match '(?m)^\s{8}OfficeSaveTimeoutSeconds = 60') -and ($panelCode2 -match 'OfficeSaveTimeoutSeconds = 60'))
+    Ok 'panel DiskUyariMB varsayilani host ile ayni (500)' (($hostCode2 -match '(?m)^\s{8}DiskUyariMB = 500') -and ($panelCode2 -match 'DiskUyariMB = 500'))
+    Ok 'DisableHibernation runtime tarafindan okunuyor' ($hostCode2 -match 'Test-RwConfigKey \$global:cfg') -and ($hostCode2 -match "'DisableHibernation'")
+    Ok 'DiskUyariMB=0 disk uyarisini kapatir' ($hostCode2 -match '(?s)if \(\$diskAyar -le 0\) \{ return \}')
+    Ok 'IntervalMinutes degisince zamanlanmis gorev araligi esitleniyor' (($hostCode2 -match 'function Sync-ScheduledTaskInterval') -and ($hostCode2 -match 'Sync-ScheduledTaskInterval -Minutes'))
+    Ok 'Save-Settings gecersiz degeri sessizce yutmuyor' (($panelCode2 -match 'Kaydedilmedi:') -and ($panelCode2 -match '\$hatalar') -and ($panelCode2 -match 'tam sayı olmalı'))
+    Ok 'filtre alt ayar eslesince bolum basligini gosteriyor' ($panelCode2 -match '\$bolumGoster')
+    Ok 'istemci gunluk ayarlari panelde ayri tanimli' (@(Get-SettingsDefs | Where-Object { $_.Key -in @('LogGunDays', 'LogDosyaMB') -and $_.Target -eq 'client' }).Count -eq 2)
+    Ok 'sayisal ayarlarda Min/Max dogrulama siniri tanimli' (($settingsCode2 -match 'Key = ''IntervalMinutes''.*Min = 1; Max = 240') -and ($settingsCode2 -match 'Key = ''NetMaxRepairRung''.*Min = 1; Max = 4'))
+    Ok 'MaxRestartsPerDay 0 in ustu sinirsiz (Max yok)' (($settingsCode2 -match "Key = 'MaxRestartsPerDay'.*Min = 0") -and ($settingsCode2 -notmatch "Key = 'MaxRestartsPerDay'.*Max = "))
+    Ok 'istemci LogGunDays/LogDosyaMB runtime tarafindan okunuyor' (($clientText -match 'Test-RwConfigKey \$global:cfg') -and ($clientText -match "'LogGunDays'") -and ($clientText -match "'LogDosyaMB'"))
 }
 
 if ($Section -eq 0 -or $Section -eq 3) {

@@ -89,7 +89,7 @@ function Save-Config {
 function Remove-OldLogFiles {
     <#  LogGunDays gunden eski arsivleri siler. #>
     $days = 14
-    try { if ($global:cfg.PSObject.Properties.Name -contains 'LogGunDays') { $days = [int]$global:cfg.LogGunDays } } catch { }
+    try { if (Test-RwConfigKey $global:cfg 'LogGunDays') { $days = [int]$global:cfg['LogGunDays'] } } catch { }
     if ($days -le 0) { return }
     try {
         $cut = (Get-Date).AddDays(-$days)
@@ -109,7 +109,7 @@ function Rotate-LogIfNeeded {
         simdi ayni modeli kullaniyor -> normalde hic okuma yok, sadece bir Get-Item.
     #>
     $maxBytes = 2MB
-    try { if ($global:cfg.PSObject.Properties.Name -contains 'LogDosyaMB') { $maxBytes = [int]$global:cfg.LogDosyaMB * 1MB } } catch { }
+    try { if (Test-RwConfigKey $global:cfg 'LogDosyaMB') { $maxBytes = [int]$global:cfg['LogDosyaMB'] * 1MB } } catch { }
     if ($maxBytes -lt 256KB) { $maxBytes = 2MB }
     try {
         if (-not (Test-Path -LiteralPath $LogFile)) { return }

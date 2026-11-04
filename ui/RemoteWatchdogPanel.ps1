@@ -422,10 +422,11 @@ function Get-HostConfig {
         CrdNoConnRestartCycles = 3; CrdRestartAfterHours = 0; CrdSignalPorts = @(443, 5222, 5223, 19302, 19303, 8443, 4433)
         ServiceAutoStart = $true; ServiceCrashRecovery = $true
         TunnelRepair = $false; TunnelName = 'uzak-pc'
-        ServerMode = $true; DisableFastStartup = $true; OfficeSaveBeforeReboot = $true
-        OfficeSaveTimeoutSeconds = 120; OfficeAbortRebootIfStillOpen = $true; OfficeAbortRebootIfUnsaved = $true
+        ServerMode = $true; DisableFastStartup = $true; DisableHibernation = $true; OfficeSaveBeforeReboot = $true
+        OfficeSaveTimeoutSeconds = 60; OfficeAbortRebootIfStillOpen = $true; OfficeAbortRebootIfUnsaved = $true
         TelegramToken = ''; TelegramChatId = ''; HeartbeatUrl = ''; AlertRepeatHours = 12; NotifyRepeatHours = 4
         SesliBildirim = $true; SesliBildirimEdge = $true; EkranMesaji = $true; LogGunDays = 30; LogDosyaMB = 2
+        DiskUyariMB = 500; PanelRepair = $true; PanelScriptName = 'RemoteWatchdogPanel.ps1'
         SesEfektleri = $true; SesEfektleriVolume = 80
     }
     if (Test-Path -LiteralPath $HostConfig) {
@@ -2392,7 +2393,7 @@ function Update-Overview {
         # Blackout: ayar acik mi + su an aktif mi ayri gosterilir ("kapali" belirsizligi olmasin)
         $cfgH = Get-HostConfig
         $boOn = $true
-        if ($cfgH.PSObject.Properties.Name -contains 'BlackoutEnabled') { $boOn = [bool]$cfgH.BlackoutEnabled }
+        if (Test-RwConfigKey $cfgH 'BlackoutEnabled') { $boOn = [bool]$cfgH['BlackoutEnabled'] }
         $bs = 18; $be = 8
         if ($hj -and $hj.config) {
             if ($hj.config.PSObject.Properties.Name -contains 'blackoutStart') { $bs = $hj.config.blackoutStart }
@@ -2685,6 +2686,7 @@ function Get-ClientDefaults {
         Targets = @(); RemoteName = ''; RdpFile = ''; BrowserUrl = 'https://remotedesktop.google.com'
         LaunchOnRecover = $true; KeepAliveMinutes = 0
         TelegramToken = ''; TelegramChatId = ''; HeartbeatUrl = ''; AlertRepeatHours = 3
+        LogGunDays = 14; LogDosyaMB = 2
     }
 }
 
@@ -2724,6 +2726,12 @@ function ConvertTo-DayNames {
 function New-Segmented {
     param([string[]]$Options, [string]$Selected, [string]$Key)
     if ($null -eq $script:EnumSelect) { $script:EnumSelect = @{} }
+    # Gecersiz config degeri (ornegin elle bozulmus "always " veya eski bir secenek)
+    # arayuzde secili gorunmuyordu ve kaydederken oldugu gibi geri yaziliyordu.
+    $gecerli = @($Options | ForEach-Object { [string]$_ })
+    if ([string]::IsNullOrWhiteSpace($Selected) -or ($gecerli -notcontains [string]$Selected)) {
+        if ($gecerli.Count -gt 0) { $Selected = $gecerli[0] }
+    }
     $script:EnumSelect[$Key] = $Selected
     $store = $script:EnumSelect
     $p = New-Object System.Windows.Controls.StackPanel
@@ -2812,15 +2820,28 @@ function Build-Settings {
         $first = $true
         $sayilan = 0
         $toplam = 0
-        foreach ($d in $script:Defs) {
-            if ($d.Type -ne 'section') { $toplam++ }
-            <#  Eslesme: baslik VEYA anahtar icinde arama. Bolum basligini da tutuyoruz
-                ki eslesen ayarin hangi grupta oldugu gorunsun. #>
+        $defs = @($script:Defs)
+        <#  Eslesme: baslik VEYA anahtar VEYA bolum adi icinde arama. Bolum basligi,
+            altindaki EN AZ BIR ayar eslesiyorsa da gosterilir; aksi halde sonuclar
+            hangi gruba ait oldugu anlasilmadan geliyordu. #>
+        $bolumGoster = @{}
+        if ($filtre) {
+            $aktifBolum = -1
+            for ($i = 0; $i -lt $defs.Count; $i++) {
+                $d = $defs[$i]
+                if ($d.Type -eq 'section') { $aktifBolum = $i; $bolumGoster[$i] = $false; continue }
+                $hay = (([string]$d.Title) + ' ' + ([string]$d.Key) + ' ' + ([string]$d.Sec)).ToLowerInvariant()
+                if ($hay -like ('*' + $filtre + '*') -and $aktifBolum -ge 0) { $bolumGoster[$aktifBolum] = $true }
+            }
+        }
+        for ($i = 0; $i -lt $defs.Count; $i++) {
+            $d = $defs[$i]
+            if ($d.Type -ne 'section' -and $d.Type -ne 'actions') { $toplam++ }
             if ($filtre) {
                 $hay = (([string]$d.Title) + ' ' + ([string]$d.Key) + ' ' + ([string]$d.Sec)).ToLowerInvariant()
                 $uyum = $hay -like ('*' + $filtre + '*')
                 if ($d.Type -eq 'section') {
-                    if (-not $uyum) { $first = $true; continue }   # basligi goster, sonra devam
+                    if (-not $uyum -and -not $bolumGoster[$i]) { $first = $true; continue }
                 } elseif (-not $uyum) { continue }
             }
             if ($d.Type -eq 'section') {
@@ -3066,52 +3087,101 @@ function Save-Settings {
         $clientVals = [ordered]@{}
         $daysVals = @{}
         $csvVals = @{}
+        $clientDaysVals = @{}
+        $clientCsvVals = @{}
+        $hatalar = New-Object System.Collections.ArrayList
+        $eskiInterval = $null
+        try { $eskiInterval = [int](Get-HostConfig).IntervalMinutes } catch { }
         foreach ($ctrl in (Find-AllControls $script:Win)) {
             $key = $ctrl.ToolTip
             if ($key -isnot [string] -or $key -eq '') { continue }
             if ($key.StartsWith('enum|')) {
                 $ek = $key.Substring(5)
                 if ($script:EnumSelect -and $script:EnumSelect.ContainsKey($ek)) {
-                    if ($ek.EndsWith('|client')) { $clientVals[$ek.Substring(0, $ek.Length - 7)] = [string]$script:EnumSelect[$ek] }
-                    else { $hostVals[$ek] = [string]$script:EnumSelect[$ek] }
+                    $isClientEnum = $ek.EndsWith('|client')
+                    $ckEnum = $(if ($isClientEnum) { $ek.Substring(0, $ek.Length - 7) } else { $ek })
+                    $defEnum = $script:Defs | Where-Object { $_.Key -eq $ckEnum -and $_.Type -eq 'enum' -and (($_.Target -eq 'client') -eq $isClientEnum) } | Select-Object -First 1
+                    $sec = [string]$script:EnumSelect[$ek]
+                    $secenekler = @()
+                    if ($defEnum) { $secenekler = @($defEnum.Options | ForEach-Object { [string]$_ }) }
+                    if ($secenekler.Count -gt 0 -and $secenekler -notcontains $sec) {
+                        Write-Trace ('gecersiz enum degeri duzeltildi: ' + $ckEnum + ' = ' + $sec)
+                        $sec = $secenekler[0]
+                        $script:EnumSelect[$ek] = $sec
+                    }
+                    if ($isClientEnum) { $clientVals[$ckEnum] = $sec } else { $hostVals[$ckEnum] = $sec }
                 }
                 continue
             }
             if ($key.StartsWith('days|')) {
                 $parts = $key.Split('|')
                 if ($parts.Count -ge 3) {
-                    if (-not $daysVals.ContainsKey($parts[1])) { $daysVals[$parts[1]] = @() }
-                    if ([bool]$ctrl.Tag) { $daysVals[$parts[1]] = @($daysVals[$parts[1]] + $parts[2]) }
+                    $isClientDays = $parts[1].EndsWith('|client')
+                    $dk = $(if ($isClientDays) { $parts[1].Substring(0, $parts[1].Length - 7) } else { $parts[1] })
+                    $hedef = $(if ($isClientDays) { $clientDaysVals } else { $daysVals })
+                    if (-not $hedef.ContainsKey($dk)) { $hedef[$dk] = @() }
+                    if ([bool]$ctrl.Tag) { $hedef[$dk] = @($hedef[$dk] + $parts[2]) }
                 }
                 continue
             }
             $ck = $key
             $isClient = $ck.EndsWith('|client')
             if ($isClient) { $ck = $ck.Substring(0, $ck.Length - 7) }
-            $def = $script:Defs | Where-Object { $_.Key -eq $ck -and $_.Type -ne 'section' -and $_.Type -ne 'actions' } | Select-Object -First 1
+            $def = $script:Defs | Where-Object { $_.Key -eq $ck -and $_.Type -ne 'section' -and $_.Type -ne 'actions' -and (($_.Target -eq 'client') -eq $isClient) } | Select-Object -First 1
             if (-not $def) { continue }
             $val = $null
             switch ($def.Type) {
                 'bool' { $val = [bool]$ctrl.Tag }
-                'enum' { $val = [string]$ctrl.SelectedItem }
-                'int' { $n = 0; if ([int]::TryParse(([string]$ctrl.Text).Trim(), [ref]$n)) { $val = $n } else { continue } }
+                'int' {
+                    $n = 0
+                    if (-not [int]::TryParse(([string]$ctrl.Text).Trim(), [ref]$n)) {
+                        [void]$hatalar.Add(([string]$def.Title) + ' (tam sayı olmalı)')
+                    } else {
+                        $min = $def.Min; $max = $def.Max
+                        if (($null -ne $min -and $n -lt [int]$min) -or ($null -ne $max -and $n -gt [int]$max)) {
+                            $sinir = ''
+                            if ($null -ne $min -and $null -ne $max) { $sinir = [string]$min + '-' + [string]$max }
+                            elseif ($null -ne $min) { $sinir = [string]$min + ' veya üzeri' }
+                            else { $sinir = [string]$max + ' veya altı' }
+                            [void]$hatalar.Add(([string]$def.Title) + ' (' + $sinir + ')')
+                        } else { $val = $n }
+                    }
+                }
                 'text' { $val = ([string]$ctrl.Text).Trim() }
                 'datetime' {
                     $t = ([string]$ctrl.Text).Trim()
                     if ($t -eq '') { $val = '' } else {
                         $d = [datetime]::MinValue
-                        if (-not [datetime]::TryParse($t, [ref]$d)) { continue }
-                        $val = $d.ToString('yyyy-MM-ddTHH:mm:ss')
+                        if ([datetime]::TryParse($t, [ref]$d)) { $val = $d.ToString('yyyy-MM-ddTHH:mm:ss') }
+                        else { [void]$hatalar.Add(([string]$def.Title) + ' (tarih/saat biçimi geçersiz)') }
                     }
                 }
                 'lines' { $val = @((([string]$ctrl.Text) -split "`r?`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
-                'csv' { $csvVals[$ck] = @((([string]$ctrl.Text) -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+                'csv' {
+                    $liste = @((([string]$ctrl.Text) -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                    if ($isClient) { $clientCsvVals[$ck] = $liste } else { $csvVals[$ck] = $liste }
+                }
             }
             if ($null -eq $val) { continue }
             if ($isClient) { $clientVals[$ck] = $val } else { $hostVals[$ck] = $val }
         }
+        if ($hatalar.Count -gt 0) {
+            $ozet = ($hatalar -join '; ')
+            (El $script:Win 'TxtSaved').Text = 'Kaydedilmedi: ' + $ozet
+            Write-Trace ('ayarlar kaydedilmedi: ' + $ozet)
+            if (-not $Quiet) {
+                $satirlar = (@($hatalar | ForEach-Object { '• ' + $_ }) -join [Environment]::NewLine)
+                [System.Windows.MessageBox]::Show(('Ayarlar kaydedilmedi. Şu alanları düzeltin:' + [Environment]::NewLine + [Environment]::NewLine + $satirlar), 'RemoteWatchdog', 'OK', 'Warning') | Out-Null
+            }
+            return
+        }
         foreach ($k in $daysVals.Keys) { $hostVals[$k] = @($daysVals[$k]) }
+        foreach ($k in $clientDaysVals.Keys) { $clientVals[$k] = @($clientDaysVals[$k]) }
         foreach ($k in $csvVals.Keys) { $hostVals[$k] = $csvVals[$k] }
+        foreach ($k in $clientCsvVals.Keys) { $clientVals[$k] = $clientCsvVals[$k] }
+        $yeniInterval = $null
+        if ($hostVals.Contains('IntervalMinutes')) { $yeniInterval = [int]$hostVals['IntervalMinutes'] }
+        $aralikDegisti = ($null -ne $yeniInterval -and $null -ne $eskiInterval -and $yeniInterval -ne [int]$eskiInterval)
         Write-ConfigFile -Path $HostConfig -Values $hostVals
         if ($clientVals.Count -gt 0) { Write-ConfigFile -Path $ClientConfig -Values $clientVals }
         (El $script:Win 'TxtSaved').Text = 'Kaydedildi: ' + (Get-Date).ToString('HH:mm:ss') + '  (' + $hostVals.Count + ' host + ' + $clientVals.Count + ' istemci)'
@@ -3121,17 +3191,24 @@ function Save-Settings {
             foreach ($tn in @('RemoteHostWatchdogUser', 'RemoteHostWatchdog')) {
                 try { Start-ScheduledTask -TaskName $tn -ErrorAction Stop; $triggered = $true; break } catch { }
             }
-            if ($triggered) { (El $script:Win 'TxtSaved').Text += ' — watchdog tetiklendi, yeni ayarlar hemen uygulaniyor' }
-            else { (El $script:Win 'TxtSaved').Text += ' — gorev calismiyor, siradaki dongude gecerli' }
+            if ($triggered) {
+                if ($aralikDegisti) { (El $script:Win 'TxtSaved').Text += ' — watchdog tetiklendi; yeni kontrol aralığı ilk döngüde göreve uygulanacak' }
+                else { (El $script:Win 'TxtSaved').Text += ' — watchdog tetiklendi, yeni ayarlar hemen uygulaniyor' }
+            } else {
+                (El $script:Win 'TxtSaved').Text += ' — gorev calismiyor, siradaki dongude gecerli'
+            }
             Write-Trace ('ayarlar kaydedildi, watchdog tetikleme: ' + $triggered)
             # Tetikleme durumu degistirdi; 60 sn'lik cache dusurulmazsa butonlar eski
             # durumu gosterir ve kullanici ayarin uygulanmadigini sanir.
             try { Update-TaskCache } catch { }
         }
-        if (-not $Quiet) { [System.Windows.MessageBox]::Show('Ayarlar kaydedildi: ' + $hostVals.Count + ' host + ' + $clientVals.Count + ' istemci ayari', 'RemoteWatchdog') | Out-Null }
+        if (-not $Quiet) {
+            $ekBilgi = $(if ($aralikDegisti) { ' Kontrol aralığı ilk döngüde zamanlanmış göreve uygulanacak.' } else { '' })
+            [System.Windows.MessageBox]::Show('Ayarlar kaydedildi: ' + $hostVals.Count + ' host + ' + $clientVals.Count + ' istemci ayari.' + $ekBilgi, 'RemoteWatchdog') | Out-Null
+        }
     } catch {
         (El $script:Win 'TxtSaved').Text = 'Hata: ' + $_.Exception.Message
-        [System.Windows.MessageBox]::Show('Ayarlar kaydedilemedi: ' + $_.Exception.Message, 'RemoteWatchdog') | Out-Null
+        if (-not $Quiet) { [System.Windows.MessageBox]::Show('Ayarlar kaydedilemedi: ' + $_.Exception.Message, 'RemoteWatchdog') | Out-Null }
         Write-Trace ('ayarlar kaydetme hatasi: ' + $_.Exception.Message)
     }
 }

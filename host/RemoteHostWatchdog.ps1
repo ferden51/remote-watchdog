@@ -145,8 +145,13 @@ function Test-DiskSpace {
         Esik: Varsayilan 500 MB altinda "kritik", 2000 MB altinda "uyari".
     #>
     $minCritical = 500MB
-    try { if ($global:cfg.PSObject.Properties.Name -contains 'DiskUyariMB') { $minCritical = [int]$global:cfg.DiskUyariMB * 1MB } } catch { }
-    if ($minCritical -lt 50MB) { $minCritical = 500MB }
+    $diskAyar = 500
+    try { if (Test-RwConfigKey $global:cfg 'DiskUyariMB') { $diskAyar = [int]$global:cfg['DiskUyariMB'] } } catch { }
+    # 0 = kontrol tamamen kapali (panel basligiyla ayni davranis). Pozitif ama cok
+    # kucuk degerler yanlislikla her dongude uyari uretmesin diye 50 MB taban.
+    if ($diskAyar -le 0) { return }
+    $minCritical = [int64]$diskAyar * 1MB
+    if ($minCritical -lt 50MB) { $minCritical = 50MB }
     try {
         $root = [IO.Path]::GetPathRoot($BaseDir)
         if (-not $root) { $root = 'C:\' }
@@ -155,8 +160,10 @@ function Test-DiskSpace {
         $free = [int64]$s.FreeSpace
         if ($free -ge $minCritical) { $script:DiskUyariAt = ''; return }
         # Disk gercekten dolu: bir kez uyari ver, her dongude spam yapma.
-        $uyariMB = [int][math]::Round(($minCritical * 4) / 1MB)
-        if ($free -ge $uyariMB) { return }
+        # NOT: $free bayt cinsindendir; esik de bayt olmali (eski kod MB degerini
+        # baytla karsilastirdigi icin uyari neredeyse hic tetiklenmiyordu).
+        $uyariBytes = [int64]$minCritical * 4
+        if ($free -ge $uyariBytes) { return }
         $anahtar = 'disk-dolu'
         if ($script:DiskUyariAt -ne $anahtar) {
             $script:DiskUyariAt = $anahtar
@@ -2088,7 +2095,29 @@ function Test-ServerPower {
     $hibAfter = Get-PowerSettingAcIndex -AliasPath @('SUB_SLEEP', 'HIBERNATEAFTER')
     $disk = Get-PowerSettingAcIndex -AliasPath @('SUB_DISK', 'DISKIDLE')
     $ok = $true
-    $detail = 'sleep=' + $(if ($null -eq $standby) { '?' } else { $standby }) + 's, hibIdle=' + $(if ($null -eq $hibIdle) { '?' } else { $hibIdle }) + 's, hibAfter=' + $(if ($null -eq $hibAfter) { '?' } else { $hibAfter }) + 's, disk=' + $(if ($null -eq $disk) { '?' } else { $disk }) + 's'
+    <#  HIBERNASYON: "powercfg /h off" ayari daha once yalnizca Fast Startup
+        kapatilirken dolayli calisiyordu; DisableHibernation toggle'i hicbir yerde
+        okunmuyordu. Burada ServerMode'dan bagimsiz uygulanir; boylece dizustu
+        profilinde de yalnizca bu ayar aciksa hibernasyon kapatilir. #>
+    $hibAyar = $null
+    try { $hibAyar = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -Name 'HibernateEnabled' -ErrorAction Stop).HibernateEnabled } catch { }
+    $hibDurum = $(if ($hibAyar -eq 1) { 'acik' } else { 'kapali' })
+    $disableHib = $true
+    try {
+        if (Test-RwConfigKey $global:cfg 'DisableHibernation') { $disableHib = [bool]$global:cfg['DisableHibernation'] }
+    } catch { $disableHib = $true }
+    if ($disableHib -and $hibAyar -eq 1) {
+        if ((Test-Admin) -and -not $Check) {
+            try {
+                powercfg /h off 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw ('powercfg çıkış kodu ' + $LASTEXITCODE) }
+                $hibAyar = 0
+                $hibDurum = 'kapali'
+                $repair += 'hibernasyon kapatildi (powercfg /h off)'
+            } catch { $ok = $false; $repair += 'hibernasyon kapatilamadi' }
+        } else { $ok = $false; $repair += 'hibernasyon ACIK (admin gerekir)' }
+    }
+    $detail = 'sleep=' + $(if ($null -eq $standby) { '?' } else { $standby }) + 's, hibIdle=' + $(if ($null -eq $hibIdle) { '?' } else { $hibIdle }) + 's, hibAfter=' + $(if ($null -eq $hibAfter) { '?' } else { $hibAfter }) + 's, disk=' + $(if ($null -eq $disk) { '?' } else { $disk }) + 's, hibernation=' + $hibDurum
     $needFix = ($null -ne $standby -and $standby -ne 0) -or ($null -ne $hibIdle -and $hibIdle -ne 0) -or ($null -ne $hibAfter -and $hibAfter -ne 0) -or ($null -ne $disk -and $disk -ne 0)
     if ($needFix) {
         if ($cfg.ServerMode -and (Test-Admin) -and -not $Check) {
@@ -3649,6 +3678,50 @@ function Clear-StaleRebootPending {
     } catch { }
 }
 
+function Sync-ScheduledTaskInterval {
+    <#
+        Panelden kaydedilen IntervalMinutes yalnizca config.json'a yaziliyordu;
+        gorevin tekrar araligi bir sonraki "Watchdog kur" islemine kadar eski
+        kaliyordu. SYSTEM dongusu her calistiginda gercek araligi karsilastirir
+        ve yalnizca farkliysa gunceller.
+    #>
+    param([int]$Minutes)
+    if ($Minutes -lt 1) { $Minutes = 5 }
+    if ($Minutes -gt 240) { $Minutes = 240 }
+    $hedefler = @()
+    if (Test-Admin) { $hedefler += $TaskName }
+    $hedefler += 'RemoteHostWatchdogUser'
+    foreach ($tn in $hedefler) {
+        try {
+            $task = Get-ScheduledTask -TaskName $tn -ErrorAction SilentlyContinue
+            if (-not $task) { continue }
+            $degisti = $false
+            $yeniTetikler = @()
+            foreach ($t in @($task.Triggers)) {
+                if ($t.Repetition -and -not [string]::IsNullOrWhiteSpace([string]$t.Repetition.Interval)) {
+                    $mevcut = -1
+                    try { $mevcut = [System.Xml.XmlConvert]::ToTimeSpan([string]$t.Repetition.Interval).TotalMinutes } catch { }
+                    if ($mevcut -lt 0 -or [math]::Abs($mevcut - $Minutes) -ge 0.01) {
+                        $baslangic = Get-Date
+                        try { $baslangic = [datetime]::Parse([string]$t.StartBoundary) } catch { }
+                        if ($baslangic -lt (Get-Date).AddMinutes(-1)) { $baslangic = (Get-Date).AddMinutes(1) }
+                        $yeniTetikler += (New-ScheduledTaskTrigger -Once -At $baslangic -RepetitionInterval (New-TimeSpan -Minutes $Minutes))
+                        $degisti = $true
+                        continue
+                    }
+                }
+                $yeniTetikler += $t
+            }
+            if ($degisti) {
+                Set-ScheduledTask -TaskName $tn -Trigger $yeniTetikler -ErrorAction Stop | Out-Null
+                Write-Log 'INFO' ('zamanlanmis gorev araligi guncellendi: ' + $tn + ' -> ' + $Minutes + ' dk')
+            }
+        } catch {
+            Write-Log 'WARN' ('zamanlanmis gorev araligi guncellenemedi (' + $tn + '): ' + $_.Exception.Message)
+        }
+    }
+}
+
 function Invoke-Watchdog {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $global:cfg = Get-Config
@@ -3658,6 +3731,12 @@ function Invoke-Watchdog {
     # Disk bos alani denetimi: dolu diskte state/log yazimi sessizce basarisiz olur ve
     # watchdog "sessizce olu" hale gelir. Yalnizca uyari uretir, hicbir sey silmez.
     if (-not $Check) { try { Test-DiskSpace } catch { } }
+    # Panelden degistirilen kontrol araligini zamanlanmis goreve uygula (yalnizca
+    # yetkili dongude; -Check hicbir seyi degistirmez). SYSTEM gorevi yalnizca
+    # yoneticiyse, kullanici yedek gorevi ise her zaman denenir.
+    if (-not $Check) {
+        try { Sync-ScheduledTaskInterval -Minutes ([int]$global:cfg.IntervalMinutes) } catch { Write-Log 'WARN' ('gorev araligi esitleme hatasi: ' + $_.Exception.Message) }
+    }
     <#
         ANA SYSTEM GÖREVİ KENDİNİ ONARIR. Gerekçe: bu görev silinirse (kurulum
         sırasında, güncellemede veya elle) watchdog yalnızca açık oturuma bağımlı

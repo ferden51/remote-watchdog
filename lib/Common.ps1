@@ -76,6 +76,18 @@ function Test-RwSecretProtected {
     return (-not [string]::IsNullOrWhiteSpace($Value)) -and $Value.StartsWith($script:RwSecretPrefix)
 }
 
+function Test-RwConfigKey {
+    <#
+        Config anahtari var mi? Get-Config bir OrderedDictionary dondurur; onun
+        anahtarlari .PSObject.Properties ile GORUNMEZ. Bu yuzden IDictionary ise
+        Contains, aksi halde PSObject.Properties kullanilir.
+    #>
+    param($Obj, [string]$Key)
+    if ($null -eq $Obj) { return $false }
+    if ($Obj -is [System.Collections.IDictionary]) { return $Obj.Contains($Key) }
+    return (@($Obj.PSObject.Properties.Name) -contains $Key)
+}
+
 function Protect-RwSecretInObject {
     <#
         Bir config nesnesinin (PSCustomObject / [ordered] hashtable) gizli alanlarini
