@@ -4,6 +4,40 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.20] - 2026-11-04
+
+Ayarlar ekranındaki hatalar düzeltildi; kaydetme artık doğrulama yapıyor ve
+değerleri doğru hedefe (host/istemci) yazıyor.
+
+### 🐞 Düzeltilen
+
+- **Panel varsayılanları host ile eşitlendi.** İlk kayıtta `DisableHibernation`,
+  `PanelRepair`, `PanelScriptName`, `DiskUyariMB` ve `OfficeSaveTimeoutSeconds`
+  yanlış varsayılanla ezilmiyor.
+- **Kaydetme doğrulaması.** Sayı, tarih ve aralık alanları denetlenir; geçersiz
+  alanların tamamı listelenir ve hiçbir config dosyası yazılmaz. `-Quiet`
+  tüm ileti kutularını susturur.
+- **Sayısal sınırlar tanımlandı.** `IntervalMinutes`, `NetMaxRepairRung`,
+  `RebootDelaySeconds` gibi ayarlarda `Min`/`Max` uygulanır;
+  `MaxRestartsPerDay` değerinde `0` sınırsız anlamını korur.
+- **Geçersiz enum değeri** arayüzde seçili görünmemek yerine ilk geçerli
+  seçeneğe düşer ve kaydederken eski bozuk değer geri yazılmaz.
+- **`DiskUyariMB` artık gerçekten okunuyor.** Bayt/MB karışıklığı giderildi;
+  `0` uyarıyı kapatır, `50` MB altındaki pozitif değerler `50` MB'a çekilir.
+- **`DisableHibernation`** `ServerMode` kapalıyken de uygulanır; dizüstü
+  profilinde yalnızca uyku/disk zaman aşımlarına dokunulmaz.
+- **Kontrol aralığı değişince** zamanlanmış görev tekrarı `IntervalMinutes`
+  değerine eşitlenir.
+- **İstemci log ayarları ayrıldı.** `LogGunDays`/`LogDosyaMB` host ve istemci
+  için ayrı tanımlanır; gün/csv değerleri `Target` alanına göre doğru
+  `config.json` dosyasına yazılır.
+- **Tepsi menüsü etiketleri** aç/kapat sonrası `(insan sesi)` ve `(wav)`
+  eklerini kaybetmez.
+
+### 🧪 Test
+
+- `tests/Test-All.ps1` **463 kontrol** (0 hata).
+
 ## [1.3.19] - 2026-10-22
 
 İki hata düzeltildi: panel kendi durumunu "KAPALI" diye gösteriyordu ve günlük
