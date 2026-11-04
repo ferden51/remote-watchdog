@@ -3981,7 +3981,7 @@ function Set-VoiceMode {
     try { Save-HostConfig @{ SesliBildirim = [bool]$new } } catch { Write-Trace ('anons ayari yazilamadi: ' + $_.Exception.Message) }
     if ($script:TrayItems) {
         $mi = @($script:TrayItems | Where-Object { $_.Tag -eq 'voice' })[0]
-        if ($mi) { $mi.Text = 'Sesli anons - ' + $(if ($new) { 'açık' } else { 'kapalı' }) }
+        if ($mi) { $mi.Text = 'Sesli anons (insan sesi) - ' + $(if ($new) { 'açık' } else { 'kapalı' }) }
     }
     Show-Balloon -Title 'Sesli anons' -Text ('İnsan sesi (Türkçe konuşma) ' + $(if ($new) { 'ACILDI' } else { 'KAPATILDI' }) + '. Film efektleri ayrı anahtarda; ikisini birlikte kapatmak için Sessiz mod.') -Icon 'Info' -Force
     if ($new) { Speak-Text 'Sesli anons açıldı.' -Sfx 'ok' -Force }
@@ -3999,7 +3999,7 @@ function Set-SfxMode {
     try { Save-HostConfig @{ SesEfektleri = [bool]$new } } catch { Write-Trace ('ses efekti ayari yazilamadi: ' + $_.Exception.Message) }
     if ($script:TrayItems) {
         $mi = @($script:TrayItems | Where-Object { $_.Tag -eq 'sfx' })[0]
-        if ($mi) { $mi.Text = 'Film efektleri - ' + $(if ($new) { 'açık' } else { 'kapalı' }) }
+        if ($mi) { $mi.Text = 'Film efektleri (wav) - ' + $(if ($new) { 'açık' } else { 'kapalı' }) }
     }
     Show-Balloon -Title 'Film efektleri' -Text ('Uzay filmi efektleri (wav) ' + $(if ($new) { 'ACILDI' } else { 'KAPATILDI - bundan sonra efekt sesi gelmeyecek' }) + '. İnsan sesi ayrı anahtarda; ikisini birlikte kapatmak için Sessiz mod.') -Icon 'Info' -Force
     if ($new) { Play-Sfx 'ok' | Out-Null }

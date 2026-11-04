@@ -1149,6 +1149,14 @@ if ($Section -eq 0 -or $Section -eq 2) {
     Ok 'sayisal ayarlarda Min/Max dogrulama siniri tanimli' (($settingsCode2 -match 'Key = ''IntervalMinutes''.*Min = 1; Max = 240') -and ($settingsCode2 -match 'Key = ''NetMaxRepairRung''.*Min = 1; Max = 4'))
     Ok 'MaxRestartsPerDay 0 in ustu sinirsiz (Max yok)' (($settingsCode2 -match "Key = 'MaxRestartsPerDay'.*Min = 0") -and ($settingsCode2 -notmatch "Key = 'MaxRestartsPerDay'.*Max = "))
     Ok 'istemci LogGunDays/LogDosyaMB runtime tarafindan okunuyor' (($clientText -match 'Test-RwConfigKey \$global:cfg') -and ($clientText -match "'LogGunDays'") -and ($clientText -match "'LogDosyaMB'"))
+    # Tepsi menusu: click yeni olayi hangi olayi tetikler? Etiketler ile Invoke-TrayAction case'leri ayni adlarda olmali.
+    $trayFnMatch = [regex]::Match($panelCode2, '(?s)function Invoke-TrayAction\s*\{.*?\nfunction ')
+    $trayCases = @(([regex]::Matches($trayFnMatch.Value, "'([A-Za-z0-9_]+)'\s*\{") | ForEach-Object { $_.Groups[1].Value }))
+    $menuMatch = [regex]::Match($panelCode2, '(?s)\$items = @\(.*?\n    \)')
+    $menuTags = @(([regex]::Matches($menuMatch.Value, "k = '([A-Za-z0-9_]*)'") | ForEach-Object { $_.Groups[1].Value }))
+    $deadTags = @($menuTags | Where-Object { $_ -and ($trayCases -notcontains $_) })
+    Ok 'tepsi menusu etiketlerinin Invoke-TrayAction case''i var' ($deadTags.Count -eq 0) ('eslenmeyen: ' + ($deadTags -join ','))
+    Ok 'sesli anons ve efekt etiketi toggle sonrasi degismedi (insan sesi / wav)' (($panelCode2 -match "Sesli anons \(insan sesi\) - ' \+") -and ($panelCode2 -match "Film efektleri \(wav\) - ' \+"))
 }
 
 if ($Section -eq 0 -or $Section -eq 3) {
