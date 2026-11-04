@@ -2152,7 +2152,7 @@ function Test-ServerPower {
     try { $bat = Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue; if ($bat) { $onBattery = ($bat.BatteryStatus -eq 1) } } catch { }
     if ($onBattery) { $ok = $false; $repair += 'CIKTAKILAR (pil) - sunucu modu icin AC besleme gerekli' }
     if (-not $cfg.ServerMode) {
-        Write-Log 'INFO' 'ServerMode kapali (dizustu profili): uyku/hibernasyon ayarlarina dokunulmadi, kontrol atlandi'
+        Write-Log 'INFO' 'ServerMode kapali (dizustu profili): uyku/disk zaman asimlarina dokunulmadi; DisableHibernation yine uygulanir'
         Add-Result 'Guc/uyku ayarlari' $true ($detail + ', fastStartup=' + $(if ($fastStartup) { 'acik' } else { 'kapali' })) 'ServerMode kapali - kontrol atlandi' $true
         return
     }

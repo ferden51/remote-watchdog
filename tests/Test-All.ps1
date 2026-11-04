@@ -1157,6 +1157,7 @@ if ($Section -eq 0 -or $Section -eq 2) {
     $deadTags = @($menuTags | Where-Object { $_ -and ($trayCases -notcontains $_) })
     Ok 'tepsi menusu etiketlerinin Invoke-TrayAction case''i var' ($deadTags.Count -eq 0) ('eslenmeyen: ' + ($deadTags -join ','))
     Ok 'sesli anons ve efekt etiketi toggle sonrasi degismedi (insan sesi / wav)' (($panelCode2 -match "Sesli anons \(insan sesi\) - ' \+") -and ($panelCode2 -match "Film efektleri \(wav\) - ' \+"))
+    Ok 'istemci gunleri (days) dogru config dosyasina yonlendiriliyor' (($panelCode2 -match '\$parts\[2\] -eq ''client''') -and ($panelCode2 -match '\$parts\[3\]'))
 }
 
 if ($Section -eq 0 -or $Section -eq 3) {

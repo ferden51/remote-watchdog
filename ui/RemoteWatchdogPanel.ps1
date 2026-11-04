@@ -3114,13 +3114,15 @@ function Save-Settings {
                 continue
             }
             if ($key.StartsWith('days|')) {
+                # ToolTip bicimi: days|Key|Gun  (host)  veya  days|Key|client|Gun  (istemci).
                 $parts = $key.Split('|')
                 if ($parts.Count -ge 3) {
-                    $isClientDays = $parts[1].EndsWith('|client')
-                    $dk = $(if ($isClientDays) { $parts[1].Substring(0, $parts[1].Length - 7) } else { $parts[1] })
+                    $isClientDays = ($parts.Count -ge 4 -and [string]$parts[2] -eq 'client')
+                    $dk = [string]$parts[1]
+                    $gun = $(if ($isClientDays) { [string]$parts[3] } else { [string]$parts[2] })
                     $hedef = $(if ($isClientDays) { $clientDaysVals } else { $daysVals })
                     if (-not $hedef.ContainsKey($dk)) { $hedef[$dk] = @() }
-                    if ([bool]$ctrl.Tag) { $hedef[$dk] = @($hedef[$dk] + $parts[2]) }
+                    if ([bool]$ctrl.Tag) { $hedef[$dk] = @($hedef[$dk] + $gun) }
                 }
                 continue
             }
