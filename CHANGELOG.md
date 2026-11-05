@@ -4,6 +4,38 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.21] - 2026-11-05
+
+Ses efektleri ve sesli anons senkronizasyonu düzeltildi. Efektler artık anonsla
+birlikte çalıyor; anahtarlar panel yeniden başlatılmadan geçerli oluyor.
+
+### 🐞 Düzeltilen
+
+- **Ayarlar/tepsi ses anahtarları anında geçerli.** `SesEfektleri` veya
+  `SesliBildirim` değiştirildiğinde çalışma anındaki bayraklar ve tepsi/Ayarlar
+  etiketleri aynı anda güncelleniyor; önceden panel yeniden başlatılana kadar
+  eski değer kullanılıyordu.
+- **Efekt ve anons aynı anda başlıyor.** Konuşma sürerken gelen olayın efekti
+  hemen çalıp anonstan kopmuyor; efekt, anonsla birlikte kuyruğa alınıp
+  konuşma gerçekten başladığında çalıyor.
+- **Efektler anonstan bağımsız.** `SesliBildirim` kapalıyken sesli anons
+  susuyor ama `SesEfektleri` açıksa efektler çalmaya devam ediyor.
+- **Aynı restart olayı tek anons/tek efekt.** Host'un bekleyen anonsu, geçiş
+  anonsu ve geri sayım modalı aynı olayı iki kez duyuruyordu (canlı log:
+  22:51:48 modal, 22:51:55 bekleyen anons). Artık 2 dakikalık damga ile
+  olay başına bir anons ve bir efekt veriliyor.
+- **Onbellekten çalınan bekleyen anonsun efekti kaybolmuyor.** `voiceKey`
+  isabetinde `Speak-Text` atlandığı için efekt hiç çalmıyordu; efekt artık
+  onbellek çalma yolunda da veriliyor ve `SesliBildirim` kapalıysa onbellek
+  sesi konuşmuyor.
+- **İlk efekt sessiz kalmıyor.** `MediaPlayer.Open` asenkron olduğu için ilk
+  `Play()` yutulabiliyordu; dosya hazır olana kadar kısa aralıklarla yeniden
+  deneniyor ve panel açılışında oynatıcılar önden yükleniyor.
+- **Panel açılışında bekleyen anons gecikmiyor.** Host'un bıraktığı anons,
+  20 saniyelik denetim sayacı beklenmeden hemen okunuyor.
+- **Geri sayım modalinde çift efekt yok.** Modal, anonsla birlikte gelen
+  `reboot` efektine ek olarak `alert` efektini de çalıyordu; bu kaldırıldı.
+
 ## [1.3.20] - 2026-11-04
 
 Ayarlar ekranındaki hatalar düzeltildi; kaydetme artık doğrulama yapıyor ve

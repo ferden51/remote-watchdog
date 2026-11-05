@@ -1076,6 +1076,7 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'panel ses efekti API (Play-Sfx / Get-SfxPath / Stop-Sfx) var' (($panelText -match 'function Play-Sfx') -and ($panelText -match 'function Get-SfxPath') -and ($panelText -match 'function Stop-Sfx'))
     Ok 'sessiz mod bayragi dogru okunuyor (bool cast, "0" degeri sessiz sayilirdi)' (($panelText -match 'function Get-FlagBool') -and ($panelText -match 'script:Silent = Get-FlagBool'))
     Ok 'panel efektleri on yukluyor (Get-SfxPlayer onbellegi)' ($panelText -match 'function Get-SfxPlayer')
+    Ok 'ilk efekt, dosya acilirken sessiz kalmiyor (retry)' (($panelText -match 'function Start-SfxRetry') -and ($panelText -match 'Start-SfxRetry -Path \$path -Seq \$seq'))
     Ok 'panel efekt klasorunu kullaniyor (ui\sounds)' ($panelText.Contains("`$SfxDir = Join-Path `$UiDir 'sounds'"))
     Ok 'panel efektleri susturma korumasi (SesEfektleri + sessiz mod)' (($panelText -match '\(Get-HostConfig\)\.SesEfektleri -eq \$false') -and ($panelText -match 'script:Silent -and -not \$Force'))
     $sfxUsed = @()
@@ -1089,7 +1090,23 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'tepside ses efekti anahtari var (sfx)' ($panelText -match "'sfx' \{ Set-SfxMode")
     Ok 'tepside anons anahtari var (voice) - efektten ayri' (($panelText -match "'voice' \{ Set-VoiceMode") -and ($panelText -match 'function Set-VoiceMode'))
     Ok 'anons ve efekt farkli ayarlara yaziyor' (($panelText -match 'Save-HostConfig @\{ SesliBildirim = ') -and ($panelText -match 'Save-HostConfig @\{ SesEfektleri = '))
-    Ok 'ses anahtarlari calisma aninda sabitleniyor (kapattiysan ses gelmez)' (($panelText -match 'if \(-not \$script:SfxOn\) \{ return \$false \}') -and ($panelText -match 'if \(-not \$script:VoiceOn\) \{ return \}'))
+    Ok 'ses anahtarlari calisma aninda sabitleniyor (kapattiysan ses gelmez)' (($panelText -match 'if \(-not \$script:SfxOn\) \{ return \$false \}') -and ($panelText -match 'if \(-not \$script:VoiceOn\)'))
+    Ok 'Ayarlar kaydi ses bayraklarini aninda yeniliyor (panel restart gerekmez)' (($panelText -match 'try \{ Sync-AudioRuntime \}') -and ($panelText -match 'function Sync-AudioRuntime'))
+    Ok 'tepsi ve Ayarlar ses anahtarlari ayni degeri gosteriyor' (($panelText -match 'function Update-AudioLabels') -and ($panelText -match "Set-SettingToggleValue -Key 'SesEfektleri'") -and ($panelText -match "Set-SettingToggleValue -Key 'SesliBildirim'"))
+    $setSfxCode2 = [regex]::Match($panelText, '(?s)function Set-SfxMode.*?\r?\n\}\r?\n').Value
+    $setVoiceCode2 = [regex]::Match($panelText, '(?s)function Set-VoiceMode.*?\r?\n\}\r?\n').Value
+    Ok 'tepsi anahtarlari da calisma bayraklarini senkronluyor' (($setSfxCode2 -match 'Sync-AudioRuntime') -and ($setVoiceCode2 -match 'Sync-AudioRuntime'))
+    $speakCode2 = [regex]::Match($panelText, '(?s)function Speak-Text.*?\r?\n\}\r?\n').Value
+    Ok 'bekleyen anonsun efekti de kuyruga tasiniyor (senkron)' ($speakCode2 -match 'Add-SpeechQueue -Text \$t -Volume \$Volume -CacheKey \$CacheKey -Sfx \$Sfx')
+    Ok 'kuyruktaki anons kendi efektiyle yeniden caliyor' (($panelText.Contains("[string]`$CacheKey = '', [string]`$Sfx = ''")) -and ($panelText -match 'Sfx = \[string\]\$Sfx') -and ($panelText -match '-Sfx \(\[string\]\$item\.Sfx\)'))
+    $pendingCode2 = [regex]::Match($panelText, '(?s)function Speak-PendingVoice.*?\r?\n\}\r?\n').Value
+    Ok 'onbellekten konusan bekleyen anons efekti de caliyor' ($pendingCode2 -match 'Speak-CachedVoice -Key \$vk -Sfx \$sfx')
+    Ok 'anons kapaliyken bekleyen onbellek sesi konusmuyor' (($pendingCode2 -match '\$voiceOn') -and ($pendingCode2 -match 'if \(\$vk -and \$voiceOn\)'))
+    Ok 'ayni restart olayi tek anons (pending + modal damgasi)' (($pendingCode2 -match 'Test-RecentRebootAnnounce') -and ($panelText -match 'function Test-RecentRebootAnnounce'))
+    $modalCode2 = [regex]::Match($panelText, '(?s)function Show-RebootModal.*?\r?\n\}\r?\n').Value
+    Ok 'restart modalinde cift efekt yok (alert + reboot ust uste binmiyor)' ($modalCode2 -notmatch "Play-Sfx 'alert'")
+    Ok 'restart modali da tek-anons damgasini kullaniyor' ($modalCode2 -match 'Test-RecentRebootAnnounce')
+    Ok 'panel acilista bekleyen anonsu hemen okuyor (20 sn gecikme yok)' ($panelText -match "try \{ Speak-PendingVoice \} catch \{ Write-Trace \('bekleyen anons hatasi")
     Ok 'tepsi etiketleri etiket yerine Tag ile eslesiyor (Sessiz mod etiketi degisti)' ($panelText -match "if \(\`$it\.Tag -eq 'silent'\)")
     Ok 'panel acilista iki anahtari da logluyor' ($panelText -match 'ses anahtarlari -> film efektleri')
     Ok 'tepside ses testi var (testses)' ($panelText -match "'testses'")

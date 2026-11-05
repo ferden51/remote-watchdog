@@ -184,6 +184,10 @@ $script:VoiceNoTr = $false
 $script:SfxNames = @('online', 'ok', 'warn', 'alert', 'repair', 'recover', 'reboot', 'scan')
 $script:SfxPlayers = @{}
 $script:SfxMissing = @{}
+# MediaPlayer.Open asenkron: ilk calma istegi dosya hazir olmadan gelebilir. Bu iki tablo,
+# her oynatici icin son calma sirasini ve bekleyen "hazir olunca cal" denemesini tutar.
+$script:SfxPlaySeq = @{}
+$script:SfxRetry = @{}
 # Ayarlar panelden de degisebiliyor; calisma anindaki secim (tepsi anahtari) ustun tutulur,
 # boylece "kapattim ama ses geliyor" durumu olusmaz.
 $script:SfxOn = $true
@@ -219,6 +223,9 @@ $script:RebootCancelBtn = $null
 $script:RebootSoonBtn = $null
 $script:RebootDeadline = $null
 $script:RebootSeenAt = $null
+# Son restart anonsunun zamani: host pending-voice + modal + gecis anonsu ayni olayi
+# UC kanaldan duyurup efekti iki kez caliyordu. Bu damga ayni olayin tekrarini engeller.
+$script:RebootAnnouncedAt = $null
 # Iptal istegi (butona basildi) ve basildigi an: UI thread'i BLOKLAMADAN, sonucu
 # 1 sn'lik RebootTimer tick'i isler (ack / bekleyen dosyanin silinmesi / zaman asimi).
 $script:RebootCancelRequested = $false
@@ -1183,6 +1190,7 @@ function Clear-StaleRebootFiles {
         try { Remove-Item -LiteralPath $sf -Force -ErrorAction SilentlyContinue } catch { }
     }
     $script:RebootSeenAt = $null
+    $script:RebootAnnouncedAt = $null
 }
 
 function Close-RebootModal {
@@ -1238,6 +1246,7 @@ function Show-RebootModal {
             try { Remove-Item -LiteralPath $sf -Force -ErrorAction SilentlyContinue } catch { }
         }
         $script:RebootSeenAt = $null
+        $script:RebootAnnouncedAt = $null
         try { Update-Actions } catch { }
         return
     }
@@ -1458,6 +1467,8 @@ function Show-RebootModal {
                 hicbir sey olmadi" diyordu. Artik bekleyen dosya kaybolunca modal ANINDA kapanir.
             #>
             if (-not (Test-Path -LiteralPath $RebootPendingFile)) {
+                # Olay bitti (iptal/duzelme): yeni bir restart olayi yeniden anons edilebilsin.
+                $script:RebootAnnouncedAt = $null
                 if ($script:RebootCancelRequested) {
                     Write-Trace 'restart iptali host tarafindan onaylandi (bekleyen dosya kaldirildi)'
                     try { Speak-Text 'Yeniden başlatma iptal edildi. Bilgisayar açık kalıyor.' -Sfx 'recover' -Force } catch { }
@@ -1549,17 +1560,30 @@ function Show-RebootModal {
         $ss0 = $left0 % 60
         $big.Text = if ($mm0 -gt 0) { ('{0}:{1:00}' -f $mm0, $ss0) } else { [string]$ss0 }
     } catch { }
-    Play-Sfx 'alert' | Out-Null
-    # Sesli anons: ekranda geri sayac varken duyulmasi gerekiyor.
+    # Sesli anons: ekranda geri sayac varken duyulmasi gerekiyor. Efekt tek kez calar
+    # (Speak-Text -Sfx 'reboot'); ayrica 'alert' calmak iki efekti ust uste bindiriyordu.
     $dur = [int][math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
     $sebep = [string]$data.reason
     if ([string]::IsNullOrWhiteSpace($sebep)) { $sebep = 'Onarılamayan bağlantı sorunu' }
     if ($dur -le 10) {
-        Speak-Text ($sebep + '. Bilgisayar şimdi yeniden başlatılıyor.') -Sfx 'reboot' -Force
+        $anons = $sebep + '. Bilgisayar şimdi yeniden başlatılıyor.'
     } else {
-        Speak-Text ($sebep + '. ' + $dur + ' saniye içinde bilgisayar yeniden açılacak. İptal edebilirsiniz.') -Sfx 'reboot' -Force
+        $anons = $sebep + '. ' + $dur + ' saniye içinde bilgisayar yeniden açılacak. İptal edebilirsiniz.'
     }
-    Write-Trace ('restart modali acildi, geri sayim: ' + $dur + ' sn; anons verildi')
+    <#
+        TEK ANONS KURALI: Ayni restart olayi icin host pending-voice, gecis anonsu ve modal
+        ayri ayri konusuyordu (canli log: 22:51:48 modal, 22:51:55 bekleyen anons). Damga
+        tazeyse modal yalnizca sayaci acar; anons/efekt tekrarlanmaz.
+    #>
+    if (Test-RecentRebootAnnounce) {
+        Write-Trace ('restart modali acildi, geri sayim: ' + $dur + ' sn; anons zaten verildi (tekrar edilmedi)')
+    } else {
+        $script:RebootAnnouncedAt = Get-Date
+        $script:LastSpokenKey = $anons
+        $script:LastSpokenAt = Get-Date
+        Speak-Text $anons -Sfx 'reboot' -Force
+        Write-Trace ('restart modali acildi, geri sayim: ' + $dur + ' sn; anons verildi')
+    }
 }
 
 function Watch-RebootPending {
@@ -3188,6 +3212,8 @@ function Save-Settings {
         if ($clientVals.Count -gt 0) { Write-ConfigFile -Path $ClientConfig -Values $clientVals }
         (El $script:Win 'TxtSaved').Text = 'Kaydedildi: ' + (Get-Date).ToString('HH:mm:ss') + '  (' + $hostVals.Count + ' host + ' + $clientVals.Count + ' istemci)'
         try { Resolve-CheckInterval -Force | Out-Null } catch { }
+        # Ses anahtarlari Ayarlar sayfasindan degistiyse panel yeniden baslatilmadan gecerli olsun.
+        try { Sync-AudioRuntime } catch { Write-Trace ('ses anahtarlari uygulanamadi: ' + $_.Exception.Message) }
         if (-not $Quiet) {
             $triggered = $false
             foreach ($tn in @('RemoteHostWatchdogUser', 'RemoteHostWatchdog')) {
@@ -3322,14 +3348,54 @@ function Test-EdgeTts {
     return [bool]$script:EdgeOk
 }
 
+function Test-RecentRebootAnnounce {
+    <#
+        Ayni restart olayi icin anonsun son 2 dakika icinde verilip verilmedigini soyler.
+        Host geri sayimi genelde 10-60 sn oldugu icin 2 dk pencere, erken kapanma ile
+        yeni bir gercek olayi birbirinden ayirir.
+    #>
+    param([int]$Seconds = 120)
+    if (-not $script:RebootAnnouncedAt) { return $false }
+    try { return (((Get-Date) - $script:RebootAnnouncedAt).TotalSeconds -lt $Seconds) } catch { return $false }
+}
+
 function Announce-Reboot {
     <#
         Restart anonsu: konusur VE dosyaya yazar (restart paneli de oldurdugu icin anons
         kaybolmasin; yeni panel acilinda Speak-PendingVoice okuyup konusur).
+        Ayni olay icin ikinci kez cagrilirsa (host gecisi + modal + pending) tekrar etmez.
     #>
-    param([switch]$NoPending)
+    param([switch]$NoPending, [switch]$Force)
     $txt = 'Sistem yeniden başlatılıyor.'
-    if (-not $NoPending) { Save-PendingVoice -Text $txt -Sfx 'reboot' }
+    if (-not $Force -and (Test-RecentRebootAnnounce)) {
+        Write-Trace 'restart anonsu 2 dk icinde zaten verildi; tekrar edilmedi'
+        return
+    }
+    <#  Host geri sayacli restart icin reboot-pending.json biraktiysa anonsu MODAL yapar
+        (sebep + kalan sure + iptal). Burada ayrica konusmak ayni olayi ikinci kez duyurur. #>
+    if (-not $Force -and (Test-Path -LiteralPath $RebootPendingFile)) {
+        Write-Trace 'restart bildirimi modal tarafindan anons edilecek; gecis anonsu atlandi'
+        return
+    }
+    $script:RebootAnnouncedAt = Get-Date
+    <#  Host'un ayrintili pending anonsu (voiceKey'li) varsa EZME: modal/pending yolu onu
+        onbellekten okuyabilsin. Yalnizca taze bir restart anonsu yoksa kendimiz yazariz. #>
+    $birak = $false
+    if (-not $NoPending) {
+        $pf = Join-Path $HostData 'pending-voice.json'
+        if (Test-Path -LiteralPath $pf) {
+            try {
+                $pj = Get-Content -LiteralPath $pf -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ([string]$pj.sfx -eq 'reboot' -and $pj.at) {
+                    $yas = ((Get-Date) - [datetime]::Parse([string]$pj.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes
+                    if ($yas -ge 0 -and $yas -lt 5) { $birak = $true }
+                }
+            } catch { }
+        }
+        if (-not $birak) { Save-PendingVoice -Text $txt -Sfx 'reboot' }
+    }
+    $script:LastSpokenKey = $txt
+    $script:LastSpokenAt = Get-Date
     Speak-Text $txt -Sfx 'reboot'
 }
 
@@ -3395,32 +3461,49 @@ function Speak-PendingVoice {
         try { $ageMin = ((Get-Date) - [datetime]::Parse([string]$j.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).TotalMinutes } catch { }
         if ($ageMin -gt 30) { Write-Trace ('bekleyen ' + $pair.Etiket + ' anonsu cok eski (' + [int]$ageMin + ' dk), konusulmadi'); continue }
         $vk = [string]$j.voiceKey
+        $sfx = [string]$j.sfx
         $anahtar = $(if ($vk) { $vk } else { [string]$j.text })
         if ($script:LastSpokenKey -eq $anahtar -and $script:LastSpokenAt -and (((Get-Date) - $script:LastSpokenAt).TotalMinutes -lt 2)) {
             Write-Trace ('ayni anons 2 dk icinde konusuldu, tekrar edilmedi: ' + $j.text)
             continue
         }
+        <#
+            AYNI RESTART OLAYI TEK ANONS: modal veya gecis anonsu az once konustuysa
+            host'un bekleyen restart anonsu ikinci kez okunmaz (canli log: 22:51:48 modal,
+            22:51:55 bekleyen anons). Sfx de boylece iki kez calmiyor.
+        #>
+        $isReboot = ($pair.Etiket -eq 'restart' -or $sfx -eq 'reboot')
+        if ($isReboot -and (Test-RecentRebootAnnounce)) {
+            Write-Trace ('restart anonsu 2 dk icinde verildi; bekleyen ' + $pair.Etiket + ' anonsu tekrar edilmedi')
+            continue
+        }
         Write-Trace ('bekleyen ' + $pair.Etiket + ' anonsu konusuluyor: ' + $j.text)
         $script:LastSpokenKey = $anahtar
         $script:LastSpokenAt = Get-Date
+        if ($isReboot) { $script:RebootAnnouncedAt = Get-Date }
+        # Onbellek yolu Speak-Text'i atladigi icin sesli anons anahtarini BURADA da uygula;
+        # aksi halde SesliBildirim kapaliyken bekleyen onbellek anonsu yine konusuyordu.
+        $voiceOn = [bool]$script:VoiceOn
+        try { if ((Get-HostConfig).SesliBildirim -eq $false) { $voiceOn = $false } } catch { }
         # voiceKey: metin kismi dinamik oldugu icin (ornegin "Eksik: IP,DNS") onbellekteki
-        # kadin sesli dosyayi DOGRudan bu anahtarla caliyoruz.
-        if ($vk) {
+        # kadin sesli dosyayi DOGRudan bu anahtarla caliyoruz. Sfx burada verilir; onbellek
+        # isabetinde Speak-Text'e hic girilmedigi icin efekt ONCEDEN kayboluyordu.
+        if ($vk -and $voiceOn) {
             if ($script:SpeechBusy) {
                 # Konusma suruyor: anahtari kuyruga tasimaliyiz, yoksa metin eslesmesine
                 # duser ve (internetsizken) edge-tts'a giderdi. Dosya yoksa aile yedegini dene.
                 if (-not (Test-Path -LiteralPath (Join-Path $script:VoiceCacheDir ($vk + '.mp3')))) { $vk = Resolve-VoiceKeyFallback $vk }
             } else {
-                if (Speak-CachedVoice -Key $vk) { continue }
+                if (Speak-CachedVoice -Key $vk -Sfx $sfx -Force) { continue }
                 # Tam anahtar yoksa aile yedegi (reboot60 -> reboot30 -> ...); o da yoksa metin eslesmesi
                 $yedeK = Resolve-VoiceKeyFallback $vk
                 if ($yedeK) {
-                    if (Speak-CachedVoice -Key $yedeK) { continue }
+                    if (Speak-CachedVoice -Key $yedeK -Sfx $sfx -Force) { continue }
                 }
                 $vk = ''
             }
         }
-        Speak-Text -Text ([string]$j.text) -Sfx ([string]$j.sfx) -Force -CacheKey $vk
+        Speak-Text -Text ([string]$j.text) -Sfx $sfx -Force -CacheKey $vk
     }
 }
 
@@ -3443,11 +3526,12 @@ function Add-SpeechQueue {
     <#
         Konusma sirasinda gelen olayi KUYRUGA alir (ses kaybolmaz).
         Ayni metin arka arkaya geliyorsa tekilleştirilir (spam olmaz), kuyruk 8 ile sınırlıdır.
+        Sfx/Force da tasinir: efekt, anons GERCEKTEN basladiginda calar (sira beklerken degil).
     #>
-    param([string]$Text, [int]$Volume = 100, [string]$CacheKey = '')
+    param([string]$Text, [int]$Volume = 100, [string]$CacheKey = '', [string]$Sfx = '', [switch]$Force)
     if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
     foreach ($q in $script:SpeechQueue) { if ($q.Text -eq $Text) { return $false } }
-    [void]$script:SpeechQueue.Add([pscustomobject]@{ Text = [string]$Text; Volume = $Volume; CacheKey = [string]$CacheKey; At = (Get-Date) })
+    [void]$script:SpeechQueue.Add([pscustomobject]@{ Text = [string]$Text; Volume = $Volume; CacheKey = [string]$CacheKey; Sfx = [string]$Sfx; Force = [bool]$Force; At = (Get-Date) })
     while ($script:SpeechQueue.Count -gt 8) { $script:SpeechQueue.RemoveAt(0) }
     Write-Trace ('anons kuyruga alindi (' + $script:SpeechQueue.Count + ' bekliyor): ' + $Text)
     return $true
@@ -3460,7 +3544,7 @@ function Show-NextQueued {
     $item = $script:SpeechQueue[0]
     $script:SpeechQueue.RemoveAt(0)
     Start-Sleep -Milliseconds 250
-    Speak-Text -Text $item.Text -Volume $item.Volume -CacheKey ([string]$item.CacheKey)
+    Speak-Text -Text $item.Text -Volume $item.Volume -CacheKey ([string]$item.CacheKey) -Sfx ([string]$item.Sfx) -Force:([bool]$item.Force)
 }
 
 function Start-SpeechPoller {
@@ -3525,7 +3609,7 @@ function Speak-CachedVoice {
         -Key verilirse dogrudan o dosya; verilmezse metin eslestirmesi yapilir.
         Eslesmezse $false doner (cagiran motorlara duser).
     #>
-    param([string]$Text = '', [string]$Key = '')
+    param([string]$Text = '', [string]$Key = '', [string]$Sfx = '', [switch]$Force)
     if ($script:SpeechBusy) { return $false }
     $file = ''
     if ($Key) {
@@ -3591,6 +3675,9 @@ function Speak-CachedVoice {
     try {
         $pl = New-Object System.Windows.Media.MediaPlayer
         $pl.Open([uri]$file)
+        # Efekt anonsla AYNI anda baslar; dosya hazir oldugu dogrulandiktan sonra
+        # calindigi icin basarisiz bir onbellek denemesinde bosuna ses cikmaz.
+        if ($Sfx) { [void](Play-Sfx -Name $Sfx -Force:$Force) }
         $pl.Play()
         $script:SpeechBusy = $true
         $script:SpeechPlayer = $pl
@@ -3772,6 +3859,43 @@ function Get-SfxPlayer {
     }
 }
 
+function Start-SfxRetry {
+    <#
+        MediaPlayer.Open asenkron oldugu icin ilk Play, dosya hazir olmadan yutulabilir
+        (ozellikle Ayarlar'dan efekti acip hemen calinan onay sesi). UI'yi bloklamadan
+        150 ms'lik araliklarla dosya hazir olunca BIR kez daha dener.
+    #>
+    param([string]$Path, [int]$Seq)
+    try {
+        if ($null -eq $script:SfxRetry) { $script:SfxRetry = @{} }
+        if ($script:SfxRetry.ContainsKey($Path)) { try { $script:SfxRetry[$Path].Stop() } catch { } }
+        $tm = New-Object System.Windows.Threading.DispatcherTimer
+        $tm.Interval = [TimeSpan]::FromMilliseconds(150)
+        $script:SfxRetry[$Path] = $tm
+        $tries = 0
+        $tick = {
+            try {
+                $tm.Stop()
+                if (-not $script:SfxOn) { $script:SfxRetry.Remove($Path); return }
+                $p = $null
+                if ($script:SfxPlayers.ContainsKey($Path)) { $p = $script:SfxPlayers[$Path] }
+                if (-not $p) { $script:SfxRetry.Remove($Path); return }
+                if ([int]$script:SfxPlaySeq[$Path] -ne $Seq) { $script:SfxRetry.Remove($Path); return }
+                if (-not $p.NaturalDuration.HasTimeSpan) {
+                    $tries++
+                    if ($tries -lt 10) { $tm.Start(); return }
+                    $script:SfxRetry.Remove($Path)
+                    return
+                }
+                if ($p.Position.TotalMilliseconds -lt 1) { $p.Play() }
+                $script:SfxRetry.Remove($Path)
+            } catch { try { $script:SfxRetry.Remove($Path) } catch { } }
+        }.GetNewClosure()
+        $tm.Add_Tick($tick)
+        $tm.Start()
+    } catch { }
+}
+
 function Play-Sfx {
     <#
         Hazir efekti calar. Susturan durumlar: SesEfektleri=false (Ayarlar -> Bildirim) veya
@@ -3804,8 +3928,18 @@ function Play-Sfx {
     try {
         $pl.Volume = ($vol / 100.0)
         $pl.Position = [TimeSpan]::Zero
+        if ($null -eq $script:SfxPlaySeq) { $script:SfxPlaySeq = @{} }
+        $seq = 1 + [int]$(if ($script:SfxPlaySeq.ContainsKey($path)) { $script:SfxPlaySeq[$path] } else { 0 })
+        $script:SfxPlaySeq[$path] = $seq
         $pl.Play()
         Write-Trace ('ses efekti: ' + $Name)
+        if (-not $pl.NaturalDuration.HasTimeSpan) {
+            # Dosya henuz acilmadi: hazir olunca tekrar dene (sessiz ilk efekt olmasin).
+            Start-SfxRetry -Path $path -Seq $seq
+        } elseif ($script:SfxRetry -and $script:SfxRetry.ContainsKey($path)) {
+            try { $script:SfxRetry[$path].Stop() } catch { }
+            $script:SfxRetry.Remove($path)
+        }
         return $true
     } catch {
         Write-Trace ('ses efekti calinamadi (' + $Name + '): ' + $_.Exception.Message)
@@ -3815,8 +3949,25 @@ function Play-Sfx {
 
 function Stop-Sfx {
     <#  Tum efektleri durdurur ve onbellegi bosaltir (cikista cagrilir). #>
+    if ($script:SfxRetry) {
+        foreach ($t in @($script:SfxRetry.Values)) { try { $t.Stop() } catch { } }
+        $script:SfxRetry = @{}
+    }
+    $script:SfxPlaySeq = @{}
     foreach ($pl in @($script:SfxPlayers.Values)) { try { $pl.Stop(); $pl.Close() } catch { } }
     $script:SfxPlayers = @{}
+}
+
+function Initialize-SfxPlayers {
+    <#
+        Oynaticilari panel acilirken onden acar. Boylece ilk olaydaki efekt, MediaPlayer
+        dosyayi yeni acarken gecikmiyor/sessiz kalmiyor. Ses cikarmaz, yalnizca hazirlar.
+    #>
+    if (-not $script:SfxOn) { return }
+    foreach ($n in @($script:SfxNames)) {
+        $p = Get-SfxPath -Name $n
+        if ($p) { [void](Get-SfxPlayer -Path $p) }
+    }
 }
 
 function ConvertTo-TtsText {
@@ -3853,17 +4004,37 @@ function Speak-Text {
         SesliBildirim kapaliysa veya sessiz moddaysa konusmaz (efektin kendi anahtari SesEfektleri).
     #>
     param([string]$Text, [int]$Volume = 100, [string]$Sfx = '', [switch]$Force, [string]$CacheKey = '')
-    if ($Sfx) { [void](Play-Sfx -Name $Sfx -Force:$Force) }
-    if ([string]::IsNullOrWhiteSpace($Text)) { return }
-    if (-not $script:VoiceOn) { return }
-    try { $cfg = Get-HostConfig; if ($cfg.SesliBildirim -eq $false) { return } } catch { $cfg = $null }
-    if ($script:Silent -and -not $Force) { return }
+    # Efekt, sesli anonsun anahtarlarindan BAGIMSIZDIR: anons kapaliyken de calar.
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        if ($Sfx) { [void](Play-Sfx -Name $Sfx -Force:$Force) }
+        return
+    }
+    if (-not $script:VoiceOn) {
+        if ($Sfx) { [void](Play-Sfx -Name $Sfx -Force:$Force) }
+        return
+    }
+    try {
+        $cfg = Get-HostConfig
+        if ($cfg.SesliBildirim -eq $false) {
+            if ($Sfx) { [void](Play-Sfx -Name $Sfx -Force:$Force) }
+            return
+        }
+    } catch { $cfg = $null }
+    if ($script:Silent -and -not $Force) {
+        if ($Sfx) { [void](Play-Sfx -Name $Sfx -Force:$Force) }
+        return
+    }
     $t = ConvertTo-TtsText $Text
-    if ([string]::IsNullOrWhiteSpace($t)) { return }
+    if ([string]::IsNullOrWhiteSpace($t)) {
+        if ($Sfx) { [void](Play-Sfx -Name $Sfx -Force:$Force) }
+        return
+    }
     if ($t.Length -gt 160) { $t = $t.Substring(0, 160) }
-    # Konusma surerken gelen olay: motorlara dusulmez (cakisma/sessiz yutulma olurdu),
-    # kuyruga alinir ve mevcut anons bitince okunur.
-    if ($script:SpeechBusy) { [void](Add-SpeechQueue -Text $t -Volume $Volume -CacheKey $CacheKey); return }
+    # Konusma surerken gelen olay: efekt de anonsla BIRLIKTE kuyruga alinir. ONCEDEN
+    # efekt hemen caliyor, anons ise saniyeler sonra geliyordu (senkron bozuktu).
+    if ($script:SpeechBusy) { [void](Add-SpeechQueue -Text $t -Volume $Volume -CacheKey $CacheKey -Sfx $Sfx -Force:$Force); return }
+    # Konusma gercekten basliyor: efekt simdi calar, anons hemen ardindan gelir.
+    if ($Sfx) { [void](Play-Sfx -Name $Sfx -Force:$Force) }
     # 0) Onbellek: internetsiz kadin sesi
     try {
         if ($CacheKey) { if (Speak-CachedVoice -Key $CacheKey) { return } }
@@ -3972,6 +4143,54 @@ function Set-SilentMode {
     return $script:Silent
 }
 
+function Set-SettingToggleValue {
+    <#  Ayarlar sayfasindaki bir anahtar dugmesini (ToolTip = ayar anahtari) verilen degere getirir. #>
+    param([string]$Key, [bool]$On)
+    if (-not $script:Win) { return }
+    try {
+        foreach ($c in (Find-AllControls $script:Win)) {
+            if ($c -isnot [System.Windows.Controls.Button]) { continue }
+            if ([string]$c.ToolTip -ne $Key) { continue }
+            $c.Tag = [bool]$On
+            $c.Content = $(if ($On) { 'AÇIK' } else { 'KAPALI' })
+            $c.Background = $(if ($On) { Bx 'Ok' } else { Bx 'Card2' })
+            $c.Foreground = $(if ($On) { Bx '#0B1220' } else { Bx 'Muted' })
+        }
+    } catch { Write-Trace ('ayar anahtari guncellenemedi (' + $Key + '): ' + $_.Exception.Message) }
+}
+
+function Update-AudioLabels {
+    <#  Tepsi ve Ayarlar sayfasindaki ses anahtarlarini calisma anindaki gercek duruma getirir. #>
+    if ($script:TrayItems) {
+        $mi = @($script:TrayItems | Where-Object { $_.Tag -eq 'voice' })[0]
+        if ($mi) { $mi.Text = 'Sesli anons (insan sesi) - ' + $(if ($script:VoiceOn) { 'açık' } else { 'kapalı' }) }
+        $ms = @($script:TrayItems | Where-Object { $_.Tag -eq 'sfx' })[0]
+        if ($ms) { $ms.Text = 'Film efektleri (wav) - ' + $(if ($script:SfxOn) { 'açık' } else { 'kapalı' }) }
+    }
+    Set-SettingToggleValue -Key 'SesliBildirim' -On ([bool]$script:VoiceOn)
+    Set-SettingToggleValue -Key 'SesEfektleri' -On ([bool]$script:SfxOn)
+}
+
+function Sync-AudioRuntime {
+    <#
+        Config'teki ses anahtarlarini CALISMA ANINDAKI bayraklara uygular.
+        ONCEDEN Save-Settings yalnizca config'i yaziyordu; $script:SfxOn/$script:VoiceOn eski
+        kaliyor ve Ayarlar'dan acilan ses panel yeniden baslatilana kadar calismiyordu.
+        Tepsi anahtarlari ile Ayarlar anahtarlari da boylece ayni degeri gosterir.
+    #>
+    $sfx = $true
+    $voice = $true
+    try {
+        $cfg = Get-HostConfig
+        if ($null -ne $cfg.SesEfektleri) { $sfx = ([bool]$cfg.SesEfektleri) }
+        if ($null -ne $cfg.SesliBildirim) { $voice = ([bool]$cfg.SesliBildirim) }
+    } catch { }
+    $script:SfxOn = [bool]$sfx
+    $script:VoiceOn = [bool]$voice
+    if ($script:SfxOn) { try { Initialize-SfxPlayers } catch { } } else { try { Stop-Sfx } catch { } }
+    Update-AudioLabels
+}
+
 function Set-VoiceMode {
     <#  Turkce anonsu ac/kapat (config: SesliBildirim); film efektlerinden BAGIMSIZ calisir. #>
     param([switch]$Toggle, [switch]$On, [switch]$Off)
@@ -3979,12 +4198,10 @@ function Set-VoiceMode {
     try { $cur = ((Get-HostConfig).SesliBildirim -ne $false) } catch { $cur = $true }
     $new = $cur
     if ($Toggle) { $new = -not $cur } elseif ($On) { $new = $true } elseif ($Off) { $new = $false }
-    $script:VoiceOn = [bool]$new
     try { Save-HostConfig @{ SesliBildirim = [bool]$new } } catch { Write-Trace ('anons ayari yazilamadi: ' + $_.Exception.Message) }
-    if ($script:TrayItems) {
-        $mi = @($script:TrayItems | Where-Object { $_.Tag -eq 'voice' })[0]
-        if ($mi) { $mi.Text = 'Sesli anons (insan sesi) - ' + $(if ($new) { 'açık' } else { 'kapalı' }) }
-    }
+    # Config'i yazmak yetmiyor: calisma anindaki bayrak + tepsi/ayar etiketleri de aninda guncellenmeli.
+    Sync-AudioRuntime
+    $new = [bool]$script:VoiceOn
     Show-Balloon -Title 'Sesli anons' -Text ('İnsan sesi (Türkçe konuşma) ' + $(if ($new) { 'ACILDI' } else { 'KAPATILDI' }) + '. Film efektleri ayrı anahtarda; ikisini birlikte kapatmak için Sessiz mod.') -Icon 'Info' -Force
     if ($new) { Speak-Text 'Sesli anons açıldı.' -Sfx 'ok' -Force }
     return $new
@@ -3997,12 +4214,10 @@ function Set-SfxMode {
     try { $cur = ((Get-HostConfig).SesEfektleri -ne $false) } catch { $cur = $true }
     $new = $cur
     if ($Toggle) { $new = -not $cur } elseif ($On) { $new = $true } elseif ($Off) { $new = $false }
-    $script:SfxOn = [bool]$new
     try { Save-HostConfig @{ SesEfektleri = [bool]$new } } catch { Write-Trace ('ses efekti ayari yazilamadi: ' + $_.Exception.Message) }
-    if ($script:TrayItems) {
-        $mi = @($script:TrayItems | Where-Object { $_.Tag -eq 'sfx' })[0]
-        if ($mi) { $mi.Text = 'Film efektleri (wav) - ' + $(if ($new) { 'açık' } else { 'kapalı' }) }
-    }
+    # Efekt anahtari da calisma aninda + tepsi/ayar etiketlerinde aninda gecerli olmali.
+    Sync-AudioRuntime
+    $new = [bool]$script:SfxOn
     Show-Balloon -Title 'Film efektleri' -Text ('Uzay filmi efektleri (wav) ' + $(if ($new) { 'ACILDI' } else { 'KAPATILDI - bundan sonra efekt sesi gelmeyecek' }) + '. İnsan sesi ayrı anahtarda; ikisini birlikte kapatmak için Sessiz mod.') -Icon 'Info' -Force
     if ($new) { Play-Sfx 'ok' | Out-Null }
     return $new
@@ -4415,6 +4630,8 @@ Write-Trace ('ses efektleri: ' + $(if ($sfxMissing.Count) { 'EKSIK -> ' + ($sfxM
 try { $script:SfxOn = ((Get-HostConfig).SesEfektleri -ne $false) } catch { $script:SfxOn = $true }
 try { $script:VoiceOn = ((Get-HostConfig).SesliBildirim -ne $false) } catch { $script:VoiceOn = $true }
 Write-Trace ('ses anahtarlari -> film efektleri (wav): ' + $(if ($script:SfxOn) { 'ACIK' } else { 'KAPALI' }) + ' | insan sesi: ' + $(if ($script:VoiceOn) { 'ACIK' } else { 'KAPALI' }))
+# Medya oynaticilari simdiden ac: ilk olaydaki efekt gecikmesin/sessiz kalmasin.
+try { Initialize-SfxPlayers } catch { Write-Trace ('ses efektleri on yuklenemedi: ' + $_.Exception.Message) }
 Write-Trace ('konusma motoru: ' + $(if (Test-EdgeTts) { 'edge-tts dogal KADIN Turkce (bulut) + yerel Piper yedegi' } elseif (Test-Piper) { 'Piper (yerel, internetsiz yedek)' } else { 'kurulu Turkce konusma motoru yok' }))
 <# Onbellek durumu: internet gittiginde konusabilmek icin onceden uretilmis kadin sesli
    anonslar. Sayisini burada yaz ki panel acilirken "internetsiz konusur" net gorunsun. #>
@@ -4697,6 +4914,9 @@ if ($SelfTest) {
 }
 
 if ($TrayOnly -or $script:Background) { $script:Win.Hide() } else { Show-PanelWindow | Out-Null }
+# Panel acilirken host'un biraktigi bekleyen anonsu 20 sn'lik sayaci beklemeden konus.
+# (SelfTest yukarida exit eder; onizleme/test sirasinda ses cikmaz.)
+try { Speak-PendingVoice } catch { Write-Trace ('bekleyen anons hatasi: ' + $_.Exception.Message) }
 # Son pencere kapansa bile tepsi/izleme ayakta kalsin (kapalisa program kapanirdi)
 try { $script:Win.ShutdownMode = [System.Windows.ShutdownMode]::OnExplicitShutdown } catch { }
 try { [System.Windows.Threading.Dispatcher]::Run() }
