@@ -4,6 +4,38 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.22] - 2026-11-06
+
+Ağ onarımı artık panelden istendiği anda, görünür ve yükseltilmiş kullanıcı
+göreviyle başlıyor; onarım penceresi ilk saniyeden itibaren istek satırını ve
+bekleme sayacını gösteriyor.
+
+### 🐞 Düzeltilen
+
+- **"Ağı / interneti onar" penceresi boş kalmıyor.** Panel yalnızca SYSTEM
+  görevlerini (`RemoteHostRepair`, `RemoteHostWatchdog`, `RemoteHostRepairWatch`)
+  aradığı için standart kullanıcıda bunları göremiyor, `RemoteHostPanel`'e düşüp
+  ikinci bir panel açıyordu. Onarım ancak 60 sn'lik izleyiciyle başlıyor ve
+  pencere bu süre boyunca boş görünüyordu (canlı: 05.11 12:04). Artık görünür ve
+  `Highest` yetkili `RemoteHostWatchdogUser` görevi hemen başlatılıyor.
+- **İstek host'ta döngüden önce işleniyor.** `-UserFallback` dalı panel isteğini
+  `Test-SystemWatchdogActive` kontrolünden ve tam döngüden önce okuyup onarımı
+  çalıştırıyor; 60 sn'lik SYSTEM izleyicisi beklenmiyor.
+- **Pencere ilk anda dolu.** İstek satırı (`[panel] ... onarım isteği gönderildi`)
+  ve saniye saniye artan bekleme sayacı hemen gösteriliyor. Görev o anda meşgulse
+  panel görevi periyodik olarak yeniden deniyor.
+- **Zaman aşımı mesajı doğru.** "Onarım başladı mı?" kararı artık panelin yazdığı
+  satıra değil, host günlüğünden gelen ilk onarım satırına dayanıyor; böylece
+  gerçekten başlamayan onarım "başladı" sayılmıyor.
+- **Pencereyi kapatmak onarımı iptal etmiyor.** "Gizle" (ve pencerenin X'i)
+  onarımı arka planda sürdürüyor; gerçek iptal için ayrı "İptal et" düğmesi var.
+  Önceden X'e basmak sessizce onarımı iptal ediyordu.
+- **`repairWatch` göstergesi düzeltildi.** Görünür `RemoteHostWatchdogUser`
+  görevi de izleyici sayılıyor; panel artık "görev bir sonraki kontrolde
+  işleyecek" demiyor.
+- **Kullanıcı görevinin süresi 20 dakikaya çıkarıldı.** Uzun onarım 10 dakikalık
+  görev sınırında yarıda kesilebiliyordu.
+
 ## [1.3.21] - 2026-11-05
 
 Ses efektleri ve sesli anons senkronizasyonu düzeltildi. Efektler artık anonsla

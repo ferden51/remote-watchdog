@@ -3580,7 +3580,12 @@ function Write-JsonStatus {
         dailyReportPath = [string]$state.LastDailyReport
         dailyReportAt = $(if ($state.LastDailyReportAt) { (ConvertTo-DailyLocalDateTime $state.LastDailyReportAt).ToString('dd.MM.yyyy HH:mm') } else { '' })
         dailySummary = [string]$state.LastDailySummary
-        repairWatch = $(if (Get-ScheduledTask -TaskName 'RemoteHostRepairWatch' -ErrorAction SilentlyContinue) { 1 } else { 0 })
+        <#  repairWatch: panelin istegini ANINDA isleyecek gorunur bir gorev var mi?
+            RemoteHostRepairWatch bir SYSTEM gorevidir ve standart kullaniciya
+            gorunmez (schtasks "Erisim engellendi" doner). Bu yuzden kullanici
+            yedegi (RemoteHostWatchdogUser) de sayilir: Highest yetkiyle calisir ve
+            istegi dongu basinda, 60 sn'lik izleyiciyi beklemeden isler. #>
+        repairWatch = $(if ((Get-ScheduledTask -TaskName 'RemoteHostRepairWatch' -ErrorAction SilentlyContinue) -or (Get-ScheduledTask -TaskName 'RemoteHostWatchdogUser' -ErrorAction SilentlyContinue)) { 1 } else { 0 })
         taskInstalled = $(if ($task) { $true } elseif ($taskKnown) { $false } else { 'unknown' })
         taskVisible = $taskKnown
         taskState = $(if ($task) { [string]$task.State } else { 'yok' })
@@ -3955,7 +3960,10 @@ function Install-Watchdog {
         $uTrg1 = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
         $uTrg2 = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
         $uPrn = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
-        $uStg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 1)
+        <#  SURE 20 DK: panel "agi onar" dediginde istek bu gorevde isleniyor.
+            Onarim 4 kademeye kadar surebilir (her kademede servis/adaptor islemi +
+            3 sn bekleme); 10 dk'lik sinir uzun bir onarimi yarida kesebilirdi. #>
+        $uStg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 1)
         Register-ScheduledTask -TaskName $userTask -Action $uAct -Trigger @($uTrg1, $uTrg2) -Principal $uPrn -Settings $uStg -Force | Out-Null
         Write-Log 'INFO' ('kullanici yedek gorevi kuruldu: ' + $userTask + ' (kullanici ' + $env:USERNAME + ', her ' + $IntervalMinutes + ' dk; SYSTEM gorevi saglamsa bekler, silinirse devreye girer)')
     } catch { Write-Log 'WARN' ('kullanici yedek gorevi kurulamadi: ' + $_.Exception.Message) }
@@ -4697,6 +4705,27 @@ if ($Install) {
     exit 0
 }
 if ($UserFallback) {
+    <#
+        PANEL ISTEGI ONCE: panel "Agi/interneti onar" dediginde gorunur ve Highest
+        yetkili RemoteHostWatchdogUser gorevini baslatir. Istek burada, SYSTEM
+        kontrolunden ve tam donguden ONCE islenmeli; aksi halde istek 60 sn'lik
+        SYSTEM izleyicisini (ki panelden gorunmez) bekler ve onarim penceresi
+        dakikalarca bos kalir. Onarim akisinin kendi Global\RemoteWatchdogRepair
+        kilidi vardir; SYSTEM dongusu ayni istegi almaz (Read-RepairRequest dosyayi
+        siler) ve iki akis ayni anda kademe uygulayamaz.
+    #>
+    $uReq = Read-RepairRequest
+    if ($uReq) {
+        $global:cfg = Get-Config
+        Write-Log 'INFO' ('panel onarim istegi alindi (kullanici gorevi) -> isteme: ' + $uReq.RequestedBy)
+        $null = Invoke-NetworkRepairFlow -MaxRung $uReq.Rung -Reason ('panel istedi (' + $uReq.RequestedBy + ')')
+        $uH = Get-NetworkHealth
+        $uBad = 0
+        if (-not ($uH.Ip -and $uH.Dns -and $uH.Https)) { $uBad = 1 }
+        Write-RepairStatusPatch -Ok ($uBad -eq 0) -Summary ('ag onarimi (kullanici gorevi): basarili=' + $script:LastRepair.ok) -BadCount $uBad
+        Send-Telegram ('[BILDIRIM] ' + $env:COMPUTERNAME + ' ag onarimi bitti (kullanici gorevi): basarili=' + $script:LastRepair.ok)
+        exit 0
+    }
     if (Test-SystemWatchdogActive) { exit 0 }
     <#  Bilgi seviyesinde: kullanici kurulumunda (SYSTEM gorevi yok) bu normal durumdur.
         Her 5 dakikada bir WARN yazmak gunlugu sisiriyordu. #>

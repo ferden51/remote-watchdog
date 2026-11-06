@@ -208,11 +208,16 @@ try {
 # --- Canli ag onarim izleme (basliktaki "Agi / interneti onar" dugmesi) ---
 $script:RepairRunning = $false
 $script:RepairSawDone = $false
+# Host gercekten basladi mi? Zaman asiminda "baslamadi" demek icin pencereye
+# yazilan panel satirlari DEGIL, host gunlugunden gelen ilk onarim satiri esas alinir.
+$script:RepairHostSeen = $false
 $script:RepairShown = @{}
 $script:RepairStart = $null
 $script:RepairLiveText = ''
 $script:RepairStatusText = ''
+$script:RepairTaskUsed = ''
 $script:RepairWin = $null
+$script:RepairCancelButton = $null
 $script:RepairTimer = $null
 # Geri sayacli restart modali (reboot-pending.json -> saniye sayaci + iptal butonu)
 $script:RebootWin = $null
@@ -1118,10 +1123,10 @@ function Read-RepairLiveLines {
     if (-not (Test-Path -LiteralPath $HostLog)) { return $out }
     foreach ($l in @(Get-Content -LiteralPath $HostLog -Tail 80 -ErrorAction SilentlyContinue)) {
         $raw = [string]$l
-        if ($raw -notmatch 'elle ag onarimi basladi|ag saglikli, hicbir kademe|kademe \d+(/\d+)? (basliyor|uygulandi|sonrasi)|ag onarimi bitti') { continue }
+        if ($raw -notmatch 'panel onarim istegi alindi|elle ag onarimi basladi|ag saglikli, hicbir kademe|ag onarimi atlandi|kademe \d+(/\d+)? (basliyor|uygulandi|sonrasi)|ag onarimi bitti') { continue }
         if ($script:RepairShown.ContainsKey($raw)) { continue }
         $script:RepairShown[$raw] = $true
-        if ($raw -match 'ag onarimi bitti') { $script:RepairSawDone = $true }
+        if ($raw -match 'ag onarimi (bitti|atlandi)') { $script:RepairSawDone = $true }
         $out += (Format-RepairLogLine $raw)
     }
     return $out
@@ -1598,6 +1603,15 @@ function Watch-RebootPending {
     try { Show-RebootModal } catch { Write-Trace ('restart modali acilamadi: ' + $_.Exception.Message) }
 }
 
+function Clear-RepairWindowRefs {
+    <#  Pencere referanslarini birakir; onarim durumunu (RepairRunning) DEGISTIRMEZ. #>
+    $script:RepairWin = $null
+    $script:RepairLiveBox = $null
+    $script:RepairStatusBox = $null
+    $script:RepairElapsedBox = $null
+    $script:RepairCancelButton = $null
+}
+
 function Show-RepairWindow {
     <#  Canli onarim penceresi: adimlar anlik gunlukten okunup gosterilir. #>
     if ($script:RepairWin) {
@@ -1609,10 +1623,7 @@ function Show-RepairWindow {
             try { $script:RepairWin.Activate() | Out-Null } catch { }
             return $script:RepairWin
         }
-        $script:RepairWin = $null
-        $script:RepairLiveBox = $null
-        $script:RepairStatusBox = $null
-        $script:RepairElapsedBox = $null
+        Clear-RepairWindowRefs
     }
     $w = New-Object System.Windows.Window
     $w.Title = 'Ağ / interneti onarımı'
@@ -1684,17 +1695,32 @@ function Show-RepairWindow {
     [System.Windows.Controls.Grid]::SetColumn($el, 0)
     [void]$row.Children.Add($el)
 
+    $btns = New-Object System.Windows.Controls.StackPanel
+    $btns.Orientation = 'Horizontal'
+    [System.Windows.Controls.Grid]::SetColumn($btns, 1)
+
+    $hide = New-Object System.Windows.Controls.Button
+    $hide.Name = 'BtnRepairHide'
+    $hide.Content = 'Gizle'
+    $hide.Padding = New-Object System.Windows.Thickness(12, 4, 12, 4)
+    $hide.Margin = New-Object System.Windows.Thickness(8, 0, 0, 0)
+    $hide.Background = Bx '#21252B'
+    $hide.Foreground = Bx 'Text'
+    $hide.BorderBrush = Bx 'Line'
+    $hide.ToolTip = 'Pencereyi gizler; onarım arka planda sürer ve bitince balon çıkar. İptal etmek için "İptal et" düğmesini kullanın.'
+    [void]$btns.Children.Add($hide)
+
     $close = New-Object System.Windows.Controls.Button
-    $close.Name = 'BtnRepairClose'
-    $close.Content = 'Kapat'
+    $close.Name = 'BtnRepairCancel'
+    $close.Content = 'İptal et'
     $close.Padding = New-Object System.Windows.Thickness(12, 4, 12, 4)
     $close.Margin = New-Object System.Windows.Thickness(8, 0, 0, 0)
     $close.Background = Bx '#21252B'
     $close.Foreground = Bx 'Text'
     $close.BorderBrush = Bx 'Line'
-    $close.ToolTip = 'Pencereyi kapat. Onarım çalışıyorsa arka planda sürer, bitince balon çıkar.'
-    [System.Windows.Controls.Grid]::SetColumn($close, 1)
-    [void]$row.Children.Add($close)
+    $close.ToolTip = 'Onarımı iptal eder (uygulanan kademeler geri alınmaz) ve pencereyi kapatır. Sadece pencereyi gizlemek için "Gizle"yi kullanın.'
+    [void]$btns.Children.Add($close)
+    [void]$row.Children.Add($btns)
     [void]$sp.Children.Add($row)
 
     $hint = New-Object System.Windows.Controls.TextBlock
@@ -1710,8 +1736,10 @@ function Show-RepairWindow {
     $script:RepairLiveBox = $tb
     $script:RepairStatusBox = $h2
     $script:RepairElapsedBox = $el
-    $close.add_Click({ Close-RepairWindow })
-    $w.add_Closed({ Close-RepairWindow })
+    $script:RepairCancelButton = $close
+    $close.add_Click({ Cancel-NetworkRepairLive; Close-RepairWindow })
+    $hide.add_Click({ Close-RepairWindow })
+    $w.add_Closed({ Clear-RepairWindowRefs })
     $w.Show()
     return $w
 }
@@ -1756,15 +1784,14 @@ function Cancel-NetworkRepairLive {
 }
 
 function Close-RepairWindow {
-    <#  Pencereyi kapatir; onarim suruyorsa once iptal olarak raporlar. #>
-    $wasRunning = $script:RepairRunning
+    <#
+        Pencereyi kapatir; onarim ARKA PLANDA surer (bitince balon + ayarlar ozeti).
+        Onceki surum burada iptal ediyordu; oysa ipucu "arka planda surer" diyordu.
+        Iptal artik yalnizca penceredeki "Iptal et" dugmesiyle yapilir.
+    #>
     $w = $script:RepairWin
-    $script:RepairWin = $null
-    $script:RepairLiveBox = $null
-    $script:RepairStatusBox = $null
-    $script:RepairElapsedBox = $null
     if ($w) { try { $w.Close() } catch { } }
-    if ($wasRunning) { Cancel-NetworkRepairLive }
+    Clear-RepairWindowRefs
 }
 
 function Complete-NetworkRepairLive {
@@ -1788,11 +1815,15 @@ function Complete-NetworkRepairLive {
     $ok = [bool]($lr.ok)
     $wasCancelled = [bool]($lr.cancelled)
     $script:RepairStatusText = $(if ($wasCancelled) { ('Bitti: İPTAL EDİLDİ (' + $el + ' sn)') } elseif ($Reason) { $Reason } elseif (-not $hasResult) { ('Bitti: sonuç kaydedilmedi (' + $el + ' sn)') } elseif ($ok) { ('Bitti: BAŞARILI (' + $el + ' sn)') } else { ('Bitti: KISMİ / BAŞARISIZ (' + $el + ' sn)') })
-    Set-RepairLiveText -Text ([string]$script:RepairLiveText) -Color $(if ($ok) { 'Ok' } else { 'Warn' }) -Bold $true
+    Set-RepairLiveText -Text ([string]$script:RepairLiveText) -Color $(if ($ok -and -not $Reason) { 'Ok' } else { 'Warn' }) -Bold $true
     $btn = $script:Win.FindName('BtnRepairNet')
     if ($btn) { $btn.Content = 'Ağı / interneti onar'; $btn.IsEnabled = $true }
+    <#  Bitisden sonra "Iptal et" yaniltici: artik iptal edilecek is yok. #>
+    $cbtn = $script:RepairCancelButton
+    if (-not $cbtn -and $script:RepairWin) { try { $cbtn = $script:RepairWin.FindName('BtnRepairCancel') } catch { } }
+    if ($cbtn) { $cbtn.Content = 'Kapat' }
     $top = $script:Win.FindName('TxtSettingsStatus')
-    if ($top) { $top.Text = $report; $top.Foreground = $(if ($ok) { Bx 'Ok' } elseif ($wasCancelled) { Bx 'Muted' } elseif ($hasResult) { Bx 'Warn' } else { Bx 'Muted' }) }
+    if ($top) { $top.Text = $report; $top.Foreground = $(if ($ok -and -not $Reason) { Bx 'Ok' } elseif ($wasCancelled) { Bx 'Muted' } elseif ($hasResult) { Bx 'Warn' } else { Bx 'Muted' }) }
     Show-Balloon -Title 'Ağ onarımı' -Text $report -Icon $(if ($ok) { 'Info' } else { 'Warning' }) -Critical
     if ($wasCancelled) { Speak-Text 'Onarım iptal edildi.' -Sfx 'warn' }
     elseif ($Reason) { Speak-Text 'Onarım tamamlanmadı.' -Sfx 'warn' }
@@ -1808,19 +1839,33 @@ function Update-RepairLive {
     if (-not $script:RepairRunning) { return }
     $script:RepairTickCount = [int]$script:RepairTickCount + 1
     $new = @(Read-RepairLiveLines)
+    if ($new.Count -gt 0) { $script:RepairHostSeen = $true }
     foreach ($n in $new) { $script:RepairLiveText += [string]$n + "`r`n" }
     $el = [int]((Get-Date) - $script:RepairStart).TotalSeconds
-    if ($script:RepairLiveText.Length -eq 0) {
-        $queued = ($script:RepairRequestPath -and (Test-Path -LiteralPath $script:RepairRequestPath))
+    $queued = ($script:RepairRequestPath -and (Test-Path -LiteralPath $script:RepairRequestPath))
+    if (-not $script:RepairHostSeen) {
+        <#
+            ILK DENEME BOSA GIDEBILIR: RemoteHostWatchdogUser tam o anda 5 dk'lik
+            normal turunu calisiyor olabilir (MultipleInstances IgnoreNew). Istek
+            dosyasi hala duruyorsa gorevi periyodik olarak yeniden dene; boylece
+            onarim 60 sn'lik SYSTEM izleyicisini veya 5 dk'lik araligi beklemez.
+        #>
+        if ($queued -and $script:RepairWatch -and ($script:RepairTickCount % 6) -eq 0 -and $el -lt 120) {
+            $retry = Start-RepairTaskNow
+            if ($retry) {
+                $script:RepairTaskUsed = $retry
+                Write-Trace ('onarim gorevi yeniden denendi: ' + $retry + ' (' + $el + ' sn)')
+            }
+        }
         if ($queued -and $script:RepairWatch) {
-            $script:RepairStatusText = 'İstek kaydedildi. Sistem izleyicisi 60 sn içinde onarımı başlatacak; kademeler burada canlı görünecek.'
+            $script:RepairStatusText = 'İstek gönderildi; onarım görevi başlatılıyor... (bekleme: ' + $el + ' sn)'
         } elseif ($queued) {
-            $script:RepairStatusText = 'İstek kaydedildi. Görev bir sonraki kontrolde işleyecek (aralık kadar bekleyebilir; "Watchdog kur" ile 60 sn izleyici eklenir).'
+            $script:RepairStatusText = 'İstek kaydedildi; görev bir sonraki kontrolde işleyecek (bekleme: ' + $el + ' sn)...'
         } else {
-            $script:RepairStatusText = 'Onarım isteği gönderildi, sistem günlüğü bekleniyor...'
+            $script:RepairStatusText = 'Onarım başladı, sistem günlüğü bekleniyor... (' + $el + ' sn)'
         }
     } else {
-        $script:RepairStatusText = 'Çalışıyor... (kademeler sırayla uygulanıyor)'
+        $script:RepairStatusText = 'Çalışıyor... (kademeler sırayla uygulanıyor, ' + $el + ' sn)'
     }
     Set-RepairLiveText -Text ([string]$script:RepairLiveText) -Color 'Warn'
     if ($script:RepairSawDone) { Complete-NetworkRepairLive }
@@ -1828,17 +1873,44 @@ function Update-RepairLive {
         # 22 dk. Once 420 sn (7 dk) idi ve RemoteHostRepair'inin 20 dk'lik
         # ExecutionTimeLimit'indan kisaydi: yavas bir onarimda sure dolunca pencere
         # "BASLAMADI" diyordu, halbuki baslamis ve kademeler uygulanmis olabilirdi.
-        $basladi = ([string]$script:RepairLiveText).Length -gt 0
+        # "Basladi mi" karari host gunlugunden gelen ilk satira dayanir; panelin
+        # kendi yazdigi "istek gonderildi" satiri bunu yanlis pozitif yapmaz.
+        $basladi = [bool]$script:RepairHostSeen
         Complete-NetworkRepairLive $(if ($basladi) {
                 'Zaman asimi: 22 dk icinde BİTMEDİ. Onarım başlamış ve kademeler uygulanmış olabilir; sistem durumu için "Durum" sekmesine bakın.'
             } else {
-                'Zaman asimi: 22 dk icinde baslamadi. Gorev kapaliysa "Watchdog kur" ile yeniden kur.'
+                'Zaman asimi: 22 dk icinde baslamadi. "Watchdog kur" ile görevi yeniden kurun.'
             })
     }
 }
 
+function Start-RepairTaskNow {
+    <#
+        Onarim istegini HEMEN isleyecek gorevi baslatir.
+        Siralama:
+         1) RemoteHostWatchdogUser: ayni kullanicinin gorevi, RunLevel Highest ve
+            panelden GORUNUR. -UserFallback istegi dongu basinda isler.
+         2) RemoteHostRepair: yonetici baglaminda gorunur, tetikleyicisiz calisir.
+        SYSTEM/yonetici gorevleri standart kullaniciya gorunmez ("Erisim
+        engellendi") ve sessizce atlanir. RemoteHostPanel ASLA kullanilmaz:
+        o yalnizca ikinci bir panel acar, onarim 60 sn'ye kadar gecikir ve
+        pencerede ilerleme gorunmez.
+    #>
+    foreach ($tn in @('RemoteHostWatchdogUser', 'RemoteHostRepair')) {
+        $task = Get-ScheduledTask -TaskName $tn -ErrorAction SilentlyContinue
+        if (-not $task) { continue }
+        try {
+            Start-ScheduledTask -TaskName $tn -ErrorAction Stop
+            return $tn
+        } catch {
+            Write-Trace ('onarim gorevi baslatilamadi: ' + $tn + ' -> ' + $_.Exception.Message)
+        }
+    }
+    return ''
+}
+
 function Invoke-NetworkRepair {
-    <#  Ag onarimini ister ve adimlari canli gosterir. SYSTEM gorevi varsa dosya istegi ile tetikler (UAC yok), yoksa dogrudan calistirir. #>
+    <#  Ag onarimini ister ve adimlari canli gosterir. Gorunur gorev varsa dosya istegi ile tetikler (UAC yok), yoksa dogrudan calistirir. #>
     param([int]$Rung = 0)
     if ($script:RepairRunning) { Show-RepairWindow | Out-Null; return }
     $btn = $script:Win.FindName('BtnRepairNet')
@@ -1847,7 +1919,9 @@ function Invoke-NetworkRepair {
     if ($btn) { $btn.Content = 'Onarılıyor...'; $btn.IsEnabled = $false }
     $script:RepairRunning = $true
     $script:RepairSawDone = $false
+    $script:RepairHostSeen = $false
     $script:RepairShown = @{}
+    $script:RepairTaskUsed = ''
     if (Test-Path -LiteralPath $HostLog) {
         foreach ($l0 in @(Get-Content -LiteralPath $HostLog -Tail 80 -ErrorAction SilentlyContinue)) { $script:RepairShown[[string]$l0] = $true }
     }
@@ -1855,8 +1929,22 @@ function Invoke-NetworkRepair {
     $script:RepairRequestPath = Join-Path (Split-Path -Parent $HostJson) 'repair-request.json'
     # Onceki bir iptal kaydi kalirsa yeni onarim kademeleri hic uygulamadan biter
     try { Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $HostJson) 'repair-cancel.json') -Force -ErrorAction SilentlyContinue } catch { }
-    $hj0 = Get-Json $HostJson
-    $script:RepairWatch = ($hj0 -and ([int]($hj0.host | ForEach-Object { $_.repairWatch }) -eq 1))
+    <#
+        Izleyici var mi? last-run.json bayragi host tarafindan yazilir ve bu
+        kurulumda bos kalabiliyordu (kullanici dongusu SYSTEM gorevini goremiyor).
+        Bu yuzden once panelin GERCEKTEN gordugu gorevlere bakilir; JSON yalnizca
+        yedek bilgidir.
+    #>
+    $script:RepairWatch = $false
+    foreach ($wn in @('RemoteHostWatchdogUser', 'RemoteHostRepair', 'RemoteHostRepairWatch')) {
+        if (Get-ScheduledTask -TaskName $wn -ErrorAction SilentlyContinue) { $script:RepairWatch = $true; break }
+    }
+    if (-not $script:RepairWatch) {
+        $hj0 = Get-Json $HostJson
+        # last-run.json'da repairWatch UST SEVIYEDEDIR ("host" alani bilgisayar adidir;
+        # onceki kod $hj0.host.repairWatch okuyordu ve her zaman bos donuyordu).
+        $script:RepairWatch = [bool]($hj0 -and ([int]$hj0.repairWatch -eq 1))
+    }
     $script:RepairLiveText = ''
     $script:RepairStatusText = 'Onarım isteği gönderiliyor...'
     Show-RepairWindow | Out-Null
@@ -1867,21 +1955,10 @@ function Invoke-NetworkRepair {
         $dir = Split-Path -Parent $HostJson
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
         Write-RwJson -Path (Join-Path $dir 'repair-request.json') -Object $req
-        # 1) tercih: tetikleyicisiz on-demand gorev (her an baslar, beklemez)
-        $rt = Get-ScheduledTask -TaskName 'RemoteHostRepair' -ErrorAction SilentlyContinue
-        if ($rt) {
-            Start-ScheduledTask -TaskName 'RemoteHostRepair' -ErrorAction Stop
+        $taskUsed = Start-RepairTaskNow
+        if ($taskUsed) {
             $sentToTask = $true
-            $taskUsed = 'RemoteHostRepair'
-        } else {
-            # 2) yoksa ana gorev; calisirken baslatilamaz (IgnoreNew), en cok 1 aralik beklenir
-            $task = Get-ScheduledTask -TaskName 'RemoteHostWatchdog' -ErrorAction SilentlyContinue
-            if (-not $task) { $task = Get-ScheduledTask -TaskName 'RemoteHostPanel' -ErrorAction SilentlyContinue }
-            if ($task) {
-                Start-ScheduledTask -TaskName ([string]$task.TaskName) -ErrorAction Stop
-                $sentToTask = $true
-                $taskUsed = [string]$task.TaskName
-            }
+            $script:RepairWatch = $true
         }
     } catch { Write-Trace ('onarim göreve gönderilemedi: ' + $_.Exception.Message) }
     if (-not $sentToTask) {
@@ -1889,6 +1966,19 @@ function Invoke-NetworkRepair {
         if ($Rung -gt 0) { $sargs += @('-Rung', [string]$Rung) }
         Invoke-Script -Path $HostScript -ScriptArgs $sargs
     }
+    $script:RepairTaskUsed = $taskUsed
+    <#
+        Pencere ILK ANDAN itibaren dolu gorunsun: host gunlugu bazen 1-2 sn
+        gecikir, ozellikle gorev mesgulse. Kullanici "hicbir sey olmuyor"
+        sanmasin diye istek satiri ve bekleme sayaci hemen yazilir.
+    #>
+    $script:RepairLiveText = '[panel] ' + (Get-Date).ToString('HH:mm:ss') + ' onarım isteği gönderildi' + $(if ($taskUsed) { ' -> ' + $taskUsed + ' (başlatıldı)' } else { ' (görev bulunamadı; doğrudan çalıştırılıyor)' }) + "`r`n"
+    if ($script:RepairWatch) {
+        $script:RepairStatusText = 'İstek gönderildi; onarım görevi başlatılıyor... (bekleme: 0 sn)'
+    } else {
+        $script:RepairStatusText = 'İstek kaydedildi; görev bir sonraki kontrolde işleyecek...'
+    }
+    Set-RepairLiveText -Text ([string]$script:RepairLiveText) -Color 'Warn'
     Write-Trace ('ag onarimi baslatildi (gorev: ' + $taskUsed + ', sistem: ' + $sentToTask + ') - canli iz açildi')
     Speak-Text 'Ağ onarılıyor.' -Sfx 'repair'
     if (-not $script:RepairTimer) { $script:RepairTimer = New-Object System.Windows.Threading.DispatcherTimer }

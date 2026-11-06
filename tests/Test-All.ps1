@@ -256,7 +256,10 @@ if ($Section -eq 0 -or $Section -eq 1) {
     <#  Canli yoklamanin tetikledigi -UserFallback yolu da AYNI kilidi almali; aksi halde
         her dakika yeni dongu acilir (gunluk yazma yarisi, cift sayim, sahte restart butcesi). #>
     Ok 'host kilit paylasimi (Invoke-CycleLocked) var' ($hostText -match 'function Invoke-CycleLocked')
-    Ok 'host UserFallback yolu kilitli' ($hostText -match '(?s)if \(\$UserFallback\).{0,900}Invoke-CycleLocked')
+    <#  Blok artik panel onarim istegini ONCE isledigi icin uzun; sabit karakter
+        penceresi yerine blogun kendisi cikarilip kilit aranir. #>
+    $ufcBlock = [regex]::Match($hostText, '(?s)if \(\$UserFallback\) \{.*?\r?\n\}')
+    Ok 'host UserFallback yolu kilitli' ($ufcBlock.Success -and ($ufcBlock.Value -match 'Invoke-CycleLocked'))
     <#
         ES ZAMANLI DONGU. 'Global\' adli mutex'i acmak yetkiye baglidir; acilamadiginda
         hata yutulur ve iki dongu AYNI ANDA calisir. 21.10 21:43'te uc dongu ayni anda
@@ -659,6 +662,35 @@ if ($Section -eq 0 -or $Section -eq 1) {
     <#  Onarim akisi kilitlenmiyordu: uc tuketici repair-request.json okuyor ve panel
         ayrica RemoteHostRepair'i baslatiyor -> iki paralel kademe uygulamasi. #>
     Ok 'host aynı anda tek ağ onarımına izin veriyor' ($hostText -match 'Global\\RemoteWatchdogRepair')
+    <#
+        PANEL ONARIM GORUNURLUGU (canli: 05.11 12:04): panel "Agi/interneti onar"
+        deyince RemoteHostRepair/RemoteHostWatchdog gorevlerini ariyordu; bunlar
+        SYSTEM gorevleri oldugu icin standart kullaniciya "Erisim engellendi"
+        donuyordu. Panel RemoteHostPanel'e dusup IKINCI bir panel aciyor, onarim
+        ancak 60 sn'lik izleyici ile basliyordu; pencere bu sure boyunca BOSTU.
+        Cozum: panelden GORUNEN ve Highest yetkili RemoteHostWatchdogUser gorevini
+        hemen baslatmak; istek host'un -UserFallback dalinda donguden ONCE islenir.
+    #>
+    $startTaskFn = [regex]::Match($panelText, '(?s)function Start-RepairTaskNow\s*\{.*?\r?\n\}')
+    $userIdx = $startTaskFn.Value.IndexOf("'RemoteHostWatchdogUser'")
+    $repairIdx = $startTaskFn.Value.IndexOf("'RemoteHostRepair'")
+    Ok 'panel onarımı önce görünür/yükseltilmiş kullanıcı görevine gönderiyor' ($startTaskFn.Success -and $userIdx -ge 0 -and $repairIdx -gt $userIdx)
+    $invRepairFn = [regex]::Match($panelText, '(?s)function Invoke-NetworkRepair\s*\{.*?\r?\n\}')
+    Ok 'panel onarımda RemoteHostPanel yedeğini kullanmıyor' ($invRepairFn.Success -and ($invRepairFn.Value -match 'Start-RepairTaskNow') -and ($invRepairFn.Value -notmatch 'RemoteHostPanel'))
+    $invRepairCode = Strip-CodeComments $invRepairFn.Value
+    Ok 'panel repairWatch alanını üst seviyeden okuyor (host = bilgisayar adı)' ($invRepairFn.Success -and ($invRepairCode -match '\$hj0\.repairWatch') -and ($invRepairCode -notmatch '\$hj0\.host'))
+    Ok 'panel onarım penceresi ilk anda istek satırı ve bekleme sayacı gösteriyor' ($invRepairFn.Success -and ($invRepairFn.Value -match '\[panel\].*onarım isteği gönderildi') -and ($invRepairFn.Value -match 'bekleme: '))
+    $updRepairFn = [regex]::Match($panelText, '(?s)function Update-RepairLive\s*\{.*?\r?\n\}')
+    Ok 'panel "onarım başladı mı" kararını host satırından veriyor' ($updRepairFn.Success -and ($updRepairFn.Value -match 'RepairHostSeen') -and ($updRepairFn.Value -match 'Start-RepairTaskNow'))
+    $closeFn = [regex]::Match($panelText, '(?s)function Close-RepairWindow\s*\{.*?\r?\n\}')
+    Ok 'onarım penceresini kapatmak onarımı iptal etmiyor' ($closeFn.Success -and ($closeFn.Value -notmatch 'Cancel-NetworkRepairLive'))
+    Ok 'onarımı iptal etmek için ayrı düğme var' (($panelText -match 'BtnRepairCancel') -and ($panelText -match 'Cancel-NetworkRepairLive; Close-RepairWindow'))
+    $ufBlock = [regex]::Match($hostText, '(?s)if \(\$UserFallback\) \{.*?\r?\n\}')
+    $ufReqIdx = $ufBlock.Value.IndexOf('Read-RepairRequest')
+    $ufSysIdx = $ufBlock.Value.IndexOf('Test-SystemWatchdogActive')
+    Ok 'host kullanıcı yedeği panel isteğini SYSTEM kontrolünden önce işliyor' ($ufBlock.Success -and $ufReqIdx -ge 0 -and $ufSysIdx -gt $ufReqIdx -and ($ufBlock.Value -match 'Invoke-NetworkRepairFlow') -and ($ufBlock.Value -match 'Write-RepairStatusPatch'))
+    $rwLine = [regex]::Match($hostText, '(?m)^\s*repairWatch\s*=.*$')
+    Ok 'host repairWatch görünür kullanıcı görevini de sayıyor' ($rwLine.Success -and ($rwLine.Value -match 'RemoteHostWatchdogUser'))
     <#
         KESINTI RAPORU: reboot karari kesinlesmeden once hizli, reboot'u geciktirmeyen
         bir diagnostik rapor yazilmali (sinif: local-link/dhcp/segment/upstream).
