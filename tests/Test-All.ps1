@@ -760,6 +760,60 @@ if ($Section -eq 0 -or $Section -eq 1) {
     )
     $ikiRebootDaily = Get-DailyDigest -LogLines $ikiRebootLogs -OutageReports @() -PeriodStart ([datetime]'2026-10-21T00:00:00') -PeriodEnd ([datetime]'2026-10-22T11:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
     Ok 'günlük rapor farklı açılışları ayrı sayıyor' ($ikiRebootDaily.RebootCount -eq 2)
+    <#
+        KAYNAK AYRIMI: elle kapatma/acma veya elle restart, raporda watchdog'un
+        otomatik onarimi gibi gorunmemeli. Yeni log satirlari kaynak=... tasir;
+        eski satirlarda alan yoktur ve "kaynak bilinmiyor" sayilir.
+    #>
+    $autoRebootLogs = @(
+        '2026-10-21 10:00:00 [INFO] makine yeniden acildi; restart butceye yazildi (1/5) | acilis=2026-10-21T07:00:00.0000000Z | kaynak=otomatik'
+    )
+    $autoRebootDaily = Get-DailyDigest -LogLines $autoRebootLogs -OutageReports @() -PeriodStart ([datetime]'2026-10-21T00:00:00') -PeriodEnd ([datetime]'2026-10-22T11:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
+    Ok 'otomatik reboot raporda otomatik olarak etiketleniyor' (([string]$autoRebootDaily.Reboots[0].source -eq 'otomatik') -and ($autoRebootDaily.Markdown -match 'otomatik — watchdog') -and ($autoRebootDaily.Summary -match '1 otomatik'))
+    $elleRebootLogs = @(
+        '2026-10-21 11:00:00 [INFO] makine yeniden acildi; otomatik restart degil, butceye yazilmadi | acilis=2026-10-21T08:00:00.0000000Z | kaynak=elle'
+    )
+    $elleRebootDaily = Get-DailyDigest -LogLines $elleRebootLogs -OutageReports @() -PeriodStart ([datetime]'2026-10-21T00:00:00') -PeriodEnd ([datetime]'2026-10-22T11:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
+    Ok 'elle reboot raporda otomatik onarim gibi gosterilmiyor' (([string]$elleRebootDaily.Reboots[0].source -eq 'elle') -and ($elleRebootDaily.Markdown -match 'elle/dış kaynak — watchdog değil') -and ($elleRebootDaily.Summary -match '1 elle/dış kaynak'))
+    Ok 'elle reboot ozetinde otomatik restart sayisi sifir kaliyor' ($elleRebootDaily.Summary -notmatch '1 otomatik')
+    <#
+        KAYNAK CIKARIMI (eski log satirlari). Once "kaynak bilinmiyor" sayiliyordu
+        ("her acilis ayni metinle yazildigi icin ayirt edilemez") - ama bu YANLISDI:
+        log'da restart TALEBININ izi ayri satir olarak duruyor. Talep sonrasi acilis
+        varsa otomatik; talep YOKSA makine kullanici/dış kaynak tarafindan acilmis
+        (elle kapatma-acma / Windows Update / guc kesintisi) demektir.
+        Yanlislik: aylik rapor "elle ac-kapa 0 kez" diyordu, gercek elle yapilan
+        restartlar sayilamiyordu.
+    #>
+    Ok 'eski kaynaksız reboot satırı talep yoksa "elle" sayılıyor' (([string]$dupDaily.Reboots[0].source -eq 'elle') -and ([bool]$dupDaily.Reboots[0].sourceInferred) -and ($dupDaily.Markdown -match 'elle/dış kaynak — watchdog değil'))
+    $legacyAutoLogs = @(
+        '2026-11-11 03:03:41 [ALERT] yeniden başlatma istendi: 30 sn sonra (onaylanan restart 0/5; bu restart gerçekten olunca sayılacak)',
+        '2026-11-11 03:04:12 [ALERT] deadline nöbetçisi tetiklendi (restart kararı bu görevde, sayaç sürecinden bağımsız)',
+        '2026-11-11 03:05:11 [INFO] makine yeniden acildi; restart butceye yazildi (0/5) | acilis=2026-11-11T00:04:45.5000000Z'
+    )
+    $legacyAutoDaily = Get-DailyDigest -LogLines $legacyAutoLogs -OutageReports @() -PeriodStart ([datetime]'2026-11-11T00:00:00') -PeriodEnd ([datetime]'2026-11-12T00:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
+    Ok 'eski kaynaksız reboot satırı talep sonrasıysa "otomatik" sayılıyor' (([string]$legacyAutoDaily.Reboots[0].source -eq 'otomatik') -and ([bool]$legacyAutoDaily.Reboots[0].sourceInferred))
+    <#  DÖNEM SINIRI: talep dönem başından ONCE olabilir (ay sonu / gün sonu). #>
+    $boundaryLogs = @(
+        '2026-10-31 23:58:00 [ALERT] yeniden başlatma istendi: 30 sn sonra (onaylanan restart 0/5)',
+        '2026-11-01 00:03:00 [INFO] makine yeniden acildi; restart butceye yazildi (1/5) | acilis=2026-10-31T21:02:30.0000000Z'
+    )
+    $boundaryDaily = Get-DailyDigest -LogLines $boundaryLogs -OutageReports @() -PeriodStart ([datetime]'2026-11-01T00:00:00') -PeriodEnd ([datetime]'2026-11-02T00:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
+    Ok 'dönem başından önce talep edilen restart "otomatik" sayılıyor' (([string]$boundaryDaily.Reboots[0].source -eq 'otomatik') -and ([bool]$boundaryDaily.Reboots[0].sourceInferred))
+    $legacyCancelLogs = @(
+        '2026-11-11 03:00:00 [ALERT] yeniden başlatma istendi: 30 sn sonra (onaylanan restart 0/5)',
+        '2026-11-11 03:01:00 [INFO] restart iptal edildi: yeniden sayac sirasında internet SAGLIKLI cikti',
+        '2026-11-11 03:20:00 [INFO] makine yeniden acildi; restart butceye yazildi (0/5) | acilis=2026-11-11T00:19:00.0000000Z'
+    )
+    $legacyCancelDaily = Get-DailyDigest -LogLines $legacyCancelLogs -OutageReports @() -PeriodStart ([datetime]'2026-11-11T00:00:00') -PeriodEnd ([datetime]'2026-11-12T00:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
+    Ok 'iptal edilmiş restart talebi "elle" sayılıyor (watchdog yapmadı)' (([string]$legacyCancelDaily.Reboots[0].source -eq 'elle') -and ([bool]$legacyCancelDaily.Reboots[0].sourceInferred))
+    $explicitBeatsInference = Get-DailyDigest -LogLines @(
+        '2026-11-11 03:00:00 [ALERT] yeniden başlatma istendi: 30 sn sonra (onaylanan restart 0/5)',
+        '2026-11-11 03:05:00 [INFO] makine yeniden acildi; otomatik restart degil, butceye yazilmadi | acilis=2026-11-11T00:04:00.0000000Z | kaynak=elle'
+    ) -OutageReports @() -PeriodStart ([datetime]'2026-11-11T00:00:00') -PeriodEnd ([datetime]'2026-11-12T00:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
+    Ok 'açık kaynak etiketi çıkarımı geçersiz kılıyor' (([string]$explicitBeatsInference.Reboots[0].source -eq 'elle') -and (-not [bool]$explicitBeatsInference.Reboots[0].sourceInferred))
+    Ok 'günlük rapor çıkarılan kaynakları özetinde belirtiyor' ($legacyAutoDaily.Summary -match "1'i log analizinden çıkarıldı")
+    Ok 'elle reboot log satiri butceye yazildi demiyor' (($hostText -match 'otomatik restart degil, butceye yazilmadi') -and ($hostText -match 'kaynak=elle') -and ($hostText -match 'kaynak=otomatik'))
     Ok 'günlük rapor kesinti başlangıç/bitiş saatini ve süresini gösteriyor' ($dailyTest.Markdown -match '16\.10 21:33–21:46 \(yaklaşık 13 dk\)')
     Ok 'günlük rapor upstream teşhisini ve ICMP belirsizliğini insan dilinde yazar' (($dailyTest.Markdown -match 'Ağ geçidi yanıt veriyordu') -and ($dailyTest.Markdown -match 'ICMP engeli'))
     $emptyDaily = Get-DailyDigest -LogLines @() -OutageReports @() -PeriodStart ([datetime]'2026-10-16T08:00:00') -PeriodEnd ([datetime]'2026-10-17T08:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
@@ -895,6 +949,102 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'gece yarısından sonra önceki günün raporu tam güne tamamlanıyor' (($null -ne $jPrev) -and ((([datetime]$jPrev.periodEnd) -ge ([datetime]'2026-10-17T00:00:00'))))
     Remove-Item -LiteralPath $dailyTestRoot -Recurse -Force -ErrorAction SilentlyContinue
     $script:BaseDir = $dailyOldBase; $script:StateFile = $dailyOldState; $script:LogFile = $dailyOldLog; $script:AppVersion = $dailyOldVersion; $script:LogDir = $dailyOldLogDir
+    <#
+        AYLIK ISTATISTIK RAPORU: gunluk raporun yanina ay bazli sayim.
+        Kapsam: ariza sayisi, otomatik/elle restart ayrimi, elle ac-kapa sayisi,
+        elle baslatilan onarim, gun bazli dagilim, kesinti suresi ve ay sonu kilitleme.
+    #>
+    Ok 'host aylık istatistik raporu fonksiyonları var' (($hostText -match 'function Get-MonthlyDigest') -and ($hostText -match 'function Get-MonthlyStats') -and ($hostText -match 'function Write-MonthlyReport'))
+    Ok 'host aylık raporu normal watchdog çevriminde çağrılır, -Check kirletmez' ($hostText -match '(?s)if \(-not \$Check\) \{\s*try \{ \$null = Write-DailyReport[\s\S]{0,400}?Write-MonthlyReport')
+    Ok 'host aylık rapor özetini last-run.json içine koyar' (($hostText -match 'monthlyReportPath = \[string\]\$state\.LastMonthlyReport') -and ($hostText -match 'monthlySummary = \[string\]\$state\.LastMonthlySummary'))
+    Ok 'panel aylık istatistik kartını ve raporu aç düğmesini gösterir' (($panelText -match 'x:Name="TxtMonthlySummary"') -and ($panelText -match 'x:Name="BtnOpenMonthlyReport"') -and ($panelText -match "BtnOpenMonthlyReport'\)\.Add_Click"))
+    Ok 'panel aylık sayaç kutularını gösteriyor' (($panelText -match 'x:Name="TxtMonthlyIncidentCount"') -and ($panelText -match 'x:Name="TxtMonthlyAutoRebootCount"') -and ($panelText -match 'x:Name="TxtMonthlyManualRebootCount"'))
+    Ok 'Contract aylık rapor alanlarını eski JSON için varsayılanla tamamlıyor' (($contractText -match 'monthlyReportPath') -and ($contractText -match 'monthlyReportAt') -and ($contractText -match 'monthlySummary'))
+    foreach ($code in (Get-FnCode $Host_ @('New-MonthlyDayRow', 'Merge-MonthlyEventList', 'Get-MonthlyStats', 'Get-MonthlyDigest'))) { Invoke-Expression $code }
+    $monthLogs = @(
+        '2026-11-03 10:00:00 [ALERT] ANLIK AG SORUNU: Ağ sorunu algılandı. Eksik: IP, DNS. Onarım başlatılıyor.',
+        '2026-11-03 10:20:00 [ALERT] [DUZELDI] DESKTOP-TEST | Internet=OK',
+        '2026-11-05 22:00:00 [INFO] makine yeniden acildi; otomatik restart degil, butceye yazilmadi | acilis=2026-11-05T21:59:00 | kaynak=elle',
+        '2026-11-07 03:00:00 [INFO] makine yeniden acildi; restart butceye yazildi (1/3) | acilis=2026-11-07T02:59:00 | kaynak=otomatik',
+        '2026-11-09 12:00:00 [WARN] elle ag onarimi basladi: panel istedi (user) (saatlim: 300)',
+        '2026-11-11 18:00:00 [ALERT] elle restart istendi (pano butonu), geri sayimli yeniden baslatma: 30 sn'
+    )
+    $monthTest = Get-MonthlyDigest -LogLines $monthLogs -OutageReports @() -PeriodStart ([datetime]'2026-11-01T00:00:00') -PeriodEnd ([datetime]'2026-11-30T23:59:00') -HostName 'DESKTOP-TEST' -Version 'test'
+    Ok 'aylık rapor arıza sayısını doğru çıkarıyor' ($monthTest.IncidentCount -eq 1)
+    Ok 'aylık rapor otomatik ve elle restartı ayırıyor' (($monthTest.RebootCount -eq 2) -and ($monthTest.AutoRebootCount -eq 1) -and ($monthTest.ManualRebootCount -eq 1) -and ($monthTest.UnknownRebootCount -eq 0))
+    Ok 'aylık rapor elle aç-kapa sayısını özet metnine yazıyor' (($monthTest.ManualRebootCount -eq 1) -and ($monthTest.Summary -match 'elle kapatma/acma 1 kez'))
+    Ok 'aylık rapor elle başlatılan ağ onarımını sayıyor' ($monthTest.ManualRepairCount -eq 1)
+    Ok 'aylık rapor panelden istenen restartı sayıyor' ($monthTest.PanelRestartCount -eq 1)
+    Ok 'aylık rapor kesinti süresini hesaplıyor' (($monthTest.TotalDowntimeMinutes -eq 20) -and ($monthTest.MaxDowntimeMinutes -eq 20) -and ($monthTest.RecoveredCount -eq 1) -and ($monthTest.UnresolvedCount -eq 0))
+    Ok 'aylık rapor gün bazlı dağılım üretiyor' (($monthTest.DaysWithIncident -eq 1) -and ($monthTest.DayCount -eq 30) -and (@($monthTest.ByDay).Count -eq 30))
+    Ok 'aylık rapor gün bazlı restart dağılımını doğru yazıyor' ((@($monthTest.ByDay | Where-Object { $_.date -eq '2026-11-05' })[0].manualReboots -eq 1) -and (@($monthTest.ByDay | Where-Object { $_.date -eq '2026-11-07' })[0].autoReboots -eq 1))
+    Ok 'aylık rapor markdownında sayaç tablosu var' (($monthTest.Markdown -match '## Sayaçlar') -and ($monthTest.Markdown -match 'Arıza \(ağ kesintisi\) \| 1') -and ($monthTest.Markdown -match 'elle kapatma/açma \(dış kaynak\) \| 1'))
+    Ok 'aylık rapor günlük dağılım tablosu içeriyor' (($monthTest.Markdown -match '## Günlük dağılım') -and ($monthTest.Markdown -match '\| 2026-11-03 \| 1 \|'))
+    Ok 'aylık rapor yeniden başlatma kaynaklarını listeliyor' (($monthTest.Markdown -match '## Yeniden başlatma kaynakları') -and ($monthTest.Markdown -match 'elle/dış kaynak — watchdog değil'))
+    <#  Kaynak etiketi olmayan eski loglarda kaynak CIKARILIR (log analizi). #>
+    $monthLegacyLogs = @(
+        '2026-11-03 10:00:00 [ALERT] ANLIK AG SORUNU: Ağ sorunu algılandı. Eksik: IP. Onarım başlatılıyor.',
+        '2026-11-03 10:20:00 [ALERT] [DUZELDI] DESKTOP-TEST | Internet=OK',
+        '2026-11-05 15:30:00 [INFO] makine yeniden acildi; restart butceye yazildi (0/5) | acilis=2026-11-05T12:29:00.0000000Z',
+        '2026-11-07 03:03:41 [ALERT] yeniden başlatma istendi: 30 sn sonra (onaylanan restart 0/5)',
+        '2026-11-07 03:05:11 [INFO] makine yeniden acildi; restart butceye yazildi (0/5) | acilis=2026-11-07T00:04:45.0000000Z'
+    )
+    $monthLegacy = Get-MonthlyDigest -LogLines $monthLegacyLogs -OutageReports @() -PeriodStart ([datetime]'2026-11-01T00:00:00') -PeriodEnd ([datetime]'2026-11-30T23:59:00') -HostName 'DESKTOP-TEST' -Version 'test'
+    Ok 'aylık rapor eski loglarda elle aç-kapa sayısını çıkarıyor' (($monthLegacy.ManualRebootCount -eq 1) -and ($monthLegacy.AutoRebootCount -eq 1) -and ($monthLegacy.UnknownRebootCount -eq 0))
+    Ok 'aylık rapor çıkarılan kaynak sayısını ayrıca bildiriyor' (($monthLegacy.InferredRebootCount -eq 2) -and ($monthLegacy.Markdown -match 'log analizinden çıkarılan'))
+    <#  Ayni olay iki kaynaktan (log + onbellek) gelirse TEK sayilmali. #>
+    $mergedInc = Merge-MonthlyEventList -Base @([pscustomobject]@{ startedAt = '2026-11-03T10:00:00.0000000'; endedAt = ''; recovered = $false }) -Add @([pscustomobject]@{ startedAt = '2026-11-03T10:00:00.0000000'; endedAt = '2026-11-03T10:20:00.0000000'; recovered = $true })
+    Ok 'aylık rapor aynı olayı iki kaynaktan gelirken tekilleştiriyor' ((@($mergedInc).Count -eq 1) -and ([bool]$mergedInc[0].recovered))
+    <#  Writer regresyonu: 08:00 oncesi calismaz, MD+JSON yazar, ay degisince onceki ay kapanir. #>
+    $monthlyOldBase = $script:BaseDir; $monthlyOldState = $script:StateFile; $monthlyOldLog = $script:LogFile; $monthlyOldVersion = $script:AppVersion; $monthlyOldLogDir = $script:LogDir
+    $monthlyTestRoot = Join-Path $env:TEMP ('rw-monthly-report-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $monthlyTestRoot | Out-Null
+    $script:BaseDir = $monthlyTestRoot
+    $script:StateFile = Join-Path $monthlyTestRoot 'host-state.json'
+    $script:LogFile = Join-Path $monthlyTestRoot 'host-watchdog.log'
+    $script:LogDir = Join-Path $monthlyTestRoot 'log'
+    $script:AppVersion = 'test'
+    function Invoke-StateUpdate {
+        param([scriptblock]$Mutate)
+        $s = Get-State
+        if ($Mutate) { $null = & $Mutate $s }
+        Save-State $s
+        return $s
+    }
+    foreach ($code in (Get-FnCode $Host_ @('Write-MonthlyReport', 'Write-MonthlyReportFile', 'Get-DailyLogLines'))) { Invoke-Expression $code }
+    New-Item -ItemType Directory -Force -Path $script:LogDir | Out-Null
+    Set-Content -LiteralPath $script:LogFile -Value $monthLogs -Encoding UTF8
+    $beforeMonthly = Write-MonthlyReport -At ([datetime]'2026-11-20T07:59:00')
+    Ok 'aylık rapor 08:00 öncesi oluşmuyor' ([string]::IsNullOrEmpty([string]$beforeMonthly))
+    $monthlyPath = Write-MonthlyReport -At ([datetime]'2026-11-20T08:00:00')
+    $monthlyAgain = Write-MonthlyReport -At ([datetime]'2026-11-20T08:20:00')
+    Ok 'aylık rapor MD+JSON yazar ve 60 dk içinde tekrar üretmez' (($monthlyPath -eq $monthlyAgain) -and (Test-Path -LiteralPath $monthlyPath) -and (Test-Path -LiteralPath ([System.IO.Path]::ChangeExtension($monthlyPath, '.json'))))
+    <#  BOS AY ISARETI: onceki ay (Ekim) kayit icermediginden "kayit bulunamadi" BIR kez
+        log'lanir; sonraki cevrimlerde isaret sayesinde diges tekrar hesaplanmaz ve
+        yeni INFO yazilmaz (log spam onlemi). Bu ayin raporu yine de yenilenir. #>
+    $null = Write-MonthlyReport -At ([datetime]'2026-11-20T09:30:00')
+    $noDataLogHits = @(Select-String -LiteralPath $script:LogFile -Pattern 'onceki ay icin kayit bulunamadi' -SimpleMatch:$false -ErrorAction SilentlyContinue)
+    Ok 'bos önceki ay için işaret dosyası yazılıyor ve spam yapılmıyor' ((Test-Path -LiteralPath (Join-Path $monthlyTestRoot 'diag\monthly-2026-10.nodata')) -and ($noDataLogHits.Count -eq 1))
+    $monthlyAfterMarker = Write-MonthlyReport -At ([datetime]'2026-11-20T09:31:00')
+    Ok 'işaret varken bu ayın raporu yenilenmeye devam ediyor' (($null -ne $monthlyAfterMarker) -and (Test-Path -LiteralPath $monthlyAfterMarker))
+    $monthlyJson = $null
+    try { $monthlyJson = Get-Content -LiteralPath ([System.IO.Path]::ChangeExtension($monthlyPath, '.json')) -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+    Ok 'aylık rapor JSON una sayaçlar yazılıyor' (($null -ne $monthlyJson) -and ($monthlyJson.incidentCount -eq 1) -and ($monthlyJson.autoRebootCount -eq 1) -and ($monthlyJson.manualRebootCount -eq 1) -and ($monthlyJson.manualRepairCount -eq 1) -and ($monthlyJson.month -eq '2026-11'))
+    Ok 'aylık rapor dönemi ay başından başlıyor' (($null -ne $monthlyJson) -and (([datetime]$monthlyJson.periodStart).Date -eq ([datetime]'2026-11-01')))
+    $monthlyState = Get-State
+    Ok 'aylık rapor state e yazılıyor' (([string]$monthlyState.LastMonthlyReport -eq $monthlyPath) -and ([string]$monthlyState.LastMonthlySummary -match '1 ariza'))
+    <#  Ay degistiginde onceki ay KAPATILIR (donem ay sonuna sabitlenir). #>
+    Set-Content -LiteralPath $script:LogFile -Value @('2026-12-01 09:00:00 [INFO] dongu basladi') -Encoding UTF8
+    $null = Write-MonthlyReport -At ([datetime]'2026-12-01T08:00:00')
+    $closedJson = $null
+    try { $closedJson = Get-Content -LiteralPath (Join-Path $monthlyTestRoot 'diag\monthly-2026-11.json') -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+    Ok 'ay değişince önceki ayın raporu kapanıyor' (($null -ne $closedJson) -and (([datetime]$closedJson.periodEnd) -eq ([datetime]'2026-12-01')) -and ($closedJson.incidentCount -eq 1))
+    $null = Write-MonthlyReport -At ([datetime]'2026-12-02T08:00:00')
+    $closedJson2 = $null
+    try { $closedJson2 = Get-Content -LiteralPath (Join-Path $monthlyTestRoot 'diag\monthly-2026-11.json') -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+    Ok 'kapanan ayın raporu ikinci çevrimde yeniden değişmiyor' (($null -ne $closedJson2) -and (([datetime]$closedJson2.periodEnd) -eq ([datetime]'2026-12-01')))
+    Remove-Item -LiteralPath $monthlyTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+    $script:BaseDir = $monthlyOldBase; $script:StateFile = $monthlyOldState; $script:LogFile = $monthlyOldLog; $script:AppVersion = $monthlyOldVersion; $script:LogDir = $monthlyOldLogDir
     Ok 'panel iptal istegini zaman asiminda dusurmuyor' (($panelText -match 'RebootCancelTimeoutFired') -and ($panelText -notmatch "iptali onaylanmadi; geri sayim suruyor olabilir"))
     Ok 'panel iptal dosyasi yazilamazsa durumu geri aliyor' (($panelText -match 'iptal dosyasi yazilamadi') -and ($panelText -match 'iptal dosyasi yazilamadi') -and ($panelText -match '\$yazildi = \$true'))
     Ok 'panel bayat reboot-ack.json ile yalan onay vermiyor (tazelik kontrolu)' (($panelText -match '\$ackFresh') -and ($panelText -match 'RebootCancelAt.AddSeconds\(-5\)'))

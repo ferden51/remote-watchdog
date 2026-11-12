@@ -167,9 +167,35 @@ Onarım SYSTEM hesabı ile çalışır; böylece kullanıcı oturumu UAC pencere
 
 The watchdog can report health through Telegram and healthchecks.io, and the repo also includes a GitHub Actions workflow to ping the machine externally.
 
+### Reports / Raporlar
+
+The host writes two human-readable report families into `C:\ProgramData\RemoteWatchdog\diag`:
+
+| Report / Rapor | File / Dosya | Content / İçerik |
+| --- | --- | --- |
+| Daily / Günlük | `daily-YYYY-MM-DD.md` + `.json` | Last 24–40 hours: outages, real reboots, network inventory, human-readable diagnosis. / Son 24–40 saat: kesintiler, gerçek yeniden başlatmalar, ağ bilgileri, teşhis. |
+| Monthly / Aylık | `monthly-YYYY-MM.md` + `.json` | Month statistics: how many faults, how many restarts, how many were manual open/close, downtime totals, daily breakdown. / Ay istatistikleri: kaç arıza, kaç restart, kaçı elle aç-kapa, kesinti süreleri, günlük dağılım. |
+
+Both are refreshed daily after 08:00 local time and can be opened from the tray panel ("Genel durum" → *Günlük özet* / *Aylık istatistik* → **Raporu aç**). / İkisi de yerel saatle 08:00 sonrasında günlük olarak yenilenir ve tepsi panelinden açılabilir.
+
 ### Türkçe
 
 Watchdog, Telegram ve healthchecks.io üzerinden sağlık bildirimi yapabilir; ayrıca repo içinde makinayı harici olarak yoklayan bir GitHub Actions akışı da bulunur.
+
+### Raporlar
+
+Host, `C:\ProgramData\RemoteWatchdog\diag` klasörüne iki tane insan dili rapor yazar:
+
+- **Günlük rapor** (`daily-YYYY-MM-DD.md` + `.json`): son 24–40 saatteki ağ kesintileri,
+  gerçek yeniden başlatmalar, ağ bilgileri ve teşhis.
+- **Aylık istatistik raporu** (`monthly-YYYY-MM.md` + `.json`): ay içinde **kaç defa arıza
+  verildiği**, **kaç defa yeniden başlatıldığı** ve bunların **ne kadarının elle
+  (kapatma/açma) yapıldığı**, toplam/ortalama/en uzun kesinti süresi, gün bazlı
+  dağılım, arıza sınıfı ve en sorunlu günler.
+
+İkisi de yerel saatle 08:00 sonrasında günlük olarak yenilenir; ay değiştiğinde önceki
+ayın raporu kapanır ve sayıları dondurulur. Panelden "Genel durum" sayfasındaki
+**Günlük özet** ve **Aylık istatistik** kartlarındaki "Raporu aç" düğmesiyle açılır.
 
 ## Contributing / Katkı
 

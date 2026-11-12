@@ -303,6 +303,9 @@ function Get-State {
         LastDailyReportAt = ''
         LastDailyReportEnd = ''
         LastDailySummary = ''
+        LastMonthlyReport = ''
+        LastMonthlyReportAt = ''
+        LastMonthlySummary = ''
     }
     if (Test-Path -LiteralPath $StateFile) {
         try {
@@ -1003,11 +1006,34 @@ function Get-DailyDigest {
     )
     $entries = New-Object System.Collections.ArrayList
     $lineSequence = 0
+    <#
+        RESTART TALEBI / IPTALI IZLERI (kaynak etiketi olmayan eski loglar icin).
+        "yeniden başlatma istendi", "geri sayimi basladi", "deadline nöbetçisi tetiklendi"
+        satirlari watchdog'un acilisi TALEBI ettiğini kanitlar. Talep sonrasi 15 dk icinde
+        acilis varsa otomatik; talep YOKSA acilis kullanici/dış kaynak tarafindan
+        yapilmistir (elle kapatma-acma, Windows Update, guc kesintisi).
+
+        DÖNEM SINIRI: talep/iptal izi dönem FILTRESINDEN ONCE tutulur. Aksi halde
+        "31 Ekim 23:58'de talep edilen restart, 1 Kasım 00:03'te gerceklesti" senaryosunda
+        talep satiri onceki donemde kaldigi icin acilis yanlislikla "elle" sayilirdi.
+        Dönem başından önceki SON talep/iptal, döngüye tohum olarak verilir.
+    #>
+    $sonTalep = $null
+    $sonIptal = $null
+    # Ayni metin farkli yazimlarla yazilmis olabilir (ş/s, ö/o): toleransli desen.
+    $talepDeseni = 'yeniden ba[sş]latma istendi|yeniden baslatma geri sayimi basladi|deadline n[öo]bet[cç]isi tetiklendi|zorla t[iı]rmanma yolu restart iletildi|ZORLA yeniden baslatma|restart iletildi'
+    $iptalDeseni = 'restart iptal|yeniden ba[sş]latma.*iptal|restart GERCEKLESMEDI|shutdown reddedildi'
     foreach ($line in @($LogLines)) {
         if ([string]$line -notmatch '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') { continue }
         $when = $null
         try { $when = [datetime]::SpecifyKind([datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture), [DateTimeKind]::Local) } catch { continue }
-        if ($when -lt $PeriodStart -or $when -gt $PeriodEnd) { continue }
+        if ($when -lt $PeriodStart) {
+            # Dönem öncesi: yalnızca tohum güncellenir, olay listesine girmez.
+            if ([string]$line -match $talepDeseni) { if (-not $sonTalep -or $when -gt $sonTalep) { $sonTalep = $when } }
+            if ([string]$line -match $iptalDeseni) { if (-not $sonIptal -or $when -gt $sonIptal) { $sonIptal = $when } }
+            continue
+        }
+        if ($when -gt $PeriodEnd) { continue }
         [void]$entries.Add([pscustomobject]@{ At = $when; Sequence = $lineSequence; Text = [string]$line })
         $lineSequence++
     }
@@ -1020,13 +1046,17 @@ function Get-DailyDigest {
     # aksi halde PS 5 Sort-Object onlari ters cevirip reboot'u olaya baglamayabilir.
     foreach ($entry in @($entries | Sort-Object At, Sequence)) {
         $text = [string]$entry.Text
+        # Talebin/iptalin ZAMANI kaydedilir (kaynak etiketi olan satirlarda bunlar
+        # kullanilmaz; yalnizca eski loglar icin devreye girer).
+        if ($text -match $talepDeseni) { $sonTalep = $entry.At }
+        if ($text -match $iptalDeseni) { $sonIptal = $entry.At }
         if ($text -match 'ANLIK AG SORUNU:') {
             $missing = ''
             if ($text -match 'Eksik:\s*([^\.]+)\.') { $missing = [string]$Matches[1] }
             if (-not $active) {
                 $active = [pscustomobject]@{
                     startedAt = $entry.At.ToString('o'); endedAt = ''; missing = $missing
-                    recovered = $false; rebooted = $false; rebootAt = ''; diagnosis = ''; class = ''; reportOutcome = ''; net = $null
+                    recovered = $false; rebooted = $false; rebootAt = ''; rebootSource = ''; diagnosis = ''; class = ''; reportOutcome = ''; net = $null
                 }
                 [void]$incidents.Add($active)
             } elseif ($missing -and $active.missing -notmatch [regex]::Escape($missing)) {
@@ -1044,25 +1074,54 @@ function Get-DailyDigest {
             if ($text -match 'SONUC:\s*\d+\s*sorun\s*->\s*(.+)$') { $missing = ([string]$Matches[1]).Trim() }
             $active = [pscustomobject]@{
                 startedAt = $entry.At.ToString('o'); endedAt = ''; missing = $missing
-                recovered = $false; rebooted = $false; rebootAt = ''; diagnosis = ''; class = ''; reportOutcome = ''; net = $null
+                recovered = $false; rebooted = $false; rebootAt = ''; rebootSource = ''; diagnosis = ''; class = ''; reportOutcome = ''; net = $null
             }
             [void]$incidents.Add($active)
         }
-        if ($text -match 'makine yeniden acildi; restart butceye yazildi') {
+        if ($text -match 'makine yeniden acildi') {
             <#
                 AYNI ACILIS BIR KEZ SAYILIR. Es zamanli iki dongu ayni acilisi iki kez
                 "makine yeniden acildi" diye yazabiliyor (21.10 21:43) ve rapor tek
                 restart'i "2 gercek yeniden baslatma" olarak sayiyordu. Anahtar: log
                 satırındaki acilis damgası (acilis=...); damga yoksa tam zaman damgasi.
+
+                KAYNAK: yeni satirlarda kaynak=otomatik|elle yazar.
+                ESKI SATIRLARDA KAYNAK CIKARILIR. Once "bilinmiyor" sayiliyordu
+                ("her acilis ayni metinle yazildigi icin ayirt edilemez") - ama bu
+                YANLISDI: log'da restart TALEBININ izi ayri bir satir olarak duruyor
+                ("yeniden başlatma istendi", "geri sayimi basladi", "deadline nöbetçisi
+                tetiklendi"). Talep sonrasi 15 dk icinde acilis varsa otomatik, talep
+                YOKSA elle/dış kaynak (kullanici kapatip acmis / Windows Update /
+                guc kesintisi). Aksi halde "aylik raporda elle ac-kapa 0 kez" cikiyor
+                ve gercek elle yapilan restartlar sayilamiyordu.
             #>
             $bootKey = ''
             if ($text -match 'acilis=([^\s|]+)') { $bootKey = [string]$Matches[1] }
             if (-not $bootKey) { $bootKey = $entry.At.ToString('yyyy-MM-dd HH:mm:ss') }
+            $kaynak = 'bilinmiyor'
+            $tahmin = $false
+            if ($text -match 'kaynak=(otomatik|elle)') {
+                $kaynak = [string]$Matches[1]
+            } else {
+                $tahmin = $true
+                if ($sonIptal -and (-not $sonTalep -or $sonIptal -gt $sonTalep)) {
+                    # Son talep IPTAL EDILMIS: watchdog bu acilisi yapmadi -> elle/dış kaynak.
+                    $kaynak = 'elle'
+                } elseif ($sonTalep -and ($entry.At - $sonTalep).TotalMinutes -le 15) {
+                    $kaynak = 'otomatik'
+                } else {
+                    # Talep YOK: watchdog bu acilisi istemedi -> kullanici/dış kaynak.
+                    $kaynak = 'elle'
+                }
+            }
             $yeni = $true
             if ($rebootKeys.ContainsKey($bootKey)) { $yeni = $false } else { $rebootKeys[$bootKey] = $true }
             if ($yeni) {
-                [void]$reboots.Add([pscustomobject]@{ at = $entry.At.ToString('o'); text = $text })
-                if ($active) { $active.rebooted = $true; $active.rebootAt = $entry.At.ToString('o') }
+                [void]$reboots.Add([pscustomobject]@{ at = $entry.At.ToString('o'); source = $kaynak; sourceInferred = $tahmin; text = $text })
+                if ($active) {
+                    $active.rebooted = $true; $active.rebootAt = $entry.At.ToString('o'); $active.rebootSource = $kaynak
+                    $active | Add-Member -NotePropertyName 'rebootSourceInferred' -NotePropertyValue $tahmin -Force
+                }
             }
         }
         if ($text -match '\[DUZELDI\]') {
@@ -1102,7 +1161,7 @@ function Get-DailyDigest {
             $startAt = if ($anchor -lt $PeriodStart) { $PeriodStart } else { $anchor }
             $match = [pscustomobject]@{
                 startedAt = $startAt.ToString('o'); endedAt = ''; missing = ''
-                recovered = $false; rebooted = $false; rebootAt = ''; diagnosis = ''; class = ''; reportOutcome = ''; net = $null
+                recovered = $false; rebooted = $false; rebootAt = ''; rebootSource = ''; diagnosis = ''; class = ''; reportOutcome = ''; net = $null
             }
             [void]$incidents.Add($match)
         }
@@ -1154,7 +1213,12 @@ function Get-DailyDigest {
             $distance = [Math]::Abs(($rebootAt - $started).TotalMinutes)
             if ($distance -lt $best) { $best = $distance; $match = $i }
         }
-        if ($match) { $match.rebooted = $true; $match.rebootAt = $rebootAt.ToString('o') }
+        if ($match) {
+            <#  rebootSourceInferred da tasınır: aksi halde outage raporundan eslesen
+                olayin madde satirinda "log analizinden cikarildi" notu eksik kalirdi. #>
+            $match.rebooted = $true; $match.rebootAt = $rebootAt.ToString('o'); $match.rebootSource = [string]$reboot.source
+            $match | Add-Member -NotePropertyName 'rebootSourceInferred' -NotePropertyValue ([bool]$reboot.sourceInferred) -Force
+        }
     }
 
     $incidents = @($incidents | Sort-Object { try { [datetime]::Parse([string]$_.startedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) } catch { [datetime]::MaxValue } })
@@ -1177,6 +1241,25 @@ function Get-DailyDigest {
     $incidentCount = $incidents.Count
     $rebootCount = $reboots.Count
     <#
+        KAYNAK DAGILIMI. "gercek yeniden baslatma" sayisi tek basina, elle yapilan
+        bir restart'i watchdog'un otomatik onarimi gibi gosteriyordu. Otomatik /
+        elle / kaynagi bilinmeyen (eski loglar) ayrimi baslikta ve bolumlerde yazilir.
+    #>
+    $autoRebootCount = @($reboots | Where-Object { [string]$_.source -eq 'otomatik' }).Count
+    $manualRebootCount = @($reboots | Where-Object { [string]$_.source -eq 'elle' }).Count
+    $unknownRebootCount = $rebootCount - $autoRebootCount - $manualRebootCount
+    $inferredRebootCount = 0
+    foreach ($r in $reboots) { try { if ([bool]$r.sourceInferred) { $inferredRebootCount++ } } catch { } }
+    $rebootBreakdown = ''
+    if ($rebootCount -gt 0) {
+        $parts = @()
+        if ($autoRebootCount -gt 0) { $parts += "$autoRebootCount otomatik" }
+        if ($manualRebootCount -gt 0) { $parts += "$manualRebootCount elle/dış kaynak" }
+        if ($unknownRebootCount -gt 0) { $parts += "$unknownRebootCount kaynağı bilinmeyen" }
+        if ($inferredRebootCount -gt 0) { $parts += "$inferredRebootCount'i log analizinden çıkarıldı" }
+        $rebootBreakdown = ' (' + ($parts -join ', ') + ')'
+    }
+    <#
         KAPSAM NOTU: Rapor dun 00:00'ten baslar; ozet metni (paneldeki "Gunluk
         ozet" karti bunu gosterir) hangi pencerenin sayildigini belirtmeli,
         yoksa "gece olaylari yok" izlenimi olusur.
@@ -1186,9 +1269,9 @@ function Get-DailyDigest {
     if ($incidentCount -eq 0 -and $rebootCount -eq 0) {
         $headline = 'Rapor döneminde kayda değer ağ kesintisi veya gerçek yeniden başlatma görülmedi.' + $scopeNote
     } elseif ($CurrentOk -and @($incidents | Where-Object { -not $_.recovered }).Count -eq 0) {
-        $headline = "$incidentCount ağ olayı görüldü; $rebootCount gerçek yeniden başlatma oldu.$scopeNote Rapor hazırlanırken bağlantı ve kontroller sağlıklı."
+        $headline = "$incidentCount ağ olayı görüldü; $rebootCount gerçek yeniden başlatma oldu$rebootBreakdown.$scopeNote Rapor hazırlanırken bağlantı ve kontroller sağlıklı."
     } else {
-        $headline = "$incidentCount ağ olayı ve $rebootCount gerçek yeniden başlatma kaydedildi.$scopeNote Rapor hazırlanırken sistemde hâlâ kontrol edilmesi gereken durum var."
+        $headline = "$incidentCount ağ olayı ve $rebootCount gerçek yeniden başlatma kaydedildi$rebootBreakdown.$scopeNote Rapor hazırlanırken sistemde hâlâ kontrol edilmesi gereken durum var."
     }
 
     $md = New-Object System.Collections.ArrayList
@@ -1287,7 +1370,13 @@ function Get-DailyDigest {
         if ($i.rebooted) {
             $rt = $i.rebootAt
             try { $rt = ([datetime]::Parse([string]$i.rebootAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToLocalTime().ToString('HH:mm') } catch { }
-            [void]$md.Add(('  - Makine ' + $rt + ' civarında gerçekten yeniden başlatıldı.'))
+            $tahminNotu = ''
+            try { if ([bool]$i.rebootSourceInferred) { $tahminNotu = ' (kaynak log analizinden çıkarıldı)' } } catch { }
+            switch ([string]$i.rebootSource) {
+                'otomatik' { [void]$md.Add(('  - Makine ' + $rt + ' civarında watchdog tarafından otomatik olarak yeniden başlatıldı' + $tahminNotu + '.')) }
+                'elle' { [void]$md.Add(('  - Makine ' + $rt + ' civarında elle veya dış kaynak tarafından yeniden başlatıldı (watchdog restart başlatmadı)' + $tahminNotu + '.')) }
+                default { [void]$md.Add(('  - Makine ' + $rt + ' civarında yeniden başlatıldı (kaynağı bilinmiyor).')) }
+            }
         } elseif ($i.recovered) {
             [void]$md.Add('  - Bağlantı geri geldi; reboot gerekmedi.')
         } else {
@@ -1301,7 +1390,13 @@ function Get-DailyDigest {
     foreach ($r in $reboots) {
         $rt = $r.at
         try { $rt = ([datetime]::Parse([string]$r.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToLocalTime().ToString('dd.MM.yyyy HH:mm') } catch { }
-        [void]$md.Add(('- ' + $rt + ' — reboot tamamlandı ve makine yeniden açıldı.'))
+        $kaynakEtiket = switch ([string]$r.source) {
+            'otomatik' { 'otomatik — watchdog' }
+            'elle' { 'elle/dış kaynak — watchdog değil' }
+            default { 'kaynak bilinmiyor' }
+        }
+        try { if ([bool]$r.sourceInferred) { $kaynakEtiket += ' (log analizinden çıkarıldı)' } } catch { }
+        [void]$md.Add(('- ' + $rt + ' — reboot tamamlandı ve makine yeniden açıldı (' + $kaynakEtiket + ').'))
     }
     [void]$md.Add('')
     [void]$md.Add('## Rapor hazırlanırken')
@@ -1495,6 +1590,544 @@ function Write-DailyReport {
         foreach ($f in $old) { try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ([System.IO.Path]::ChangeExtension($f.FullName, '.json')) -Force -ErrorAction SilentlyContinue } catch { } }
     } catch { }
     Write-Log 'INFO' ('gunluk durum raporu hazir: ' + $mdPath + ' | ' + $digest.Summary)
+    return $mdPath
+}
+
+function New-MonthlyDayRow {
+    <#  Aylik raporun "gun bazli dagilim" tablosunun tek satiri. #>
+    param([string]$DateKey = '', [string]$Label = '')
+    return [pscustomobject]@{
+        date = $DateKey; label = $Label; incidents = 0
+        autoReboots = 0; manualReboots = 0; unknownReboots = 0
+        reboots = 0; downtimeMinutes = 0
+    }
+}
+
+function Merge-MonthlyEventList {
+    <#
+        Iki olay listesi birlestirilir; ayni BASLANGIC zamanini tasiyan kayitlar TEK
+        sayilir (ikinci kopya eklenmez).
+
+        NEDEN: Ay raporu iki kaynaktan beslenebilir: (a) o an gunluk loglardan yeniden
+        hesaplanan liste, (b) onceki gun yazilmis aylik raporun JSON'unda saklanan
+        liste. Log rotasyonu (LogGunDays) ilk gunlerin loglarini sildiginde (b) o
+        gunleri kurtarir; ama ikisi birlikte kullanilirsa ayni kesinti iki kez
+        sayilir. Tekillestirme anahtari: olayin baslangic zamani (yerel, saniye).
+    #>
+    param([object[]]$Base = @(), [object[]]$Add = @())
+    $result = New-Object System.Collections.ArrayList
+    $index = @{}
+    foreach ($src in @(@($Base), @($Add))) {
+        foreach ($e in @($src)) {
+            if (-not $e) { continue }
+            $t = ConvertTo-DailyLocalDateTime $e.startedAt
+            if (-not $t) { $t = ConvertTo-DailyLocalDateTime $e.at }
+            if (-not $t) { [void]$result.Add($e); continue }
+            $key = $t.ToString('yyyy-MM-dd HH:mm:ss')
+            if (-not $index.ContainsKey($key)) {
+                $index[$key] = @{ pos = $result.Count; item = $e }
+                [void]$result.Add($e)
+                continue
+            }
+            # Ayni olay: daha cok bilgi tasiyan kopyayi tercih et (bitis zamani olan).
+            $cur = $index[$key].item
+            $curEnded = ConvertTo-DailyLocalDateTime $cur.endedAt
+            $newEnded = ConvertTo-DailyLocalDateTime $e.endedAt
+            if ((-not $curEnded) -and $newEnded) {
+                $result[$index[$key].pos] = $e
+                $index[$key].item = $e
+            }
+        }
+    }
+    return @($result)
+}
+
+function Get-MonthlyStats {
+    <#
+        AYLIK ISTATISTIK HESABI (saf / yan etkisiz; test edilebilir).
+
+        Gunluk raporun "bugun" odakli karsiligi: bir ay icindeki ariza (kesinti),
+        yeniden baslatma (otomatik / elle) ve elle baslatilan onarim sayilarini
+        uretir.
+
+        AYRIK BIR AYRISTIRICI YAZILMADI: olay listeleri gunluk raporun AYNI kodu
+        (Get-DailyDigest) ile uretilir. Aksi halde "gunluk 3 kesinti / aylik 11
+        kesinti" gibi birbirini tutmayan sayilar cikardi.
+    #>
+    param(
+        [object[]]$Incidents = @(),
+        [object[]]$Reboots = @(),
+        [int]$ManualRepairCount = 0,
+        [int]$PanelRestartCount = 0,
+        [datetime]$PeriodStart = (Get-Date).Date,
+        [datetime]$PeriodEnd = (Get-Date),
+        [string]$HostName = $env:COMPUTERNAME,
+        [string]$Version = $script:AppVersion
+    )
+    $incidents = @(@($Incidents) | Where-Object { $_ })
+    $reboots = @(@($Reboots) | Where-Object { $_ })
+
+    # ---------- YENIDEN BASLATMA KAYNAKLARI ----------
+    $rebootCount = $reboots.Count
+    $autoRebootCount = 0
+    $manualRebootCount = 0
+    $unknownRebootCount = 0
+    $inferredRebootCount = 0
+    foreach ($r in $reboots) {
+        switch ([string]$r.source) {
+            'otomatik' { $autoRebootCount++ }
+            'elle' { $manualRebootCount++ }
+            default { $unknownRebootCount++ }
+        }
+        try { if ([bool]$r.sourceInferred) { $inferredRebootCount++ } } catch { }
+    }
+
+    # ---------- KESINTI SURELERI ----------
+    $incidentCount = $incidents.Count
+    $recoveredCount = 0
+    $unresolvedCount = 0
+    $measuredCount = 0
+    $totalDowntimeMinutes = 0
+    $maxDowntimeMinutes = 0
+    $maxDowntimeSpan = ''
+    foreach ($i in $incidents) {
+        if ([bool]$i.recovered) { $recoveredCount++ } else { $unresolvedCount++ }
+        $s = ConvertTo-DailyLocalDateTime $i.startedAt
+        $e = ConvertTo-DailyLocalDateTime $i.endedAt
+        if ($s -and $e) {
+            $m = [Math]::Max(1, [int][Math]::Ceiling(($e - $s).TotalMinutes))
+            $measuredCount++
+            $totalDowntimeMinutes += $m
+            if ($m -gt $maxDowntimeMinutes) { $maxDowntimeMinutes = $m; $maxDowntimeSpan = [string]$i.span }
+        }
+    }
+    $avgDowntimeMinutes = 0
+    if ($measuredCount -gt 0) { $avgDowntimeMinutes = [int][Math]::Round(($totalDowntimeMinutes / $measuredCount)) }
+
+    # ---------- GUN BAZLI DAGILIM ----------
+    $dayRows = New-Object System.Collections.ArrayList
+    $dayMap = @{}
+    $dayCount = 1
+    try { $dayCount = [int][Math]::Ceiling(($PeriodEnd.Date - $PeriodStart.Date).TotalDays) + 1 } catch { $dayCount = 1 }
+    if ($dayCount -lt 1) { $dayCount = 1 }
+    if ($dayCount -gt 400) { $dayCount = 400 }
+    for ($d = 0; $d -lt $dayCount; $d++) {
+        $date = $PeriodStart.Date.AddDays($d)
+        $key = $date.ToString('yyyy-MM-dd')
+        $row = New-MonthlyDayRow -DateKey $key -Label $date.ToString('dd.MM')
+        $dayMap[$key] = $row
+        [void]$dayRows.Add($row)
+    }
+    foreach ($i in $incidents) {
+        $s = ConvertTo-DailyLocalDateTime $i.startedAt
+        if (-not $s) { continue }
+        $key = $s.ToString('yyyy-MM-dd')
+        if (-not $dayMap.ContainsKey($key)) {
+            $row = New-MonthlyDayRow -DateKey $key -Label $s.ToString('dd.MM')
+            $dayMap[$key] = $row
+            [void]$dayRows.Add($row)
+        }
+        $r2 = $dayMap[$key]
+        $r2.incidents = [int]$r2.incidents + 1
+        $se = ConvertTo-DailyLocalDateTime $i.endedAt
+        if ($se) {
+            $m = [Math]::Max(1, [int][Math]::Ceiling(($se - $s).TotalMinutes))
+            $r2.downtimeMinutes = [int]$r2.downtimeMinutes + $m
+        }
+    }
+    foreach ($r in $reboots) {
+        $s = ConvertTo-DailyLocalDateTime $r.at
+        if (-not $s) { continue }
+        $key = $s.ToString('yyyy-MM-dd')
+        if (-not $dayMap.ContainsKey($key)) {
+            $row = New-MonthlyDayRow -DateKey $key -Label $s.ToString('dd.MM')
+            $dayMap[$key] = $row
+            [void]$dayRows.Add($row)
+        }
+        $r2 = $dayMap[$key]
+        $r2.reboots = [int]$r2.reboots + 1
+        switch ([string]$r.source) {
+            'otomatik' { $r2.autoReboots = [int]$r2.autoReboots + 1 }
+            'elle' { $r2.manualReboots = [int]$r2.manualReboots + 1 }
+            default { $r2.unknownReboots = [int]$r2.unknownReboots + 1 }
+        }
+    }
+    $daysWithIncident = @($dayRows | Where-Object { [int]$_.incidents -gt 0 }).Count
+    $healthyDays = $dayCount - $daysWithIncident
+
+    # ---------- ARIZA SINIFI / BASARISIZ KONTROL DAGILIMI ----------
+    $classCounts = @{}
+    foreach ($i in $incidents) {
+        $c = [string]$i.class
+        if (-not $c) { $c = 'siniflandirilamadi' }
+        if (-not $classCounts.ContainsKey($c)) { $classCounts[$c] = 0 }
+        $classCounts[$c] = [int]$classCounts[$c] + 1
+    }
+    $missingCounts = @{}
+    foreach ($i in $incidents) {
+        $m = [string]$i.missing
+        if (-not $m) { continue }
+        foreach ($part in @($m -split ',')) {
+            $p = ([string]$part).Trim()
+            if (-not $p) { continue }
+            if (-not $missingCounts.ContainsKey($p)) { $missingCounts[$p] = 0 }
+            $missingCounts[$p] = [int]$missingCounts[$p] + 1
+        }
+    }
+
+    # ---------- OZET ----------
+    $summary = "$incidentCount ariza, $rebootCount yeniden baslatma"
+    if ($rebootCount -gt 0) {
+        $parts = @()
+        if ($autoRebootCount -gt 0) { $parts += "$autoRebootCount otomatik" }
+        if ($manualRebootCount -gt 0) { $parts += "$manualRebootCount elle/dış kaynak" }
+        if ($unknownRebootCount -gt 0) { $parts += "$unknownRebootCount kaynağı bilinmiyor" }
+        $summary += ' (' + ($parts -join ', ') + ')'
+    }
+    $summary += '; elle kapatma/acma ' + $manualRebootCount + ' kez'
+    if ($inferredRebootCount -gt 0) { $summary += " ($inferredRebootCount restart kaynagi log analizinden cikarildi)" }
+    if ($ManualRepairCount -gt 0) { $summary += ', elle ag onarimi ' + $ManualRepairCount + ' kez' }
+
+    # ---------- MARKDOWN ----------
+    $classLabels = @{
+        'upstream' = 'yön üst ağ / firewall / ISS'
+        'local-link' = 'yerel bağlantı (adaptör)'
+        'local-dhcp' = 'IP / DHCP'
+        'local-segment' = 'yerel ağ bölümü'
+        'siniflandirilamadi' = 'sınıflandırılamadı'
+    }
+    $md = New-Object System.Collections.ArrayList
+    [void]$md.Add("# Aylık istatistik raporu — $HostName")
+    [void]$md.Add('')
+    [void]$md.Add(('- Dönem: **' + $PeriodStart.ToString('dd.MM.yyyy HH:mm') + ' – ' + $PeriodEnd.ToString('dd.MM.yyyy HH:mm') + '**'))
+    [void]$md.Add(('- Üretildi: ' + $PeriodEnd.ToString('dd.MM.yyyy HH:mm') + ' | sürüm: ' + $Version))
+    [void]$md.Add('')
+    [void]$md.Add('## Kısa özet')
+    [void]$md.Add('')
+    [void]$md.Add(($summary + '.'))
+    [void]$md.Add('')
+    [void]$md.Add('## Sayaçlar')
+    [void]$md.Add('')
+    [void]$md.Add('| Ölçüt | Değer |')
+    [void]$md.Add('| --- | --- |')
+    [void]$md.Add('| Arıza (ağ kesintisi) | ' + $incidentCount + ' |')
+    [void]$md.Add('| Gerçek yeniden başlatma | ' + $rebootCount + ' |')
+    [void]$md.Add('| ↳ otomatik (watchdog) | ' + $autoRebootCount + ' |')
+    [void]$md.Add('| ↳ elle kapatma/açma (dış kaynak) | ' + $manualRebootCount + ' |')
+    [void]$md.Add('| ↳ kaynağı bilinmiyor | ' + $unknownRebootCount + ' |')
+    if ($inferredRebootCount -gt 0) {
+        [void]$md.Add('| ↳ bunlardan log analizinden çıkarılan | ' + $inferredRebootCount + ' |')
+    }
+    [void]$md.Add('| Elle başlatılan ağ onarımı | ' + $ManualRepairCount + ' |')
+    [void]$md.Add('| Panel düğmesiyle istenen restart | ' + $PanelRestartCount + ' |')
+    [void]$md.Add('| Kurtarılan arıza | ' + $recoveredCount + ' |')
+    [void]$md.Add('| Devam eden arıza | ' + $unresolvedCount + ' |')
+    [void]$md.Add('| Toplam kesinti süresi | ' + $totalDowntimeMinutes + ' dk |')
+    [void]$md.Add('| Ortalama kesinti süresi | ' + $avgDowntimeMinutes + ' dk |')
+    [void]$md.Add('| En uzun kesinti | ' + $maxDowntimeMinutes + ' dk |')
+    [void]$md.Add('| Arıza görülen gün | ' + $daysWithIncident + ' / ' + $dayCount + ' |')
+    [void]$md.Add('| Arızasız gün | ' + $healthyDays + ' / ' + $dayCount + ' |')
+    [void]$md.Add('')
+    [void]$md.Add('## Günlük dağılım')
+    [void]$md.Add('')
+    [void]$md.Add('| Gün | Arıza | Kesinti süresi | Otomatik restart | Elle aç-kapa | Kaynağı bilinmiyor |')
+    [void]$md.Add('| --- | --- | --- | --- | --- | --- |')
+    foreach ($row in $dayRows) {
+        [void]$md.Add(('| ' + $row.date + ' | ' + $row.incidents + ' | ' + $row.downtimeMinutes + ' dk | ' + $row.autoReboots + ' | ' + $row.manualReboots + ' | ' + $row.unknownReboots + ' |'))
+    }
+    [void]$md.Add('')
+    [void]$md.Add('## Arıza sınıfı dağılımı')
+    [void]$md.Add('')
+    if ($classCounts.Count -eq 0) {
+        [void]$md.Add('- Sınıflandırılmış arıza yok.')
+    } else {
+        [void]$md.Add('| Sınıf | Adet |')
+        [void]$md.Add('| --- | --- |')
+        foreach ($k in @($classCounts.Keys | Sort-Object)) {
+            $label = $k
+            if ($classLabels.ContainsKey($k)) { $label = $classLabels[$k] }
+            [void]$md.Add(('| ' + $label + ' | ' + $classCounts[$k] + ' |'))
+        }
+    }
+    [void]$md.Add('')
+    [void]$md.Add('## Başarısız kontroller')
+    [void]$md.Add('')
+    if ($missingCounts.Count -eq 0) {
+        [void]$md.Add('- Kayıtlı başarısız kontrol yok.')
+    } else {
+        [void]$md.Add('| Kontrol | Adet |')
+        [void]$md.Add('| --- | --- |')
+        foreach ($k in @($missingCounts.Keys | Sort-Object)) {
+            [void]$md.Add(('| ' + $k + ' | ' + $missingCounts[$k] + ' |'))
+        }
+    }
+    [void]$md.Add('')
+    [void]$md.Add('## En sorunlu günler')
+    [void]$md.Add('')
+    $top = @($dayRows | Where-Object { [int]$_.incidents -gt 0 } | Sort-Object incidents, reboots -Descending | Select-Object -First 5)
+    if ($top.Count -eq 0) {
+        [void]$md.Add('- Arıza kaydı olmayan dönem.')
+    } else {
+        foreach ($row in $top) {
+            [void]$md.Add(('- ' + $row.date + ' — ' + $row.incidents + ' arıza, ' + $row.downtimeMinutes + ' dk kesinti, ' + $row.reboots + ' yeniden başlatma (' + $row.autoReboots + ' otomatik, ' + $row.manualReboots + ' elle).'))
+        }
+    }
+    [void]$md.Add('')
+    [void]$md.Add('## Yeniden başlatma kaynakları')
+    [void]$md.Add('')
+    if ($rebootCount -eq 0) {
+        [void]$md.Add('- Bu dönemde gerçek yeniden başlatma olmadı.')
+    } else {
+        foreach ($r in $reboots) {
+            $rt = [string]$r.at
+            try { $rt = ([datetime]::Parse([string]$r.at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)).ToLocalTime().ToString('dd.MM.yyyy HH:mm') } catch { }
+            $kaynakEtiket = switch ([string]$r.source) {
+                'otomatik' { 'otomatik — watchdog' }
+                'elle' { 'elle/dış kaynak — watchdog değil' }
+                default { 'kaynak bilinmiyor' }
+            }
+            try { if ([bool]$r.sourceInferred) { $kaynakEtiket += ' (log analizinden çıkarıldı)' } } catch { }
+            [void]$md.Add(('- ' + $rt + ' — yeniden başlatma (' + $kaynakEtiket + ').'))
+        }
+    }
+    [void]$md.Add('')
+    [void]$md.Add('Not: "Elle kapatma/açma" sayısı, watchdog dışında gerçekleşen açılışları (elle kapatma-açma, elle restart, Windows Update, güç kesintisi) kapsar; panel düğmesiyle istenen restartlar bu sayıya dahildir ve ayrıca listelenir.')
+    [void]$md.Add('Not: İstatistikler watchdog günlüğünden ve kesinti raporlarından hesaplanır. Log saklama süresi (LogGunDays) kısa tutulursa ayın ilk günlerine ait kayıtlar arşivden silinmiş olabilir.')
+
+    return [pscustomobject]@{
+        Summary = $summary
+        Markdown = ($md -join "`r`n")
+        PeriodStart = $PeriodStart; PeriodEnd = $PeriodEnd
+        IncidentCount = $incidentCount; RebootCount = $rebootCount
+        AutoRebootCount = $autoRebootCount; ManualRebootCount = $manualRebootCount; UnknownRebootCount = $unknownRebootCount
+        InferredRebootCount = $inferredRebootCount
+        ManualRepairCount = $ManualRepairCount; PanelRestartCount = $PanelRestartCount
+        RecoveredCount = $recoveredCount; UnresolvedCount = $unresolvedCount
+        TotalDowntimeMinutes = $totalDowntimeMinutes; AvgDowntimeMinutes = $avgDowntimeMinutes
+        MaxDowntimeMinutes = $maxDowntimeMinutes; MaxDowntimeSpan = $maxDowntimeSpan
+        DayCount = $dayCount; DaysWithIncident = $daysWithIncident; HealthyDays = $healthyDays
+        ByDay = @($dayRows); ByClass = $classCounts; ByMissing = $missingCounts
+        Incidents = @($incidents); Reboots = @($reboots)
+    }
+}
+
+function Get-MonthlyDigest {
+    <#
+        Aylik raporun veri toplama kismi: ham gunluk + kesinti raporlarindan olay
+        listelerini cikarir ve elle yapilan islemleri sayar.
+
+        ELLE SAYIMLARI:
+          - "elle ag onarimi basladi"  -> kullanici/panelin bastlattigi ağ onarimi
+          - "elle restart istendi"      -> panel dugmesiyle istenen restart
+        (Elle kapatma/acma sayisi ise reboot listesindeki kaynak=elle kayitlarindan gelir.)
+    #>
+    param(
+        [string[]]$LogLines = @(),
+        [object[]]$OutageReports = @(),
+        [datetime]$PeriodStart = (Get-Date).Date,
+        [datetime]$PeriodEnd = (Get-Date),
+        [string]$HostName = $env:COMPUTERNAME,
+        [string]$Version = $script:AppVersion
+    )
+    $daily = Get-DailyDigest -LogLines $LogLines -OutageReports $OutageReports -PeriodStart $PeriodStart -PeriodEnd $PeriodEnd -CurrentOk $true -CurrentSummary '' -HostName $HostName -Version $Version -NetworkInfo $null
+    $manualRepairCount = 0
+    $panelRestartCount = 0
+    foreach ($line in @($LogLines)) {
+        $text = [string]$line
+        if ($text -notmatch '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') { continue }
+        $when = $null
+        try { $when = [datetime]::SpecifyKind([datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture), [DateTimeKind]::Local) } catch { continue }
+        if ($when -lt $PeriodStart -or $when -gt $PeriodEnd) { continue }
+        if ($text -match 'elle ag onarimi basladi') { $manualRepairCount++ }
+        if ($text -match 'elle restart istendi') { $panelRestartCount++ }
+    }
+    return Get-MonthlyStats -Incidents @($daily.Incidents) -Reboots @($daily.Reboots) -ManualRepairCount $manualRepairCount -PanelRestartCount $panelRestartCount -PeriodStart $PeriodStart -PeriodEnd $PeriodEnd -HostName $HostName -Version $Version
+}
+
+function Write-MonthlyReportFile {
+    <#  Aylik istatistik raporunun dosyalarini (md + json) yazar. #>
+    param(
+        [datetime]$Month = (Get-Date),
+        [object]$Digest = $null
+    )
+    if (-not $Digest) { return '' }
+    $dir = Join-Path $BaseDir 'diag'
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $base = Join-Path $dir ('monthly-' + $Month.ToString('yyyy-MM'))
+    $jsonPath = $base + '.json'
+    $mdPath = $base + '.md'
+    $report = [ordered]@{
+        generated = $Digest.PeriodEnd.ToString('o')
+        periodStart = $Digest.PeriodStart.ToString('o')
+        periodEnd = $Digest.PeriodEnd.ToString('o')
+        month = $Month.ToString('yyyy-MM')
+        host = $env:COMPUTERNAME
+        version = $script:AppVersion
+        summary = $Digest.Summary
+        incidentCount = $Digest.IncidentCount
+        rebootCount = $Digest.RebootCount
+        autoRebootCount = $Digest.AutoRebootCount
+        manualRebootCount = $Digest.ManualRebootCount
+        unknownRebootCount = $Digest.UnknownRebootCount
+        inferredRebootCount = $Digest.InferredRebootCount
+        manualRepairCount = $Digest.ManualRepairCount
+        panelRestartCount = $Digest.PanelRestartCount
+        recoveredCount = $Digest.RecoveredCount
+        unresolvedCount = $Digest.UnresolvedCount
+        totalDowntimeMinutes = $Digest.TotalDowntimeMinutes
+        avgDowntimeMinutes = $Digest.AvgDowntimeMinutes
+        maxDowntimeMinutes = $Digest.MaxDowntimeMinutes
+        dayCount = $Digest.DayCount
+        daysWithIncident = $Digest.DaysWithIncident
+        healthyDays = $Digest.HealthyDays
+        byDay = @($Digest.ByDay)
+        byClass = $Digest.ByClass
+        byMissing = $Digest.ByMissing
+        incidents = @($Digest.Incidents)
+        reboots = @($Digest.Reboots)
+        markdownPath = $mdPath
+        markdown = $Digest.Markdown
+    }
+    $json = $report | ConvertTo-Json -Depth 8
+    foreach ($item in @(@{ Path = $jsonPath; Content = $json }, @{ Path = $mdPath; Content = $Digest.Markdown })) {
+        $tmp = $item.Path + '.tmp.' + [guid]::NewGuid().ToString('N')
+        [System.IO.File]::WriteAllText($tmp, [string]$item.Content, (New-Object System.Text.UTF8Encoding($true)))
+        try { if (Test-Path -LiteralPath $item.Path) { [System.IO.File]::Replace($tmp, $item.Path, $null) } else { [System.IO.File]::Move($tmp, $item.Path) } }
+        catch { try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }; [System.IO.File]::WriteAllText($item.Path, [string]$item.Content, (New-Object System.Text.UTF8Encoding($true))) }
+    }
+    return $mdPath
+}
+
+function Write-MonthlyReport {
+    <#
+        Aylik istatistik raporu.
+
+        - Her gun 08:00 sonrasi BU AYIN raporu yenilenir (donem: ayin 1'i 00:00 -> simdi).
+        - Ay degistiginde ONCEKI AY KAPATILIR: donem ay sonuna sabitlenir ve o ayin
+          sayilari dondurulur.
+        - Kapatma sirasinda log rotasyonu ilk gunleri silmisse, onceki gun yazilmis
+          raporun JSON'undaki kayitlar (Merge-MonthlyEventList) birestirilerek kurtarilir.
+
+        Gunluk raporla ayni mantik: 08:00 oncesi uretilmez, 60 dk icinde tekrar
+        uretilmez (aylik hesap butce/log okuma maliyeti).
+    #>
+    param([datetime]$At = (Get-Date))
+    if ($At.TimeOfDay -lt [TimeSpan]::FromHours(8)) { return '' }
+    $dir = Join-Path $BaseDir 'diag'
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+
+    $monthStart = $At.Date.AddDays(-($At.Day - 1))
+    $prevStart = $monthStart.AddMonths(-1)
+
+    $logLines = @(Get-DailyLogLines -PeriodStart $prevStart)
+    $reports = @()
+    try {
+        foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter 'outage-*.json' -File -ErrorAction SilentlyContinue)) {
+            try { $reports += (Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { }
+        }
+    } catch { }
+
+    # ---------- ONCEKI AYI KAPAT ----------
+    $prevBase = Join-Path $dir ('monthly-' + $prevStart.ToString('yyyy-MM'))
+    $prevJson = $prevBase + '.json'
+    $prevClosed = $false
+    $cachedIncidents = @()
+    $cachedReboots = @()
+    $cachedManual = 0
+    $cachedPanel = 0
+    if (Test-Path -LiteralPath $prevJson) {
+        try {
+            $old = Get-Content -LiteralPath $prevJson -Raw -Encoding UTF8 | ConvertFrom-Json
+            $pe = ConvertTo-DailyLocalDateTime $old.periodEnd
+            if ($pe -and $pe -ge $monthStart) { $prevClosed = $true }
+            if ($old.PSObject.Properties.Name -contains 'incidents') { $cachedIncidents = @($old.incidents | Where-Object { $_ }) }
+            if ($old.PSObject.Properties.Name -contains 'reboots') { $cachedReboots = @($old.reboots | Where-Object { $_ }) }
+            try { $cachedManual = [int]$old.manualRepairCount } catch { }
+            try { $cachedPanel = [int]$old.panelRestartCount } catch { }
+        } catch { }
+    }
+    if (-not $prevClosed) {
+        <#
+            BOS AY ICIN KALICI ISARET. Ay kapandiktan SONRA o donemin log kayitlari
+            ARTAMAZ (yalnizca rotasyonla azalir). Bu yuzden "kayit yok" tespiti bir kez
+            yapildiysa tekrar denenmez: aksi halde her 5 dakikalik dongude ay-sonu
+            istatistigi bastan hesaplanir ve log'a ayni INFO satiri yazilirdi. Isaret
+            dosyasi ay bazli isimlidir (new month -> yeni isim); o ay icin bir rapor
+            JSON'u sonradan ortaya cikarsa (yedek geri yukleme) isaret gecsersizlesir.
+        #>
+        $prevNoDataMarker = $prevBase + '.nodata'
+        $prevNoDataSkip = $false
+        if ((Test-Path -LiteralPath $prevNoDataMarker) -and (-not $cachedIncidents.Count) -and (-not $cachedReboots.Count)) {
+            # Kayit yok tespit edilmisti; diges'i bastan hesaplamadan gec. (Fonksiyon
+            # SONRAKI bolume devam etmeli: bu ayin raporu yine yenilenmeli.)
+            $prevNoDataSkip = $true
+        }
+        if (-not $prevNoDataSkip) {
+            $prevFresh = Get-MonthlyDigest -LogLines $logLines -OutageReports $reports -PeriodStart $prevStart -PeriodEnd $monthStart -HostName $env:COMPUTERNAME -Version $script:AppVersion
+            $mergedIncidents = Merge-MonthlyEventList -Base $cachedIncidents -Add @($prevFresh.Incidents)
+            $mergedReboots = Merge-MonthlyEventList -Base $cachedReboots -Add @($prevFresh.Reboots)
+            $prevDigest = Get-MonthlyStats -Incidents $mergedIncidents -Reboots $mergedReboots -ManualRepairCount ([Math]::Max($cachedManual, $prevFresh.ManualRepairCount)) -PanelRestartCount ([Math]::Max($cachedPanel, $prevFresh.PanelRestartCount)) -PeriodStart $prevStart -PeriodEnd $monthStart -HostName $env:COMPUTERNAME -Version $script:AppVersion
+            <#
+                BOS AY RAPORU YAZILMAZ. Watchdog ayin tamaminda calismadiysa (ilk kurulum,
+                makine kapali) o ay icin "0 arıza" yazan bir rapor YANILTICI olur: kayit
+                yoktur, arıza yoktur demek degildir. Veri varsa (veya o ay icin daha once
+                rapor yazildiysa) rapor uretilir.
+            #>
+            $prevHasData = ($prevDigest.IncidentCount -gt 0) -or ($prevDigest.RebootCount -gt 0) -or ($prevDigest.ManualRepairCount -gt 0) -or ($cachedIncidents.Count -gt 0) -or ($cachedReboots.Count -gt 0)
+            if ($prevHasData) {
+                $null = Write-MonthlyReportFile -Month $prevStart -Digest $prevDigest
+                try { Remove-Item -LiteralPath $prevNoDataMarker -Force -ErrorAction SilentlyContinue } catch { }
+                Write-Log 'INFO' ('onceki ayin istatistik raporu kapatildi: ' + ($prevBase + '.md') + ' | ' + $prevDigest.Summary)
+            } else {
+                try { [System.IO.File]::WriteAllText($prevNoDataMarker, ('kayit yok; isaret zamanı: ' + (Get-Date).ToString('o')), (New-Object System.Text.UTF8Encoding($true))) } catch { }
+                Write-Log 'INFO' ('onceki ay icin kayit bulunamadi; aylik rapor uretilmedi: ' + $prevStart.ToString('yyyy-MM'))
+            }
+        }
+    }
+
+    # ---------- BU AYIN RAPORU ----------
+    $monthBase = Join-Path $dir ('monthly-' + $At.ToString('yyyy-MM'))
+    $monthJson = $monthBase + '.json'
+    $monthMd = $monthBase + '.md'
+    if (Test-Path -LiteralPath $monthJson) {
+        try {
+            $ageMin = ((Get-Date) - (Get-Item -LiteralPath $monthJson).LastWriteTime).TotalMinutes
+            if ($ageMin -le 60) {
+                $existing = Get-Content -LiteralPath $monthJson -Raw -Encoding UTF8 | ConvertFrom-Json
+                if (-not (Test-Path -LiteralPath $monthMd) -and $existing.markdown) {
+                    [System.IO.File]::WriteAllText($monthMd, [string]$existing.markdown, (New-Object System.Text.UTF8Encoding($true)))
+                }
+                $null = Invoke-StateUpdate {
+                    param($st)
+                    $st.LastMonthlyReport = $monthMd
+                    $st.LastMonthlyReportAt = [string]$existing.generated
+                    $st.LastMonthlySummary = [string]$existing.summary
+                }
+                return $monthMd
+            }
+        } catch { }
+    }
+    $digest = Get-MonthlyDigest -LogLines $logLines -OutageReports $reports -PeriodStart $monthStart -PeriodEnd $At -HostName $env:COMPUTERNAME -Version $script:AppVersion
+    $mdPath = Write-MonthlyReportFile -Month $At -Digest $digest
+    $null = Invoke-StateUpdate {
+        param($st)
+        $st.LastMonthlyReport = $mdPath
+        $st.LastMonthlyReportAt = $At.ToString('o')
+        $st.LastMonthlySummary = [string]$digest.Summary
+    }
+    <#  Eski aylik raporlari temizle (24 ay sakla). Bos-ay isaretleri de ay ismiyle
+        eskir; raporla birlikte temizlenir ki diag klasoru birikmesin. #>
+    try {
+        $oldFiles = @(Get-ChildItem -LiteralPath $dir -Filter 'monthly-*.md' -File -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -Skip 24)
+        foreach ($f in $oldFiles) {
+            try {
+                Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath ([System.IO.Path]::ChangeExtension($f.FullName, '.json')) -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath ([System.IO.Path]::ChangeExtension($f.FullName, '.nodata')) -Force -ErrorAction SilentlyContinue
+            } catch { }
+        }
+    } catch { }
+    Write-Log 'INFO' ('aylik istatistik raporu hazir: ' + $mdPath + ' | ' + $digest.Summary)
     return $mdPath
 }
 
@@ -2741,6 +3374,14 @@ function Sync-RebootAccounting {
             if (-not $st.LastBootUtc) { $st.LastBootUtc = $boot; return }
             if ($st.LastBootUtc -ne $boot) {
                 $gercek = [string]$st.PendingRebootUtc
+                <#
+                    KAYNAK AYRIMI. PendingRebootUtc yalnizca watchdog restart istediginde
+                    yazilir. Dolu ise bu acilis otomatik restart'tir; bos ise makine
+                    watchdog disinda (elle kapatma/acma, elle restart, Windows Update,
+                    guc kesintisi) yeniden baslamistir. Rapor bu ayrimi gostermeli ki
+                    elle yapilan islem "otomatik onarim" gibi okunmasin.
+                #>
+                $kaynak = if ($gercek) { 'otomatik' } else { 'elle' }
                 $liste = @(@($st.RebootsUtc) | Where-Object { $_ })
                 if ($gercek -and ($liste -notcontains $gercek)) { $liste += $gercek }
                 $st.RebootsUtc = @($liste)
@@ -2757,7 +3398,15 @@ function Sync-RebootAccounting {
                     14 Eki gecesi LastHealthyUtc 13 Ekim'de kaldi.)
                 #>
                 $st.LastHealthyUtc = (Get-Date).ToString('o')
-                Write-Log 'INFO' ('makine yeniden acildi; restart butceye yazildi (' + $liste.Count + '/' + $cfg.MaxRestartsPerDay + ') | acilis=' + $boot)
+                if ($kaynak -eq 'otomatik') {
+                    Write-Log 'INFO' ('makine yeniden acildi; restart butceye yazildi (' + $liste.Count + '/' + $cfg.MaxRestartsPerDay + ') | acilis=' + $boot + ' | kaynak=otomatik')
+                } else {
+                    <#
+                        Elle/dış kaynak reboot'unda butce ARTMAZ; eski mesaj her acilista
+                        "restart butceye yazildi" dedigi icin rapor/servis kaydi yaniltiyordu.
+                    #>
+                    Write-Log 'INFO' ('makine yeniden acildi; otomatik restart degil, butceye yazilmadi | acilis=' + $boot + ' | kaynak=elle')
+                }
                 <#
                     GUNLUK RAPORU YENILE. Rapor gun basina bir kez uretilir (08:00 sonrasi ilk
                     dongude) ve reboot'tan SONRAKIN olaylari icermez; kullanici eski raporda
@@ -3580,6 +4229,9 @@ function Write-JsonStatus {
         dailyReportPath = [string]$state.LastDailyReport
         dailyReportAt = $(if ($state.LastDailyReportAt) { (ConvertTo-DailyLocalDateTime $state.LastDailyReportAt).ToString('dd.MM.yyyy HH:mm') } else { '' })
         dailySummary = [string]$state.LastDailySummary
+        monthlyReportPath = [string]$state.LastMonthlyReport
+        monthlyReportAt = $(if ($state.LastMonthlyReportAt) { (ConvertTo-DailyLocalDateTime $state.LastMonthlyReportAt).ToString('dd.MM.yyyy HH:mm') } else { '' })
+        monthlySummary = [string]$state.LastMonthlySummary
         <#  repairWatch: panelin istegini ANINDA isleyecek gorunur bir gorev var mi?
             RemoteHostRepairWatch bir SYSTEM gorevidir ve standart kullaniciya
             gorunmez (schtasks "Erisim engellendi" doner). Bu yuzden kullanici
@@ -3793,6 +4445,8 @@ function Invoke-Watchdog {
     if (-not $Check) {
         try { $null = Write-DailyReport -At (Get-Date) -CurrentOk $allOk -CurrentSummary $summary }
         catch { Write-Log 'WARN' ('gunluk rapor uretilemedi: ' + $_.Exception.Message) }
+        try { $null = Write-MonthlyReport -At (Get-Date) }
+        catch { Write-Log 'WARN' ('aylik istatistik raporu uretilemedi: ' + $_.Exception.Message) }
     }
     $null = Write-JsonStatus -AllOk $allOk -Summary $summary -BadCount $badCount
     return $badCount

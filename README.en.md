@@ -203,6 +203,24 @@ state) — and *Ses testi* checks both at once. Tray *Silent mode* mutes both. E
 - **Auto logon** (optional): `host/Enable-ConsoleAutoLogon.ps1` logs in automatically after a reboot and
   stores the password in plain text. Use it only on networks you consider safe.
 
+## Reports
+
+The host writes two human-readable report families into `C:\ProgramData\RemoteWatchdog\diag`:
+
+| Report | Files | Content |
+| --- | --- | --- |
+| Daily | `daily-YYYY-MM-DD.md` + `.json` | Last 24–40 hours: outages, real reboots (automatic vs. manual), live network inventory, human-readable diagnosis. |
+| Monthly | `monthly-YYYY-MM.md` + `.json` | Month statistics: how many faults, how many reboots, **how many of those were manual open/close**, manual repair count, total/average/longest downtime, per-day breakdown, fault-class distribution, worst days. |
+
+Both are refreshed daily after 08:00 local time. When the month turns, the previous
+month is **closed**: its period is pinned to the end of that month and the numbers are
+frozen. Both reports can be opened from the tray panel (*Genel durum* → *Günlük özet* /
+*Aylık istatistik* → **Raporu aç**).
+
+> The monthly counters are produced by the **same** log parser as the daily report, so the
+> two can never disagree. If log rotation already deleted the first days of a month, the
+> records cached in the previously written monthly report are merged back in.
+
 ## Data contract
 
 `last-run.json` is written **only** through `lib/Contract.ps1` (`Write-Status`, stamped with

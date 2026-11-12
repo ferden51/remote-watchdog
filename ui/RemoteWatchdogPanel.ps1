@@ -933,6 +933,28 @@ $Xaml = @'
                 <TextBlock x:Name="TxtDailyStatsUpdated" Text="Güncelleme: —" Foreground="{StaticResource Mut}" FontSize="10" TextWrapping="Wrap" Margin="0,2,0,0" TextAlignment="Center"/>
               </StackPanel>
             </Border>
+            <Border Style="{StaticResource CardStyle}" Padding="8,8" Margin="0,0,0,8" ToolTip="Sayaçlar bu ayın aylık istatistik raporundaki arıza ve yeniden başlatma sayılarını gösterir.">
+              <StackPanel>
+                <TextBlock Text="AYLIK İSTATİSTİK" Foreground="{StaticResource Mut}" FontSize="10" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                <Grid>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                  <StackPanel Grid.Column="0" Margin="0,0,2,0">
+                    <TextBlock x:Name="TxtMonthlyIncidentCount" Text="—" Foreground="{StaticResource Bad}" FontSize="17" FontWeight="Bold" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Arıza" Style="{StaticResource Small}" FontSize="10" TextAlignment="Center" TextWrapping="Wrap"/>
+                  </StackPanel>
+                  <StackPanel Grid.Column="1" Margin="2,0,2,0">
+                    <TextBlock x:Name="TxtMonthlyAutoRebootCount" Text="—" Foreground="{StaticResource Warn}" FontSize="17" FontWeight="Bold" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Otomatik restart" Style="{StaticResource Small}" FontSize="10" TextAlignment="Center" TextWrapping="Wrap"/>
+                  </StackPanel>
+                  <StackPanel Grid.Column="2" Margin="2,0,0,0">
+                    <TextBlock x:Name="TxtMonthlyManualRebootCount" Text="—" Foreground="{StaticResource Warn}" FontSize="17" FontWeight="Bold" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Elle aç-kapa" Style="{StaticResource Small}" FontSize="10" TextAlignment="Center" TextWrapping="Wrap"/>
+                  </StackPanel>
+                </Grid>
+                <TextBlock x:Name="TxtMonthlyStatsPeriod" Text="Bu ay: —" Foreground="{StaticResource Mut}" FontSize="10" TextWrapping="Wrap" Margin="0,5,0,0" TextAlignment="Center"/>
+                <TextBlock x:Name="TxtMonthlyStatsUpdated" Text="Güncelleme: —" Foreground="{StaticResource Mut}" FontSize="10" TextWrapping="Wrap" Margin="0,2,0,0" TextAlignment="Center"/>
+              </StackPanel>
+            </Border>
             <Border Style="{StaticResource CardStyle}" Padding="12,10">
               <StackPanel>
                 <TextBlock x:Name="TxtBlackout" Text="Zorla kapatma aralığı: —" Style="{StaticResource Small}" TextWrapping="Wrap"/>
@@ -976,6 +998,17 @@ $Xaml = @'
                 </Grid>
                 <TextBlock x:Name="TxtDailySummary" Text="İlk günlük özet, her gün saat 08:00 sonrasında otomatik hazırlanır." Style="{StaticResource Small}" TextWrapping="Wrap"/>
                 <TextBlock x:Name="TxtDailyReportAt" Text="" Style="{StaticResource Small}" Margin="0,6,0,0" Foreground="{StaticResource Mut}"/>
+              </StackPanel>
+            </Border>
+            <Border x:Name="MonthlyReportCard" Style="{StaticResource CardStyle}" Margin="0,4,0,10">
+              <StackPanel>
+                <Grid Margin="0,0,0,6">
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                  <TextBlock Grid.Column="0" Text="Aylık istatistik" Style="{StaticResource H2}" VerticalAlignment="Center"/>
+                  <Button x:Name="BtnOpenMonthlyReport" Grid.Column="1" Content="Raporu aç" Style="{StaticResource Btn}" Padding="12,5"/>
+                </Grid>
+                <TextBlock x:Name="TxtMonthlySummary" Text="İlk aylık istatistik, ayın başından itibaren otomatik hazırlanır." Style="{StaticResource Small}" TextWrapping="Wrap"/>
+                <TextBlock x:Name="TxtMonthlyReportAt" Text="" Style="{StaticResource Small}" Margin="0,6,0,0" Foreground="{StaticResource Mut}"/>
               </StackPanel>
             </Border>
             <Border Style="{StaticResource CardStyle}" Margin="0,4,0,0">
@@ -2484,6 +2517,58 @@ function Update-Overview {
             $dailyButton.Tag = $dailyPath
             $dailyButton.IsEnabled = ($dailyPath -and (Test-Path -LiteralPath $dailyPath))
             $dailyButton.ToolTip = $(if ($dailyButton.IsEnabled) { $dailyPath } else { 'Rapor hazır olduğunda burada açılabilir.' })
+        }
+
+        # --- AYLIK İSTATİSTİK ---
+        # Aylık rapor JSON'u: arıza / yeniden başlatma sayıları ve kaynak dağılımı.
+        $monthlySummary = ''
+        $monthlyAt = ''
+        $monthlyPath = ''
+        if ($hj) {
+            try { $monthlySummary = [string]$hj.monthlySummary } catch { }
+            try { $monthlyAt = [string]$hj.monthlyReportAt } catch { }
+            try { $monthlyPath = [string]$hj.monthlyReportPath } catch { }
+        }
+        $mIncBox = El $script:Win 'TxtMonthlyIncidentCount'
+        $mAutoBox = El $script:Win 'TxtMonthlyAutoRebootCount'
+        $mManualBox = El $script:Win 'TxtMonthlyManualRebootCount'
+        $mPeriodBox = El $script:Win 'TxtMonthlyStatsPeriod'
+        $mUpdatedBox = El $script:Win 'TxtMonthlyStatsUpdated'
+        if ($mIncBox) { $mIncBox.Text = '—' }
+        if ($mAutoBox) { $mAutoBox.Text = '—' }
+        if ($mManualBox) { $mManualBox.Text = '—' }
+        if ($mPeriodBox) { $mPeriodBox.Text = 'Bu ay: 08:00 sonrasında hazırlanır' }
+        if ($mUpdatedBox) { $mUpdatedBox.Text = 'Güncelleme: —' }
+        if ($monthlyPath) {
+            $monthlyJsonPath = [System.IO.Path]::ChangeExtension($monthlyPath, '.json')
+            $monthlyReport = Get-Json $monthlyJsonPath
+            if ($monthlyReport) {
+                if ($mIncBox -and $monthlyReport.PSObject.Properties['incidentCount']) { $mIncBox.Text = [string][int]$monthlyReport.incidentCount }
+                if ($mAutoBox -and $monthlyReport.PSObject.Properties['autoRebootCount']) { $mAutoBox.Text = [string][int]$monthlyReport.autoRebootCount }
+                if ($mManualBox -and $monthlyReport.PSObject.Properties['manualRebootCount']) { $mManualBox.Text = [string][int]$monthlyReport.manualRebootCount }
+                if ($mPeriodBox -and $monthlyReport.month) { $mPeriodBox.Text = 'Bu ay: ' + [string]$monthlyReport.month }
+                if ($mUpdatedBox) {
+                    if ($monthlyAt) { $mUpdatedBox.Text = 'Güncelleme: ' + $monthlyAt }
+                    elseif ($monthlyReport.generated) {
+                        try { $mUpdatedBox.Text = 'Güncelleme: ' + ([datetime]::Parse([string]$monthlyReport.generated, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime().ToString('dd.MM HH:mm')) }
+                        catch { $mUpdatedBox.Text = 'Son aylık rapor' }
+                    }
+                }
+            }
+        }
+        $monthlyBox = El $script:Win 'TxtMonthlySummary'
+        if ($monthlyBox) {
+            $monthlyBox.Text = $(if ($monthlySummary) { $monthlySummary } else { 'İlk aylık istatistik, ayın başından itibaren otomatik hazırlanır.' })
+        }
+        $monthlyTimeBox = El $script:Win 'TxtMonthlyReportAt'
+        if ($monthlyTimeBox) {
+            $monthlyTimeBox.Text = $(if ($monthlyAt) { 'Son rapor: ' + $monthlyAt } else { 'Henüz aylık istatistik raporu oluşturulmadı.' })
+        }
+        $monthlyButton = El $script:Win 'BtnOpenMonthlyReport'
+        if ($monthlyButton) {
+            $monthlyButton.Tag = $monthlyPath
+            $monthlyButton.IsEnabled = ($monthlyPath -and (Test-Path -LiteralPath $monthlyPath))
+            $monthlyButton.ToolTip = $(if ($monthlyButton.IsEnabled) { $monthlyPath } else { 'Rapor hazır olduğunda burada açılabilir.' })
         }
 
         $env = New-Object System.Collections.ArrayList
@@ -4459,6 +4544,10 @@ function Wire-UI {
     (El $script:Win 'BtnRepairNet').Add_Click({ Invoke-NetworkRepair })
     (El $script:Win 'BtnOpenDailyReport').Add_Click({
             $path = [string](El $script:Win 'BtnOpenDailyReport').Tag
+            if ($path -and (Test-Path -LiteralPath $path)) { Start-Process -FilePath 'notepad.exe' -ArgumentList ('"' + $path + '"') }
+        })
+    (El $script:Win 'BtnOpenMonthlyReport').Add_Click({
+            $path = [string](El $script:Win 'BtnOpenMonthlyReport').Tag
             if ($path -and (Test-Path -LiteralPath $path)) { Start-Process -FilePath 'notepad.exe' -ArgumentList ('"' + $path + '"') }
         })
     (El $script:Win 'BtnDiag').Add_Click({

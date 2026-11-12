@@ -4,6 +4,76 @@ Bu dosya s├╝r├╝m bazl─▒ de─şi┼şiklikleri tutar. S├╝r├╝
 panel ve host betikleri bu dosyay─▒ okur (`-Version` ile sorgulanabilir). S├╝r├╝mleme
 [semantic versioning](https://semver.org/lang/tr/) uyumludur.
 
+## [1.3.24] - 2026-11-12
+
+Günlük raporun yanına **aylık istatistik raporu** eklendi: bir ay içinde kaç kez
+arıza verildiği, kaç kez yeniden başlatıldığı ve bunların ne kadarının elle
+(kapatma/açma) yapıldığı tek raporda toplanıyor.
+
+### 🆕 Eklenen
+
+- **Aylık istatistik raporu (`diag/monthly-YYYY-MM.md` + `.json`).** Her gün saat
+  08:00 sonrasında bu ayın raporu yenilenir; ay değiştiğinde önceki ay **kapanır**
+  (dönem ay sonuna sabitlenir, sayılar dondurulur). 24 aylık geçmiş saklanır.
+- **Rapor içeriği:** arıza (ağ kesintisi) sayısı, gerçek yeniden başlatma sayısı ve
+  kaynak dağılımı (otomatik / elle-dış kaynak / bilinmiyor), **elle kapatma-açma
+  sayısı**, elle başlatılan ağ onarımı sayısı, panel düğmesiyle istenen restart
+  sayısı, kurtarılan/devam eden arıza, toplam-ortalama-en uzun kesinti süresi,
+  arıza görülen gün sayısı, gün bazlı dağılım tablosu, arıza sınıfı dağılımı,
+  başarısız kontrol dağılımı ve en sorunlu günler.
+- **Panelde "AYLIK İSTATİSTİK" kartı.** Kenar çubuğunda arıza / otomatik restart /
+  elle aç-kapa sayaçları; "Genel durum" sayfasında özet metni ve **"Raporu aç"**
+  düğmesi (günlük raporla aynı davranış).
+- **Aylık sayımlar günlük raporla aynı ayrıştırma kodundan gelir** (`Get-DailyDigest`).
+  İki ayrı ayrıştırıcı yazılsaydı "günlük 3 kesinti / aylık 11 kesinti" gibi
+  birbirini tutmayan sayılar çıkardı.
+- **Log rotasyonuna dayanıklılık.** Ay kapanırken, o ayın kayıtları log arşivinden
+  silinmişse önceki gün yazılmış raporun kayıtları birleştirilerek korunur
+  (`Merge-MonthlyEventList`); aynı olay iki kaynaktan gelirse tek sayılır.
+
+### 🐞 Düzeltilen
+
+- **Eski loglarda yeniden başlatma kaynağı artık çıkarılıyor.** Kaynak etiketi
+  (`kaynak=otomatik|elle`) yalnızca 1.3.23'ten sonraki log satırlarında var; eski
+  satırlar "kaynağı bilinmiyor" sayılıyordu ve gerekçesi *"her açılış aynı metinle
+  yazıldığı için ayırt edilemez"* idi — oysa log'da restart **talebinin** izi ayrı bir
+  satır olarak duruyor. Artık: talep sonrası 15 dk içinde açılış varsa **otomatik**,
+  talep **yoksa** **elle/dış kaynak** (kullanıcı kapatıp açmış / Windows Update /
+  güç kesintisi), talep iptal edilmişse yine **elle** (watchdog yapmamış). Yeni log
+  satırlarındaki açık etiket her zaman önceliklidir.
+- **Aylık rapor "elle aç-kapa 0 kez" diyordu.** 1.3.23 öncesi kayıtlar kaynağı
+  bilinmediği için hem otomatik hem elle sayaçları sıfırdı. Yukarıdaki çıkarımla
+  gerçek dağılım çıkarıldı: **Ekim 2026 = 29 otomatik + 5 elle aç-kapa**,
+  **Kasım 2026 = 9 otomatik + 2 elle aç-kapa** (0 bilinmiyor).
+- **Dönem sınırı çıkarımı:** talep satırı dönemin başından önce de olsa (örn.
+  31 Ekim 23:58 talebi → 1 Kasım 00:03 açılışı) dikkate alınır; aksi halde böyle
+  bir açılış yanlışlıkla "elle" sayılırdı.
+- **Boş önceki ay için kalıcı işaret:** önceki ayda hiç kayıt yoksa bu tespit bir
+  kez yapılır ve `.nodata` işaret dosyasıyla saklanır; her 5 dakikalık çevrimde ay
+  sonu istatistiği yeniden hesaplanıp log'a aynı INFO satırı yazılmaz.
+- Çıkarılan kaynaklar raporda **"log analizinden çıkarıldı"** notuyla ayrıca
+  belirtilir; tahmin ile gerçek kayıt karıştırılmaz.
+- `tests/Test-All.ps1` **523 kontrol** (0 hata).
+
+## [1.3.23] - 2026-11-06
+
+Günlük raporda elle yapılan kapatma/açma ve restart artık watchdog'un otomatik
+onarımı gibi gösterilmiyor; yeniden başlatmalar kaynağına göre etiketleniyor.
+
+### 🐞 Düzeltilen
+
+- **Elle reboot "otomatik onarım" gibi raporlanmıyor.** Günlük rapor her açılışı
+  "gerçek yeniden başlatma" sayıyor, kaynağını ayırt etmiyordu. Artık watchdog
+  restart istediğinde `kaynak=otomatik`, makine elle kapatılıp açıldığında veya
+  dış bir nedenle (Windows Update, güç kesintisi) yeniden başladığında
+  `kaynak=elle` yazılıyor. Özet, "Önemli olaylar" ve "Gerçek yeniden başlatmalar"
+  bölümleri otomatik / elle-dış kaynak / kaynağı bilinmeyen ayrımını gösteriyor.
+- **Elle reboot'ta "restart bütçeye yazıldı" denmiyor.** Bütçe yalnızca gerçek
+  otomatik restart'ta arttığı için elle açılışta log satırı "otomatik restart
+  değil, bütçeye yazılmadı" diyor. Eski (kaynaksız) log satırları geriye dönük
+  olarak "kaynak bilinmiyor" sayılıyor.
+- `tests/Test-All.ps1` **418 kontrol** (0 hata).
+
 ## [1.3.22] - 2026-11-06
 
 Ağ onarımı artık panelden istendiği anda, görünür ve yükseltilmiş kullanıcı
