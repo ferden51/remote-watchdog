@@ -3413,6 +3413,12 @@ function Sync-RebootAccounting {
                     "gecici kesinti" gorur cunku yeni reboot henuz eklenmemis. Kullanici "her
                     gun sormak istemiyor" dedigi icin gercek reboot olunca bugunun raporu
                     silinir; ayni dongunun Write-DailyReport'i onu yeniden uretir.
+
+                    AYLIK RAPOR DA SILINIR. Aylik rapor 60 dk tazelik korumasiyla saatte bir
+                    yenilenir; kapa-ac sonrasi aylik "elle ac-kapa" sayisi 1 saate kadar
+                    eski kalirdi (kullanici "aylik sayi artmadi" diye sordu). Gunluk raporla
+                    ayni desen: dosya silinir, ayni dongunun Write-MonthlyReport'i
+                    yeniden uretir. Onceki ayin kapanmis raporuna dokunulmaz.
                 #>
                 try {
                     $diagDir = Join-Path $BaseDir 'diag'
@@ -3420,6 +3426,9 @@ function Sync-RebootAccounting {
                     foreach ($ext in @('.json', '.md')) {
                         $oldReport = Join-Path $diagDir ('daily-' + $todayStamp + $ext)
                         if (Test-Path -LiteralPath $oldReport) { Remove-Item -LiteralPath $oldReport -Force -ErrorAction SilentlyContinue }
+                        $monthStamp = (Get-Date).ToString('yyyy-MM')
+                        $oldMonthly = Join-Path $diagDir ('monthly-' + $monthStamp + $ext)
+                        if (Test-Path -LiteralPath $oldMonthly) { Remove-Item -LiteralPath $oldMonthly -Force -ErrorAction SilentlyContinue }
                     }
                 } catch { }
                 return

@@ -2,7 +2,7 @@
     "algorithm":  "SHA256",
     "note":  "Bu dosyalar indirildikten sonra Verify-Hashes.ps1 ile dogrulanir. Manifesti degistirdiyseniz de guvenli de degildir: kaynak de ayni anda ele gecmis olabilir.",
     "files":  {
-                  "host\\RemoteHostWatchdog.ps1":  "EEA511B0B97A251A86FB6A3B65E18C216E21FD4A0F812A9E83302DBCDF44123B",
+                  "host\\RemoteHostWatchdog.ps1":  "B1CFAF5762955C1EF833C514AE14913511094938549B34F7E55D7074111CFBB9",
                   "client\\RemoteClientWatchdog.ps1":  "18FEAF25C39A0AAB973BF9D0E680E6DDF956A2A24CBD4EBCEB4B92FEEF7107A7",
                   "host\\Protect-OpenDocuments.ps1":  "507B335DA3707F7C30CB35EB2FBBD57628E096BF42EF313ABBD9FC233CFB247B",
                   "host\\Collect-Diagnostics.ps1":  "7A4174327E18E9CE32241B2FFDBDD42E1A0361AA6075D92371CD87821F1C3592",

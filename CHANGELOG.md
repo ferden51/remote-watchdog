@@ -51,6 +51,11 @@ arıza verildiği, kaç kez yeniden başlatıldığı ve bunların ne kadarını
 - **Boş önceki ay için kalıcı işaret:** önceki ayda hiç kayıt yoksa bu tespit bir
   kez yapılır ve `.nodata` işaret dosyasıyla saklanır; her 5 dakikalık çevrimde ay
   sonu istatistiği yeniden hesaplanıp log'a aynı INFO satırı yazılmaz.
+- **Kapa-aç sonrası aylık rapor hemen yenilenir.** Reboot, günlük raporu sildikten
+  sonra aynı çevrimde yeniden üretiyordu ama aylık rapor 60 dk tazelik korumasında
+  bekliyordu; kullanıcı kapa-aç yaptığında aylık "elle aç-kapa" sayısı bir saate
+  kadar eski kalıyordu. Artık reboot günlük raporla birlikte **aylık raporu da**
+  silip aynı çevrimde yeniden üretir (önceki ayın kapanmış raporuna dokunulmaz).
 - Çıkarılan kaynaklar raporda **"log analizinden çıkarıldı"** notuyla ayrıca
   belirtilir; tahmin ile gerçek kayıt karıştırılmaz.
 - `tests/Test-All.ps1` **523 kontrol** (0 hata).

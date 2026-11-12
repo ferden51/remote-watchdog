@@ -814,6 +814,9 @@ if ($Section -eq 0 -or $Section -eq 1) {
     Ok 'açık kaynak etiketi çıkarımı geçersiz kılıyor' (([string]$explicitBeatsInference.Reboots[0].source -eq 'elle') -and (-not [bool]$explicitBeatsInference.Reboots[0].sourceInferred))
     Ok 'günlük rapor çıkarılan kaynakları özetinde belirtiyor' ($legacyAutoDaily.Summary -match "1'i log analizinden çıkarıldı")
     Ok 'elle reboot log satiri butceye yazildi demiyor' (($hostText -match 'otomatik restart degil, butceye yazilmadi') -and ($hostText -match 'kaynak=elle') -and ($hostText -match 'kaynak=otomatik'))
+    <#  REBOOT SONRASI AYLIK RAPOR DA YENILENIR: 60 dk korumasinda bekleyen aylik
+        "elle ac-kapa" sayisi saatlerce eski kalmamali. Gunluk raporla ayni desen. #>
+    Ok 'reboot sonrası aylık rapor dosyası da silinip yenileniyor' (($hostText -match 'AYLIK RAPOR DA SILINIR') -and ($hostText -match 'oldMonthly = Join-Path \$diagDir') -and ($hostText -match 'monthStamp = \(Get-Date\)\.ToString'))
     Ok 'günlük rapor kesinti başlangıç/bitiş saatini ve süresini gösteriyor' ($dailyTest.Markdown -match '16\.10 21:33–21:46 \(yaklaşık 13 dk\)')
     Ok 'günlük rapor upstream teşhisini ve ICMP belirsizliğini insan dilinde yazar' (($dailyTest.Markdown -match 'Ağ geçidi yanıt veriyordu') -and ($dailyTest.Markdown -match 'ICMP engeli'))
     $emptyDaily = Get-DailyDigest -LogLines @() -OutageReports @() -PeriodStart ([datetime]'2026-10-16T08:00:00') -PeriodEnd ([datetime]'2026-10-17T08:00:00') -CurrentOk $true -CurrentSummary 'Internet=OK' -HostName 'DESKTOP-TEST' -Version 'test'
